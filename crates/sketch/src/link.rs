@@ -749,6 +749,15 @@ fn point_roles(curves: &[LCurve], point_count: usize) -> Vec<[usize; 10]> {
     roles
 }
 
+/// What [`Sketch::update_link_detail`] did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LinkUpdate {
+    /// The link changed shape and its entities were made again.
+    pub rebuilt: bool,
+    /// Constraints on geometry the rebuild took away (their ids); they were removed.
+    pub dropped: Vec<String>,
+}
+
 impl Sketch {
     pub fn link(&self, id: &str) -> Option<&Link> {
         self.links.iter().find(|l| l.id == id)
@@ -1079,6 +1088,20 @@ impl Sketch {
     /// sketch's own curves and constraints on it move to the new entities that match the old
     /// ones (`rebuild_link`). Returns `true` when it was rebuilt.
     pub fn update_link(&mut self, id: &str, geom: &[LinkGeom]) -> Result<bool> {
+        self.update_link_detail(id, geom).map(|u| u.rebuilt)
+    }
+
+    /// [`Sketch::update_link`], also telling which constraints a rebuild removed. A rebuilt
+    /// link's entities take the ids of the old ones in the same place (a point where a point
+    /// was, a line on the same line, a circle with the same centre and radius), so the
+    /// constraints and dimensions on them stay; only those on geometry that is gone are removed.
+    pub fn update_link_detail(&mut self, id: &str, geom: &[LinkGeom]) -> Result<LinkUpdate> {
+        let rebuilt = self.update_link_inner(id, geom)?;
+        Ok(LinkUpdate { rebuilt: rebuilt.is_some(), dropped: rebuilt.unwrap_or_default() })
+    }
+
+    /// `None` when the link kept its entities, else the ids of the constraints the rebuild removed.
+    fn update_link_inner(&mut self, id: &str, geom: &[LinkGeom]) -> Result<Option<Vec<String>>> {
         let Some(kind) = self.link(id).map(|l| l.kind) else {
             return Err(SketchError::Unknown(id.into()));
         };
@@ -1255,7 +1278,7 @@ impl Sketch {
                         }
                     }
                 }
-                return Ok(false);
+                return Ok(None);
             }
         }
         // A resized face can enumerate the same boundary in another order. Match the
@@ -1404,7 +1427,7 @@ impl Sketch {
                         nurbs.clone_from(value);
                     }
                 }
-                return Ok(false);
+                return Ok(None);
             }
             // A face resized by more than the match above allows (#9001: an angle's wall made
             // thicker moves the inner corner by more than a tenth of the face) is still the same
@@ -1462,7 +1485,7 @@ impl Sketch {
                     nurbs.clone_from(k);
                 }
             }
-            return Ok(false);
+            return Ok(None);
         }
         // A face seen edge-on was once saved as two lines on the same two points, one each way;
         // it is one line now. Keep the first line (an offset or a constraint may name it) and
@@ -1481,8 +1504,11 @@ impl Sketch {
             if let Some(p) = self.points.get_mut(p1) {
                 p.pos = b;
             }
+            let before: Vec<String> = self.constraints.iter().map(|c| c.id.clone()).collect();
             self.remove_curves(&[second]);
-            return Ok(true);
+            // Constraints on the dropped line go with it, and are reported as a rebuild's are.
+            let dropped = before.into_iter().filter(|c| !self.constraints.iter().any(|k| &k.id == c)).collect();
+            return Ok(Some(dropped));
         }
         // Rebuild: new entities, and what the sketch held on the old ones moves to them. A curve
         // that was switched to construction stays construction: each new curve takes the line
@@ -1493,7 +1519,12 @@ impl Sketch {
                 Some((std::mem::discriminant(&self.curves.get(*ci)?.kind), self.curve_link_geom(*ci)?.spot(), self.curves.get(*ci)?.construction))
             })
             .collect();
+        let before: std::collections::BTreeSet<String> = self.constraints.iter().map(|c| c.id.clone()).collect();
         self.rebuild_link(id, &lay, &points, &curves, cur.as_deref())?;
+        // What the rebuild could not move to a matching new entity went: those constraints are
+        // reported, so the sketch's warning can name them.
+        let kept: std::collections::BTreeSet<&str> = self.constraints.iter().map(|c| c.id.as_str()).collect();
+        let dropped: Vec<String> = before.into_iter().filter(|c| !kept.contains(c.as_str())).collect();
         if was.iter().any(|(.., construction)| *construction) && was.len() <= 4096 {
             for ci in self.link_curves(id) {
                 let Some(spot) = self.curve_link_geom(ci).map(|g| g.spot()) else { continue };
@@ -1504,7 +1535,7 @@ impl Sketch {
                 }
             }
         }
-        Ok(true)
+        Ok(Some(dropped))
     }
 
     /// Where this sketch's points were in `stored`, the same sketch before its links were
