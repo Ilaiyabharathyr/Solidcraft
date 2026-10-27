@@ -17,7 +17,7 @@ use crate::schema::sketch::{
 use crate::schema::sketch_dimension::{DimensionResult, SketchDimensionParams};
 use crate::schema::sketch_dimensioned::{DrawDimensionedParams, DrawDimensionedResult};
 use crate::schema::sketch_session::{
-    Activated, Attachment, ChainParams, ChainResult, ConstructionParams, ConstructionResult, CreateParams, CreateResult, DeleteParams, DeleteResult,
+    Activated, Attachment, BrokenLink, ChainParams, ChainResult, ConstructionParams, ConstructionResult, CreateParams, CreateResult, DeleteParams, DeleteResult,
     DimensionTextParams, DimensionTextResult, DragEndParams, DragEndResult, DragParams, DragResult, Frame, MovePointParams, MovePointResult,
     MovePointsParams, MovePointsResult, MovedPoint, OptionsParams, OptionsReply, OptionsResult, SketchOptions, SolveParams, SolveResult,
 };
@@ -370,7 +370,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .enabled(in_sketch)
         .contract(&DELETE_CONTRACT)
         .output(output_schema_for::<DeleteResult>)
-        .params("entities: [curve, point or constraint ids]"),
+        .params("entities: [curve, point or constraint ids]. Deleting part of a projection leaves those source edges out of it; where they cannot be told apart, what remains is broken off as normal geometry (listed in `broken_links` with why)"),
     CommandSpec::new("sketch.move_point", "Drag Sketch Point", crate::checked!("sketch.move_point", move_point))
         .in_sketch_part()
         .icon("sketch_move")
@@ -4668,7 +4668,7 @@ fn sketch_delete(s: &mut Session, p: &Value) -> Result<Value> {
         .and_then(|id| Some((id, s.doc.sketch(id).ok()?)))
         .map(|(id, sk)| super::sketch_project::link_pieces(s, &s.doc, id, &super::sketch_links::touched_links(sk, &ids)))
         .unwrap_or_default();
-    let (n, info) = edit_solve(s, p, cmd, false, |sk, doc| {
+    let ((n, broken), info) = edit_solve(s, p, cmd, false, |sk, doc| {
         let mut curves = Vec::new();
         let mut points = Vec::new();
         let mut cons = Vec::new();
@@ -4726,7 +4726,7 @@ fn sketch_delete(s: &mut Session, p: &Value) -> Result<Value> {
             sk.refresh_offsets()?;
         }
         sk.constraints.retain(|c| !cons.contains(&c.id));
-        super::sketch_links::omit_removed(sk, &pieces, &curves, &points, cmd)?;
+        let (kept, broken) = super::sketch_links::omit_removed(sk, &pieces, &curves, &points, cmd)?;
         let pids: Vec<String> = points.iter().filter_map(|q| sk.points.get(*q).map(|x| x.id.clone())).collect();
         // Linked geometry from the model, by its entity count before the delete (#5098).
         let size = |sk: &Sketch, id: &str| sk.link_curves(id).len() + sk.link_points(id).len();
@@ -4739,22 +4739,25 @@ fn sketch_delete(s: &mut Session, p: &Value) -> Result<Value> {
         sk.remove_curves(&curves);
         let pidx: Vec<usize> = pids.iter().filter_map(|id| sk.point_index(id)).collect();
         sk.remove_points(&pidx);
-        // Part of a link deleted: the rest is broken off where it is. Still linked, the next
-        // refresh would rebuild the whole link, deleted curves and all, as normal geometry.
+        // Part of a link deleted that its source edges cannot leave out: the rest is broken off
+        // where it is. Still linked, the next refresh would rebuild the whole link, deleted
+        // curves and all, as normal geometry.
         for (id, before) in &linked {
-            if sk.link(id).is_some() && size(sk, id) < *before {
+            if sk.link(id).is_some() && !kept.contains(id) && size(sk, id) < *before {
                 sk.break_link(id)?;
             }
         }
         if model_edit {
             doc.prune_model_params();
         }
-        Ok(ids.len())
+        Ok((ids.len(), broken))
     })?;
     if model_edit {
         s.doc_mut().prune_model_params();
     }
-    reply(cmd, DeleteResult { deleted: n, sketch: info, param_warnings: Vec::new() })
+    // What remained of these projections is normal geometry now, and why.
+    let broken_links = broken.into_iter().map(|(link, why)| BrokenLink { link, why }).collect();
+    reply(cmd, DeleteResult { deleted: n, sketch: info, broken_links, param_warnings: Vec::new() })
 }
 
 fn move_point(s: &mut Session, p: &Value) -> Result<Value> {
