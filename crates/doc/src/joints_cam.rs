@@ -947,6 +947,7 @@ mod tests {
             offset_xy: [0.0; 2],
             captured: None,
             constraint: None,
+            dynamics: Vec::new(),
         };
         let occ = |id: u64, grounded: bool| crate::Occurrence {
             id,

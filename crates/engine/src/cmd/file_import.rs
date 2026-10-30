@@ -751,6 +751,7 @@ fn add_rigid_joints(s: &mut Session, pairs: &[(u64, u64, Mat)]) -> Result<Vec<u6
                 offset_xy: [0.0; 2],
                 captured: None,
                 constraint: None,
+                dynamics: Vec::new(),
             })
         })
         .collect::<Result<_>>()?;
