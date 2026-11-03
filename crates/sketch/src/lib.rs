@@ -67,7 +67,7 @@ pub use freeform_offset::{FreeformOffset, FreeformOffsetOutput, OFFSET_TOLERANCE
 pub use link::{Link, LinkGeom, LinkKind, LinkSource, MAX_LINK_ENTITIES, SKETCH_AXIS_HALF, TextExprs, sketch_axis_geom};
 pub use model::{
     CEILING_CONSTRAINTS, CEILING_CURVES, CEILING_POINTS, Constraint, ConstraintKind, Curve, CurveKind, MAX_CONSTRAINTS, MAX_COORD, MAX_CURVES,
-    MAX_POINTS, PointExprs, SPoint, Sketch, SketchBatch, SketchError, SketchView, TwoCircles,
+    MAX_POINTS, PointExprs, SPoint, Sketch, SketchBatch, SketchError, SketchFrame, SketchView, TwoCircles,
 };
 pub use nurbs::Nurbs;
 pub use offset::OffsetChain;
@@ -90,7 +90,8 @@ pub use text::{MAX_TEXT_CHARS, TextAlign, TextMetrics, TextStyle, TextVerticalAl
 pub use thin::{MAX_THIN_SEGMENTS, thin_wall_regions};
 pub use wire::{MAX_FIT_POINTS, MAX_WIRE_POINTS, Wire, WireArc, WireCurve, WireSpace, arc_from_3_points, arc_polyline, arc_sweep, fit_polyline};
 pub use wire_solve::{
-    Axis, MAX_WIRE_LENGTH, MAX_WIRE_ROWS, MAX_WIRE_VARS, OriginPlane, PointExprs3, WireConstraint, WireConstraintKind, WirePoint, WireReport,
+    Axis, MAX_WIRE_LENGTH, MAX_WIRE_ROWS, MAX_WIRE_VARS, ModelPlane, OriginPlane, PlaneOf, PointExprs3, WireConstraint, WireConstraintKind,
+    WirePoint, WireReport,
 };
 
 #[cfg(test)]
