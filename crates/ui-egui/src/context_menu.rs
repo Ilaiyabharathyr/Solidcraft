@@ -2691,6 +2691,7 @@ pub fn check_target(app: &SolveApp, target: &Target) -> Result<(), String> {
         Target::Sketch { id } | Target::ReplaceSketchFile { sketch: id, .. } => {
             doc.feature(*id).is_some_and(|f| matches!(f.kind, FeatureKind::Sketch { .. }))
         }
+        Target::SketchLink { sketch, link } => doc.sketch(*sketch).is_ok_and(|sk| sk.link(link).is_some()),
         // Construction geometry, as the browser's Construction folder lists it.
         Target::Plane { id } => doc.feature(*id).is_some_and(|f| f.kind.is_construction()),
         Target::Feature { id } => feature(*id),
