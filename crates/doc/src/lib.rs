@@ -40,6 +40,7 @@ pub mod format;
 mod format_offsets;
 pub mod frame;
 pub mod gpu_plan;
+pub mod gusset;
 mod history_names;
 pub mod hole_reference;
 pub mod ids;
