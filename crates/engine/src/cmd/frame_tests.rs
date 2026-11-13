@@ -759,6 +759,16 @@ fn a_butt_at_150_degrees_is_flush() {
 }
 
 #[test]
+fn a_nearly_straight_butt_is_refused() {
+    // At 175° T would run back 458 mm, past the far end of the 300 mm U.
+    let deg = 175.0f64.to_radians();
+    let (mut s, r) = polyline_frame(json!([[400, 0], [0, 0], [300.0 * deg.cos(), 300.0 * deg.sin()]]), "butt");
+    let e = r.unwrap_err();
+    assert!(e.contains("Corner at (0, 0, 0) is too flat to butt"), "{e}");
+    assert!(bodies(&mut s).is_empty());
+}
+
+#[test]
 fn an_override_changes_only_its_corner() {
     let mut s = Session::default();
     rectangle_frame(&mut s);

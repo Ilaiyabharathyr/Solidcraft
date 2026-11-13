@@ -127,10 +127,21 @@ fn cut_members(
     for (c, (kind, flip)) in corners.iter().zip(finishes) {
         // A Coped Butt's U is coped to T (the pair), not cut by a plane: not done yet, so U stays square.
         let (cuts, _cope) = frame_corners::corner_cuts(kind, flip, c, segments, placed, regions, sketch_x)?;
-        for (m, at_start, cut) in cuts {
-            let ext = frame_corners::away(segments, (m, at_start))
+        for (k, (m, at_start, cut)) in cuts.into_iter().enumerate() {
+            let away = frame_corners::away(segments, (m, at_start));
+            let ext = away
                 .and_then(|w| frame_corners::extension(&placed(m, c.point), regions, c.point, w, &cut))
                 .ok_or_else(|| DocError::Invalid(format!("the member on line `{}` can't be built out to its corner cut", id(m))))?;
+            // A butt's first cut is T's. T must not run back past the far end of U, the corner's other member.
+            if k == 0 && kind.flips() {
+                let [(e0, _), (e1, _)] = c.ends;
+                let u = if e0 == m { e1 } else { e0 };
+                let u_len = segments.get(u).map_or(0.0, |(_, a, b)| a.dist(*b));
+                let u_reach = away.map_or(0.0, |w| frame_corners::reach(&placed(u, c.point), regions, c.point, -w));
+                if ext - 1.0 > u_len + u_reach {
+                    return Err(frame_corners::corner_error(c.point, "too flat to butt"));
+                }
+            }
             if let Some(end) = ends.get_mut(m).and_then(|e| e.get_mut(usize::from(!at_start))) {
                 *end = Some((cut, ext));
             }

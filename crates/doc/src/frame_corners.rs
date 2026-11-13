@@ -113,6 +113,12 @@ pub fn find_corners(segments: &[(String, Vec3, Vec3)]) -> Vec<Corner> {
     corners
 }
 
+/// "Corner at (x, y, z) is {what}", each coordinate to 2 decimals without trailing zeros.
+pub fn corner_error(p: Vec3, what: &str) -> DocError {
+    let r = |c: f64| (c * 100.0).round() / 100.0 + 0.0;
+    DocError::Invalid(format!("Corner at ({}, {}, {}) is {what}", r(p.x), r(p.y), r(p.z)))
+}
+
 /// A member's unit direction away from the corner at its end `(member, at_start)`.
 pub fn away(segments: &[(String, Vec3, Vec3)], (m, at_start): (usize, bool)) -> Option<Vec3> {
     let (_, a, b) = segments.get(m)?;
@@ -197,8 +203,7 @@ pub fn corner_cuts(
     }
     let p = corner.point;
     if angle < MIN_INTERIOR_DEG.to_radians() {
-        let r = |c: f64| (c * 100.0).round() / 100.0 + 0.0;
-        return Err(DocError::Invalid(format!("Corner at ({}, {}, {}) is too sharp to finish", r(p.x), r(p.y), r(p.z))));
+        return Err(corner_error(p, "too sharp to finish"));
     }
     let [e0, e1] = corner.ends;
     let dir = |e: (usize, bool)| away(segments, e).ok_or_else(|| DocError::Invalid(format!("member {} of a corner has no length", e.0)));
