@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use solidcore_record::{Plane, Region2, Vec2, Vec3};
 use solidcraft_geom::{Aabb2, Ring};
-use solidcraft_kernel as kernel;
+use solidcraft_kernel::{self as kernel, BoolOp};
 use solidcraft_sketch::CurveKind;
 
 use super::{ModelBody, ModelState, SolvedSketch, new_name, path_in_frame, select_profiles, sketch_in_feature_frame, val};
@@ -87,8 +87,9 @@ fn one_solid(mut bodies: Vec<kernel::Body>, id: &str) -> Result<kernel::Body> {
 /// as without corners). A corner is finished as its override in `overrides` says (the override
 /// naming its two lines, in either order), else as `finish` (type, flip) says. A cut member is
 /// built past each cut end far enough to reach the whole cut, then cut there; the cut face is
-/// named `corner_start` or `corner_end`. `placed(m, p)` is member m's section plane, square to
-/// its line, placed at `p`.
+/// named `corner_start` or `corner_end`. A Coped Butt's U is built out across T and, after every
+/// plane cut, loses T's filled shape, keeping its largest piece. `placed(m, p)` is member m's
+/// section plane, square to its line, placed at `p`.
 fn cut_members(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
@@ -122,11 +123,13 @@ fn cut_members(
             *f = (o.corner, o.flip);
         }
     }
-    // Each member's cut at its [start, end], and how far past that end it is built.
-    let mut ends: Vec<[Option<(Cut, f64)>; 2]> = vec![[None, None]; segments.len()];
+    // Each member's cut at its [start, end] (`None`: a coped end, built out but not cut by a
+    // plane), and how far past that end it is built.
+    let mut ends: Vec<[Option<(Option<Cut>, f64)>; 2]> = vec![[None, None]; segments.len()];
+    // Each Coped Butt's (T, U): U loses T's filled shape once every plane cut is made.
+    let mut copes = Vec::new();
     for (c, (kind, flip)) in corners.iter().zip(finishes) {
-        // A Coped Butt's U is coped to T (the pair), not cut by a plane: not done yet, so U stays square.
-        let (cuts, _cope) = frame_corners::corner_cuts(kind, flip, c, segments, placed, regions, sketch_x)?;
+        let (cuts, cope) = frame_corners::corner_cuts(kind, flip, c, segments, placed, regions, sketch_x)?;
         for (k, (m, at_start, cut)) in cuts.into_iter().enumerate() {
             let away = frame_corners::away(segments, (m, at_start));
             let ext = away
@@ -143,20 +146,33 @@ fn cut_members(
                 }
             }
             if let Some(end) = ends.get_mut(m).and_then(|e| e.get_mut(usize::from(!at_start))) {
-                *end = Some((cut, ext));
+                *end = Some((Some(cut), ext));
             }
         }
-    }
-    let mut out = Vec::with_capacity(segments.len());
-    for (m, ((id, a, b), [start, end])) in segments.iter().zip(ends).enumerate() {
-        if start.is_none() && end.is_none() {
-            out.push(None);
-            continue;
+        let Some((t, u)) = cope else { continue };
+        // U is built out across the whole of T, to past T's far side: the cope trims it back.
+        let (Some(&te), Some(&ue)) = (c.ends.iter().find(|e| e.0 == t), c.ends.iter().find(|e| e.0 == u)) else { continue };
+        let reached = (frame_corners::away(segments, te), frame_corners::away(segments, ue));
+        let ext = match reached {
+            (Some(wt), Some(wu)) => (wu - wt * wu.dot(wt)).normalized().and_then(|n| {
+                let far = Cut { origin: c.point - n * frame_corners::reach(&placed(t, c.point), regions, c.point, -n), normal: n };
+                frame_corners::extension(&placed(u, c.point), regions, c.point, wu, &far)
+            }),
+            _ => None,
+        };
+        let ext = ext.ok_or_else(|| DocError::Invalid(format!("the member on line `{}` can't be built out to its corner", id(u))))?;
+        if let Some(end) = ends.get_mut(u).and_then(|e| e.get_mut(usize::from(!ue.1))) {
+            *end = Some((None, ext));
         }
+        copes.push((t, u));
+    }
+    // Member m built out at its cut ends and cut there, from `regions`.
+    let build = |m: usize, regions: &[Region2]| -> Result<Traced> {
+        let ((id, a, b), [start, end]) = segments.get(m).zip(ends.get(m)).ok_or_else(|| DocError::Invalid(format!("no member {m}")))?;
         let (lo, hi) = (start.map_or(0.0, |c| c.1), end.map_or(0.0, |c| c.1));
         let mut t = crate::lineage::numbered_tool(one_solid(kernel::extrude(&placed(m, *a), regions, -lo, a.dist(*b) + hi)?, id)?);
         for (cut, role) in [(start, "corner_start"), (end, "corner_end")] {
-            let Some((cut, _)) = cut else { continue };
+            let Some((Some(cut), _)) = cut else { continue };
             let plane =
                 Plane::from_normal(cut.origin, cut.normal).ok_or_else(|| DocError::Invalid(format!("line `{id}`: a corner cut has no plane")))?;
             let (part, tool) = kernel::half_space(&t.body, &plane, true)?;
@@ -165,10 +181,39 @@ fn cut_members(
             let tool = crate::lineage::ProfileRoles { sketch: None, region: None, caps: [Some(role.into()), None], thin: None }.tool(tool, None);
             t = Traced::step(part, &[&t, &tool]);
         }
+        Ok(t)
+    };
+    let mut out = Vec::with_capacity(segments.len());
+    for (m, (id, _, _)) in segments.iter().enumerate() {
+        if ends.get(m).is_none_or(|e| e.iter().all(Option::is_none)) {
+            out.push(None);
+            continue;
+        }
+        let t = build(m, regions)?;
         if t.body.lumps()?.len() > 1 {
             return Err(DocError::Invalid(format!("the member on line `{id}` is cut into pieces by its corners")));
         }
         out.push(Some(t));
+    }
+    // Copes after every plane cut. T filled is T built from its outlines alone, holes closed;
+    // U keeps its largest piece (what lies past T, and slivers on T's far side, go).
+    let outlines: Vec<Region2> = regions.iter().map(|r| Region2 { outer: r.outer.clone(), holes: Vec::new() }).collect();
+    for (t, u) in copes {
+        let filled = crate::lineage::numbered_tool(build(t, &outlines)?.body);
+        let Some(traced) = out.get_mut(u).and_then(Option::as_mut) else { continue };
+        let gone = || DocError::Invalid(format!("the member on line `{}` was cut away completely", id(u)));
+        let cut = kernel::boolean(&traced.body, &filled.body, BoolOp::Cut)?.ok_or_else(gone)?;
+        let cut = Traced::step(cut, &[traced, &filled]);
+        let lumps = cut.body.lumps()?;
+        let lineages = crate::lineage::Lineage::lumps(&cut.body, cut.lineage.as_ref(), &lumps);
+        let mut best: Option<(f64, Traced)> = None;
+        for (body, lineage) in lumps.into_iter().zip(lineages) {
+            let v = kernel::measure_mass(&body)?.volume;
+            if best.as_ref().is_none_or(|(most, _)| v > *most) {
+                best = Some((v, Traced { body, lineage, recipe: None }));
+            }
+        }
+        *traced = best.ok_or_else(gone)?.1;
     }
     Ok(out)
 }

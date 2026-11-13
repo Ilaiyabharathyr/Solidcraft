@@ -728,6 +728,33 @@ fn flip_runs_the_short_sides_through() {
 }
 
 #[test]
+fn a_coped_box_tube_keeps_slivers_in_the_through_member_radii() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let r = run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "coped_butt"}));
+    let (bottom, left) = bottom_and_left(&mut s);
+    // T as in Butt; U's slivers fill T's outer radius (6), down to 20 − 6.
+    assert!((bottom.2[0] + 20.0).abs() < 1e-6 && (bottom.3[0] - 620.0).abs() < 1e-6, "{r} {bottom:?}");
+    assert!((left.2[1] - 14.0).abs() < 1e-3, "{left:?}");
+    assert!((left.3[1] - 386.0).abs() < 1e-3, "{left:?}");
+    assert_eq!(bodies(&mut s).len(), 4);
+}
+
+#[test]
+fn a_coped_round_tube_is_fishmouthed() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let profile = json!({"kind": "round_tube", "diameter": 40, "wall": 3});
+    let r = run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": profile, "corner": "coped_butt"}));
+    let (bottom, left) = bottom_and_left(&mut s);
+    assert!((bottom.2[0] + 20.0).abs() < 1e-6 && (bottom.3[0] - 620.0).abs() < 1e-6, "{r} {bottom:?}");
+    // U's tips reach T's centreline at its sides.
+    assert!(left.2[1].abs() < 1e-3 && (left.3[1] - 400.0).abs() < 1e-3, "{left:?}");
+    let area = PI * (20.0 * 20.0 - 17.0 * 17.0);
+    assert!(left.1 > area * 360.0 && left.1 < area * 400.0, "{left:?} vs {}..{}", area * 360.0, area * 400.0);
+}
+
+#[test]
 fn butts_at_70_and_110_degrees_meet_flush() {
     for deg in [70.0f64, 110.0] {
         let (c, sn) = (deg.to_radians().cos(), deg.to_radians().sin());
