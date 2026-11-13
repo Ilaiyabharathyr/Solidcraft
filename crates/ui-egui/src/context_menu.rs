@@ -129,6 +129,8 @@ pub enum Target {
     },
     /// The browser's Analysis folder.
     Analysis,
+    /// The tubes picked in the Frame Member dialog: Remove Tube (#15705).
+    FrameTubes,
     /// A component's Bodies, Sketches or Construction folder, under the design (`scope` `c0`)
     /// or a placement (`o:<path>`).
     Folder {
@@ -390,6 +392,7 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
         Target::ViewGizmo => crate::view_gizmo::menu_items(app),
         Target::Section { plane } => crate::browser::section_items(app, *plane),
         Target::Analysis => crate::browser::analysis_items(app),
+        Target::FrameTubes => crate::dialogs_frame::menu_items(app),
         Target::Joint { id } => joint_items(app, *id),
         Target::Link { index } => link_items(app, *index),
         Target::ToolbarCommand { id } => crate::toolbar_custom::command_items(app, id),
@@ -1638,6 +1641,9 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
         }
         "ui.delete" if item.params.is_some() => crate::delete::request(app, p),
         "ui.delete" => delete(app),
+        "ui.removeTubes" => {
+            crate::dialogs_frame::remove_picked(app);
+        }
         "ui.horizontalConstraint" | "ui.verticalConstraint" => {
             let selection = app.session.selection.clone();
             let keep_midpoints = selection.iter().any(|s| matches!(s, Sel::SketchMidpoint { .. }));
@@ -2584,6 +2590,7 @@ pub fn check_target(app: &SolveApp, target: &Target) -> Result<(), String> {
         // Shown or hidden, the browser lists it, in the Analysis folder while it has any plane.
         Target::Section { plane } => app.session.section.iter().chain(&app.session.section_hidden).any(|c| c.id == *plane),
         Target::Analysis => !app.session.section.is_empty() || !app.session.section_hidden.is_empty(),
+        Target::FrameTubes => matches!(app.dialog.as_ref().map(|d| &d.kind), Some(crate::dialogs::Kind::Frame(m)) if !m.picked_tubes.is_empty()),
     };
     if found {
         return Ok(());
