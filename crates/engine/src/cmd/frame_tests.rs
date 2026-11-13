@@ -520,6 +520,73 @@ fn members_undo_and_survive_save_and_reopen() {
     assert_eq!(bodies(&mut s).len(), 4);
 }
 
+/// The first two lines of the rectangle frame, by id.
+fn two_lines(s: &Session) -> (String, String) {
+    let l = sketch_lines(s, "Frame");
+    (l[0].0.clone(), l[1].0.clone())
+}
+
+#[test]
+fn corner_settings_are_taken_and_saved() {
+    use solidcraft_doc::frame::{CornerOverride, CornerType};
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let (l1, l2) = two_lines(&s);
+    run(
+        &mut s,
+        "frame.member",
+        json!({"sketch": "Frame", "profile": tube(), "corner": "butt", "flip": true,
+               "corners": [{"members": [l1, l2], "corner": "mitre", "flip": false}]}),
+    );
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let kind = &reopened.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().kind;
+    let solidcraft_doc::FeatureKind::FrameMember { corner, flip, corners, .. } = kind else { panic!("not a frame member") };
+    assert_eq!((*corner, *flip), (CornerType::Butt, true));
+    assert_eq!(*corners, [CornerOverride { members: [l1, l2], corner: CornerType::Mitre, flip: false }]);
+}
+
+#[test]
+fn bad_corner_settings_are_refused() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let (l1, l2) = two_lines(&s);
+    let ok = json!({"members": [l1, l2], "corner": "mitre"});
+    let many: Vec<Value> = (0..=solidcraft_doc::frame::MAX_MEMBERS).map(|_| ok.clone()).collect();
+    let cases = [
+        ("corner", json!({"corner": "round"})),
+        ("flip", json!({"flip": "yes"})),
+        ("corners", json!({"corners": "mitre"})),
+        ("corners", json!({"corners": [{"members": [l1], "corner": "mitre"}]})),
+        ("corners", json!({"corners": [{"members": [l1, "nope"], "corner": "mitre"}]})),
+        ("corners", json!({"corners": [{"members": [l1, l1], "corner": "mitre"}]})),
+        ("corners", json!({"corners": [ok, {"members": [l2, l1], "corner": "butt"}]})),
+        ("corners", json!({"corners": many})),
+    ];
+    for (key, extra) in cases {
+        let mut p = json!({"sketch": "Frame", "profile": tube()});
+        for (k, v) in extra.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        let e = s.execute("frame.member", &p).unwrap_err().to_string();
+        assert!(e.contains(&format!("`{key}`")), "{extra:.80}: {e}");
+    }
+    assert!(s.doc.features.iter().all(|f| !matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })));
+}
+
+#[test]
+fn a_design_without_corner_settings_builds_as_before() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube()}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 4);
+    assert!(bs.iter().any(|b| near3(b.2, [0.0, -20.0, -20.0]) && near3(b.3, [600.0, 20.0, 20.0])), "{bs:?}");
+    let json = s.doc.to_json();
+    for key in ["\"corner\"", "\"flip\"", "\"corners\""] {
+        assert!(!json.contains(key), "{key} saved");
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Regressions from the adversarial review of #4003
 

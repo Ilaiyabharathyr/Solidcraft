@@ -24,7 +24,7 @@ use serde_json::{Map, Value, json};
 use solidcore_record::Vec2;
 use solidcraft_doc::Expr;
 use solidcraft_doc::frame::sizes::Family;
-use solidcraft_doc::frame::{self, Anchor, MAX_MEMBERS, Profile, ProfileSpec};
+use solidcraft_doc::frame::{self, Anchor, CornerOverride, CornerType, MAX_MEMBERS, Profile, ProfileSpec};
 
 use super::check::{keyed, located, whole};
 use super::motion::require;
@@ -471,6 +471,69 @@ pub struct ProfileInsertResult {
 // frame.member
 // ---------------------------------------------------------------------------------------------
 
+/// How two members are finished where they meet, as `CornerType` is spelled in JSON.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CornerParam(pub CornerType);
+
+impl<'de> Deserialize<'de> for CornerParam {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        serde_json::from_value::<CornerType>(Value::deserialize(d)?)
+            .map(CornerParam)
+            .map_err(|_| D::Error::custom(whole("`corner` must be none, mitre, butt or coped_butt")))
+    }
+}
+
+impl JsonSchema for CornerParam {
+    fn schema_name() -> Cow<'static, str> {
+        "CornerParam".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "How two members ending at one point are cut.",
+            "type": "string",
+            "enum": ["none", "mitre", "butt", "coped_butt"]
+        })
+    }
+}
+
+/// `corners`: up to 1000 corner overrides, as `frame.member` reads them. Whether the lines are
+/// the feature's and meet at a corner is the handler's to check.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CornersParam(pub Vec<CornerOverride>);
+
+impl<'de> Deserialize<'de> for CornersParam {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let fail = || D::Error::custom(whole(format!("`corners` must be a list of up to {MAX_MEMBERS} corner overrides")));
+        let Value::Array(a) = Value::deserialize(d)? else { return Err(fail()) };
+        if a.len() > MAX_MEMBERS {
+            return Err(fail());
+        }
+        let entry = || D::Error::custom(whole("`corners` entries must be {members: [line id, line id], corner, flip?}"));
+        a.into_iter().map(|v| serde_json::from_value(v).map_err(|_| entry())).collect::<Result<_, _>>().map(CornersParam)
+    }
+}
+
+impl JsonSchema for CornersParam {
+    fn schema_name() -> Cow<'static, str> {
+        "CornersParam".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "Corners finished their own way: the lines of the two members that meet there, the corner type, and whether the other member runs through.",
+            "type": "array", "maxItems": MAX_MEMBERS,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "members": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2},
+                    "corner": {"type": "string", "enum": ["none", "mitre", "butt", "coped_butt"]},
+                    "flip": {"type": "boolean"}
+                },
+                "required": ["members", "corner"]
+            }
+        })
+    }
+}
+
 /// `lines`: one to 1000 curve ids, none twice, as `frame.member` reads them (a single id isn't
 /// taken).
 #[derive(Clone, Debug, PartialEq)]
@@ -755,6 +818,16 @@ pub struct FrameMemberKeys {
     /// when the profile's size changes.
     #[serde(default)]
     pub locate: Option<[f64; 2]>,
+    /// How two members ending at one point are cut: `none` (ends square to their lines),
+    /// `mitre`, `butt` or `coped_butt`. Default: none.
+    #[serde(default)]
+    pub corner: Option<CornerParam>,
+    /// With a butt or coped butt: the other member runs through. Default: false.
+    #[serde(default)]
+    pub flip: Option<bool>,
+    /// Corners finished their own way, each named by the lines of its two members.
+    #[serde(default)]
+    pub corners: Option<CornersParam>,
     /// How far the profile turns about the line, a number of degrees or an expression. Default:
     /// 0, which puts its y as near world up as the line allows (a vertical member's x along
     /// world X).

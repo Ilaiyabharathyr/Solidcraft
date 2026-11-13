@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use solidcore_record::{Loop2, Seg2, Vec2};
 use solidcraft_doc::construct::{DatumItem, GeoRef};
 use solidcraft_doc::frame::sizes::{self, Family};
-use solidcraft_doc::frame::{self, Anchor, MemberPair, MemberProfile, Profile, ProfileSpec};
+use solidcraft_doc::frame::{self, Anchor, CornerOverride, CornerType, MemberPair, MemberProfile, Profile, ProfileSpec};
 use solidcraft_doc::{FeatureKind, SketchId};
 use solidcraft_sketch::Sketch;
 
@@ -56,7 +56,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params(concat!(
         "sketch?: the frame sketch (id or name; 2D or 3D); lines?: [curve ids] (one member each; default: every straight line drawn in the sketch: not construction, not projected or otherwise linked, not of no length); pairs?: [{a, b}] (one straight member from point a to point b each, after the lines' members, found again whenever the design changes; a and b are point references: {vertex: [x,y,z]}, {sketch, point} (a 3D sketch node as `wire:index`), {construct_point: name}, a snap point or the origin, as saved ({type, …}) too; typed coordinates are not points here; each pair is named pair1, pair2… and a pair's id is never given again; Edit Feature gives back the pairs it keeps with their `id` and `next_pair`, and an `id` without `next_pair` is refused); give `sketch`, `pairs` or both; ",
         profile_doc!(),
-        " | profile_sketch: a sketch whose profile is the section, in its own x and y around its origin, with profiles?: picks as solid.extrude takes them (default: its material, nested loops alternating, so two circles make a tube); anchor?: origin|center|centroid|top_left|top|top_right|left|right|bottom_left|bottom|bottom_right (the profile point that sits on each line, default origin); locate?: [x,y] (the profile point that sits on each line, in mm from the profile's own origin: a bar's or an angle's bottom-left corner, a channel's web back at mid-height, the centre of other profiles; takes precedence over `anchor` and keeps the member attached at that point when the profile size changes); angle?: angle expr (the profile turned about the line; default 0: its y as near world up as the line allows, a vertical member's x along world X); mirror?: bool (the profile mirrored across its y axis); name?; body_name? (what the members are named after, then numbered: `Rail`, `Rail (2)`…; default the size's name, `RSC 203x89`, the profile's description, `Rect Tube 40x40x3`, or the profile sketch's name); names?: {line or pair id: name} (names to keep, as Edit Feature keeps them). One body per line or pair, from its start to its end; each member keeps its name when other lines or pairs are added or deleted. Returns the feature and the bodies it made"
+        " | profile_sketch: a sketch whose profile is the section, in its own x and y around its origin, with profiles?: picks as solid.extrude takes them (default: its material, nested loops alternating, so two circles make a tube); anchor?: origin|center|centroid|top_left|top|top_right|left|right|bottom_left|bottom|bottom_right (the profile point that sits on each line, default origin); locate?: [x,y] (the profile point that sits on each line, in mm from the profile's own origin: a bar's or an angle's bottom-left corner, a channel's web back at mid-height, the centre of other profiles; takes precedence over `anchor` and keeps the member attached at that point when the profile size changes); corner?: none|mitre|butt|coped_butt (how two members ending at one point are cut; default none); flip?: bool (a butt's other member runs through); corners?: [{members: [line id, line id], corner, flip?}] (that corner's own type); angle?: angle expr (the profile turned about the line; default 0: its y as near world up as the line allows, a vertical member's x along world X); mirror?: bool (the profile mirrored across its y axis); name?; body_name? (what the members are named after, then numbered: `Rail`, `Rail (2)`…; default the size's name, `RSC 203x89`, the profile's description, `Rect Tube 40x40x3`, or the profile sketch's name); names?: {line or pair id: name} (names to keep, as Edit Feature keeps them). One body per line or pair, from its start to its end; each member keeps its name when other lines or pairs are added or deleted. Returns the feature and the bodies it made"
     )),
     CommandSpec::new("frame.profile.list", "Profile Library", crate::checked!("frame.profile.list", list))
         .icon("library")
@@ -414,6 +414,24 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
             Some([x, y])
         }
     };
+    let corner: CornerType = match p.get("corner") {
+        None | Some(Value::Null) => CornerType::None,
+        Some(v) => serde_json::from_value(v.clone()).map_err(|_| bad(cmd, "`corner` must be none, mitre, butt or coped_butt"))?,
+    };
+    let flip = match p.get("flip") {
+        None | Some(Value::Null) => false,
+        Some(_) => bool_(p, "flip").ok_or_else(|| bad(cmd, "`flip` must be true or false"))?,
+    };
+    let corners: Vec<CornerOverride> = match p.get("corners") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(a)) if a.len() <= frame::MAX_MEMBERS => a
+            .iter()
+            .map(|v| {
+                serde_json::from_value(v.clone()).map_err(|_| bad(cmd, "`corners` entries must be {members: [line id, line id], corner, flip?}"))
+            })
+            .collect::<Result<_>>()?,
+        Some(_) => return Err(bad(cmd, format!("`corners` must be a list of up to {} corner overrides", frame::MAX_MEMBERS))),
+    };
     let angle = match p.get("angle") {
         None | Some(Value::Null) => None,
         Some(_) => {
@@ -445,6 +463,9 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
         profile,
         anchor,
         locate,
+        corner,
+        flip,
+        corners,
         angle,
         mirror,
         body_name,
@@ -456,6 +477,18 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
     // line later leaves the other members' names alone.
     let st = s.model.state();
     let ids = frame::member_line_ids(&st, &kind).map_err(|e| bad(cmd, e.to_string()))?;
+    if let FeatureKind::FrameMember { corners, .. } = &kind {
+        let mut pairs = std::collections::HashSet::new();
+        for c in corners {
+            let [a, b] = &c.members;
+            if a == b || !ids.contains(a) || !ids.contains(b) {
+                return Err(bad(cmd, format!("`corners`: `{a}` and `{b}` must be two different lines of the frame")));
+            }
+            if !pairs.insert(if a < b { (a, b) } else { (b, a) }) {
+                return Err(bad(cmd, format!("`corners`: the corner of `{a}` and `{b}` is listed twice")));
+            }
+        }
+    }
     let pinned: BTreeMap<String, String> = ids.iter().cloned().zip(frame::member_names(&st, &ids, &kept, &base)).collect();
     if let FeatureKind::FrameMember { names, .. } = &mut kind {
         *names = pinned;
