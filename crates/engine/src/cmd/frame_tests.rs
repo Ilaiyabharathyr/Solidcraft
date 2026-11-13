@@ -587,6 +587,109 @@ fn a_design_without_corner_settings_builds_as_before() {
     }
 }
 
+/// A frame sketch `V` of the lines through `points` (one line per pair of neighbours), with tube
+/// members finished `corner`.
+fn polyline_frame(points: Value, corner: &str) -> (Session, Result<Value, String>) {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "V"}));
+    run(&mut s, "sketch.line", json!({"points": points}));
+    run(&mut s, "sketch.finish", json!({}));
+    let r = s.execute("frame.member", &json!({"sketch": "V", "profile": tube(), "corner": corner})).map_err(|e| e.to_string());
+    (s, r)
+}
+
+#[test]
+fn a_mitred_rectangle_meets_at_its_corners() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre"}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 4, "{bs:?}");
+    // The bottom member runs out to the outer corners, and keeps its centreline's volume.
+    let bottom = bs.iter().find(|b| near3(b.2, [-20.0, -20.0, -20.0]) && near3(b.3, [620.0, 20.0, 20.0])).unwrap_or_else(|| panic!("{bs:?}"));
+    assert!(rel(bottom.1, tube_area() * 600.0) < MEASURED, "{bottom:?} vs {}", tube_area() * 600.0);
+    assert!(bs.iter().any(|b| near3(b.2, [-20.0, -20.0, -20.0]) && near3(b.3, [20.0, 420.0, 20.0])), "{bs:?}");
+    assert!(rel(total_volume(&mut s), tube_area() * 2000.0) < MEASURED);
+}
+
+#[test]
+fn mitres_at_30_70_110_and_140_degrees() {
+    for deg in [30.0f64, 70.0, 110.0, 140.0] {
+        let (c, sn) = (deg.to_radians().cos(), deg.to_radians().sin());
+        let (mut s, r) = polyline_frame(json!([[300, 0], [0, 0], [300.0 * c, 300.0 * sn]]), "mitre");
+        r.unwrap_or_else(|e| panic!("{deg}: {e}"));
+        let bs = bodies(&mut s);
+        assert_eq!(bs.len(), 2, "{deg}: {bs:?}");
+        for b in &bs {
+            assert!(rel(b.1, tube_area() * 300.0) < MEASURED, "{deg}: {b:?} vs {}", tube_area() * 300.0);
+        }
+        // The member along X runs past the corner on its outer side, to where the mitre meets y = -20.
+        let reach = -20.0 / (deg.to_radians() / 2.0).tan();
+        assert!(bs.iter().any(|b| (b.2[0] - reach).abs() < 1e-6), "{deg}: {reach} {bs:?}");
+    }
+}
+
+#[test]
+fn a_corner_sharper_than_five_degrees_fails() {
+    let a = 4.0f64.to_radians();
+    let (mut s, r) = polyline_frame(json!([[300, 0], [0, 0], [300.0 * a.cos(), 300.0 * a.sin()]]), "mitre");
+    let e = r.unwrap_err();
+    assert!(e.contains("Corner at (0, 0, 0) is too sharp to finish"), "{e}");
+    assert!(bodies(&mut s).is_empty());
+}
+
+#[test]
+fn members_in_line_are_left_square() {
+    let (mut s, r) = polyline_frame(json!([[0, 0], [300, 0], [600, 0]]), "mitre");
+    r.unwrap();
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    assert!(bs.iter().any(|b| near3(b.2, [0.0, -20.0, -20.0]) && near3(b.3, [300.0, 20.0, 20.0])), "{bs:?}");
+    assert!(bs.iter().any(|b| near3(b.2, [300.0, -20.0, -20.0]) && near3(b.3, [600.0, 20.0, 20.0])), "{bs:?}");
+}
+
+#[test]
+fn three_members_at_a_point_are_left_alone() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "T"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [300, 0], [600, 0]]}));
+    run(&mut s, "sketch.line", json!({"points": [[300, 0], [300, 300]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "T", "profile": tube(), "corner": "mitre"}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 3, "{bs:?}");
+    for (lo, hi) in
+        [([0.0, -20.0, -20.0], [300.0, 20.0, 20.0]), ([300.0, -20.0, -20.0], [600.0, 20.0, 20.0]), ([280.0, 0.0, -20.0], [320.0, 300.0, 20.0])]
+    {
+        assert!(bs.iter().any(|b| near3(b.2, lo) && near3(b.3, hi)), "{lo:?} {hi:?}: {bs:?}");
+    }
+}
+
+#[test]
+fn a_3d_sketch_corner_is_mitred() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Tower"}));
+    run(&mut s, "sketch.options", json!({"sketch_3d": true}));
+    run(&mut s, "sketch.line3d", json!({"points": [[0, 0, 0], [0, 0, 600], [400, 300, 900]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Tower", "profile": tube(), "corner": "mitre"}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    // The upright now reaches above its line's top, where the mitre's high side is.
+    assert!(bs.iter().any(|b| b.3[2] > 600.0 + 1.0 && b.3[2] < 700.0 && rel(b.1, tube_area() * 600.0) < MEASURED), "{bs:?}");
+    let slant = 340_000f64.sqrt();
+    assert!(bs.iter().any(|b| rel(b.1, tube_area() * slant) < MEASURED), "{bs:?} vs {}", tube_area() * slant);
+}
+
+#[test]
+fn mitred_members_keep_their_names() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre"}));
+    let names: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+    assert_eq!(names, ["Rect Tube 40x40x3", "Rect Tube 40x40x3 (2)", "Rect Tube 40x40x3 (3)", "Rect Tube 40x40x3 (4)"]);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Regressions from the adversarial review of #4003
 

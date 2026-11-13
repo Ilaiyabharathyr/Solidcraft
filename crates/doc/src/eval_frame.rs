@@ -13,7 +13,9 @@ use solidcraft_sketch::CurveKind;
 
 use super::{ModelBody, ModelState, SolvedSketch, new_name, path_in_frame, select_profiles, sketch_in_feature_frame, val};
 use crate::expr::{Kind, Value};
-use crate::frame::{self, MAX_MEMBERS, MemberPair, MemberProfile};
+use crate::frame::{self, CornerType, MAX_MEMBERS, MemberPair, MemberProfile};
+use crate::frame_corners::{self, Cut};
+use crate::lineage::Traced;
 use crate::{DocError, Document, Feature, FeatureKind, ProfileSel, Result};
 
 /// Most profiles a profile sketch may have for its material to be worked out.
@@ -26,20 +28,32 @@ const STRAIGHT_TOL: f64 = 1e-3;
 /// Evaluate a `FrameMember` feature: one new body per line, each named
 /// ([`member_names`], or by position for a copy whose `body_names` were set).
 pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut ModelState) -> Result<()> {
-    let FeatureKind::FrameMember { body_name, names, .. } = &f.kind else {
+    let FeatureKind::FrameMember { body_name, names, corner, flip, corners, .. } = &f.kind else {
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
-    let Layout { segments, regions, description, at, turn } = layout(doc, vals, f, st)?;
-    let mut made = Vec::with_capacity(segments.len());
+    let Layout { segments, regions, description, at, turn, sketch_x } = layout(doc, vals, f, st)?;
+    let mut axes = Vec::with_capacity(segments.len());
     for (id, a, b) in &segments {
-        let (x, y) = frame::member_axes(*b - *a, turn).ok_or_else(|| DocError::Invalid(format!("line `{id}` has no length")))?;
+        axes.push(frame::member_axes(*b - *a, turn).ok_or_else(|| DocError::Invalid(format!("line `{id}` has no length")))?);
+    }
+    // The member's section plane, square to its line, placed at `p` on the line.
+    let placed = |m: usize, p: Vec3| {
+        let (x, y) = axes.get(m).copied().unwrap_or((Vec3::X, Vec3::Y));
+        let origin = p - x * at.x - y * at.y;
+        Plane::new(origin, x, y).unwrap_or(Plane { origin, x, y })
+    };
+    // A frame with no corners to finish is built exactly as it always was.
+    let mut cut =
+        if corner.is_none() && corners.is_empty() { Vec::new() } else { cut_members(&segments, &regions, &placed, *corner, *flip, sketch_x)? };
+    let mut made = Vec::with_capacity(segments.len());
+    for (m, (id, a, b)) in segments.iter().enumerate() {
+        if let Some(t) = cut.get_mut(m).and_then(Option::take) {
+            made.push(t);
+            continue;
+        }
+        let (x, y) = axes.get(m).copied().ok_or_else(|| DocError::Invalid(format!("line `{id}` has no length")))?;
         let plane = Plane::new(*a - x * at.x - y * at.y, x, y).ok_or_else(|| DocError::Invalid(format!("line `{id}`: no plane square to it")))?;
-        let mut bodies = kernel::extrude(&plane, &regions, 0.0, a.dist(*b))?;
-        let body = match (bodies.pop(), bodies.is_empty()) {
-            (Some(body), true) => body,
-            _ => return Err(DocError::Invalid(format!("the member on line `{id}` is not one solid"))),
-        };
-        made.push(crate::lineage::numbered_tool(body));
+        made.push(crate::lineage::numbered_tool(one_solid(kernel::extrude(&plane, &regions, 0.0, a.dist(*b))?, id)?));
     }
     if !f.body_names.is_empty() {
         // A copy (pasted, or in a copied component) names its members by position, as any
@@ -58,21 +72,85 @@ pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
     Ok(())
 }
 
+/// The one body of an extruded member.
+fn one_solid(mut bodies: Vec<kernel::Body>, id: &str) -> Result<kernel::Body> {
+    match (bodies.pop(), bodies.is_empty()) {
+        (Some(body), true) => Ok(body),
+        _ => Err(DocError::Invalid(format!("the member on line `{id}` is not one solid"))),
+    }
+}
+
+/// Each member cut at its corners (#4003), or `None` for a member no corner cuts (built square,
+/// as without corners). A cut member is built past each cut end far enough to reach the cut, then
+/// cut there; the cut face is named `corner_start` or `corner_end`. `placed(m, p)` is member m's
+/// section plane, square to its line, placed at `p`.
+fn cut_members(
+    segments: &[(String, Vec3, Vec3)],
+    regions: &[Region2],
+    placed: &dyn Fn(usize, Vec3) -> Plane,
+    corner: CornerType,
+    flip: bool,
+    sketch_x: Option<Vec3>,
+) -> Result<Vec<Option<Traced>>> {
+    // Each member's cut at its [start, end], and how far past that end it is built.
+    let mut ends: Vec<[Option<(Cut, f64)>; 2]> = vec![[None, None]; segments.len()];
+    for c in frame_corners::find_corners(segments) {
+        // A Coped Butt's U is coped to T (the pair), not cut by a plane: not done yet, so U stays square.
+        let (cuts, _cope) = frame_corners::corner_cuts(corner, flip, &c, segments, placed, regions, sketch_x)?;
+        let angle = frame_corners::interior(segments, &c);
+        for (m, at_start, cut) in cuts {
+            // The section's bounding circle about the line: every cut lies within it.
+            let plane = placed(m, c.point);
+            let [px, nx, py, ny] = [plane.x, -plane.x, plane.y, -plane.y].map(|d| frame_corners::reach(&plane, regions, c.point, d));
+            let ext = frame_corners::extension(angle, px.max(nx).hypot(py.max(ny)));
+            if !ext.is_finite() {
+                return Err(DocError::Invalid("the member profile has no area".into()));
+            }
+            if let Some(end) = ends.get_mut(m).and_then(|e| e.get_mut(usize::from(!at_start))) {
+                *end = Some((cut, ext));
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(segments.len());
+    for (m, ((id, a, b), [start, end])) in segments.iter().zip(ends).enumerate() {
+        if start.is_none() && end.is_none() {
+            out.push(None);
+            continue;
+        }
+        let (lo, hi) = (start.map_or(0.0, |c| c.1), end.map_or(0.0, |c| c.1));
+        let mut t = crate::lineage::numbered_tool(one_solid(kernel::extrude(&placed(m, *a), regions, -lo, a.dist(*b) + hi)?, id)?);
+        for (cut, role) in [(start, "corner_start"), (end, "corner_end")] {
+            let Some((cut, _)) = cut else { continue };
+            let plane =
+                Plane::from_normal(cut.origin, cut.normal).ok_or_else(|| DocError::Invalid(format!("line `{id}`: a corner cut has no plane")))?;
+            let (part, tool) = kernel::half_space(&t.body, &plane, true)?;
+            let part = part.ok_or_else(|| DocError::Invalid(format!("the member on line `{id}` was cut away completely")))?;
+            // The cut face is the cap of the half-space box in the plane: its start cap.
+            let tool = crate::lineage::ProfileRoles { sketch: None, region: None, caps: [Some(role.into()), None], thin: None }.tool(tool, None);
+            t = Traced::step(part, &[&t, &tool]);
+        }
+        out.push(Some(t));
+    }
+    Ok(out)
+}
+
 /// A member feature's lines (in its component frame), profile regions, default name, the
-/// profile point that sits on the lines and the profile's turn about them.
+/// profile point that sits on the lines, the profile's turn about them and the frame sketch's x
+/// axis (`None`: a 3D sketch, or no sketch).
 struct Layout {
     segments: Vec<(String, Vec3, Vec3)>,
     regions: Vec<Region2>,
     description: String,
     at: Vec2,
     turn: f64,
+    sketch_x: Option<Vec3>,
 }
 
 fn layout(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &ModelState) -> Result<Layout> {
     let FeatureKind::FrameMember { profile, anchor, locate, angle, mirror, .. } = &f.kind else {
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
-    let segments = segments(doc, vals, f, st)?;
+    let (segments, sketch_x) = segments(doc, vals, f, st)?;
     let (mut regions, description, origin) = profile_regions(vals, st, profile)?;
     if *mirror {
         regions = regions.iter().map(frame::mirrored).collect();
@@ -96,16 +174,21 @@ fn layout(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &Mode
         Some(e) => val(vals, e, Kind::Angle)?,
         None => 0.0,
     };
-    Ok(Layout { segments, regions, description, at, turn })
+    Ok(Layout { segments, regions, description, at, turn, sketch_x })
 }
 
 /// Each member's line in the feature's component frame: (member id, start, end), the sketch's
-/// lines then the pairs'.
-fn segments(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &ModelState) -> Result<Vec<(String, Vec3, Vec3)>> {
+/// lines then the pairs'; and the frame sketch's x axis (`None`: a 3D sketch, or no sketch).
+fn segments(
+    doc: &Document,
+    vals: &BTreeMap<String, Value>,
+    f: &Feature,
+    st: &ModelState,
+) -> Result<(Vec<(String, Vec3, Vec3)>, Option<Vec3>)> {
     let FeatureKind::FrameMember { path_sketch, lines, pairs, .. } = &f.kind else {
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
-    let mut segments = match path_sketch {
+    let (mut segments, sketch_x) = match path_sketch {
         Some(path_sketch) => {
             let ps =
                 st.sketch(path_sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {path_sketch} (it must come earlier in the timeline)")))?;
@@ -115,9 +198,9 @@ fn segments(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &Mo
             } else {
                 path_in_frame(doc, ps, f.component)?
             };
-            member_lines(mapped.as_ref(), lines)?
+            (member_lines(mapped.as_ref(), lines)?, ps.sketch.wires.is_empty().then_some(mapped.plane.x))
         }
-        None => Vec::new(),
+        None => (Vec::new(), None),
     };
     segments.extend(pair_lines(doc, vals, f, st, pairs)?);
     let mut seen = HashSet::new();
@@ -130,7 +213,7 @@ fn segments(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &Mo
     if segments.len() > MAX_MEMBERS {
         return Err(DocError::Invalid(format!("at most {MAX_MEMBERS} members in one feature")));
     }
-    Ok(segments)
+    Ok((segments, sketch_x))
 }
 
 /// Each member's centreline where the view shows it: (member id, start, end), in the world.
@@ -138,7 +221,7 @@ fn segments(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &Mo
 pub fn member_segments(doc: &Document, st: &ModelState, f: &Feature) -> Result<Vec<(String, Vec3, Vec3)>> {
     let m = doc.component_transform(f.component);
     let place = |p: Vec3| crate::apply_point(&m, p);
-    Ok(segments(doc, &doc.evaluation_values(), f, st)?.into_iter().map(|(id, a, b)| (id, place(a), place(b))).collect())
+    Ok(segments(doc, &doc.evaluation_values(), f, st)?.0.into_iter().map(|(id, a, b)| (id, place(a), place(b))).collect())
 }
 
 /// The member of feature `f` on line `line`, as its body was made: the plane square to the line
