@@ -1200,6 +1200,7 @@ fn hostile_params_never_panic() {
         "names",
         "pairs",
         "next_pair",
+        "members",
         "references",
         "head",
         "head_gap",
