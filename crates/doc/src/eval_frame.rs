@@ -4,7 +4,7 @@
 
 use solidcraft_geom::prelude::*;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use solidcore_record::{Plane, Region2, Vec2, Vec3};
 use solidcraft_geom::{Aabb2, Ring};
@@ -13,7 +13,7 @@ use solidcraft_sketch::CurveKind;
 
 use super::{ModelBody, ModelState, SolvedSketch, new_name, path_in_frame, select_profiles, sketch_in_feature_frame, val};
 use crate::expr::{Kind, Value};
-use crate::frame::{self, CornerType, MAX_MEMBERS, MemberPair, MemberProfile};
+use crate::frame::{self, CornerOverride, CornerType, MAX_MEMBERS, MemberPair, MemberProfile};
 use crate::frame_corners::{self, Cut};
 use crate::lineage::Traced;
 use crate::{DocError, Document, Feature, FeatureKind, ProfileSel, Result};
@@ -43,8 +43,11 @@ pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
         Plane::new(origin, x, y).unwrap_or(Plane { origin, x, y })
     };
     // A frame with no corners to finish is built exactly as it always was.
-    let mut cut =
-        if corner.is_none() && corners.is_empty() { Vec::new() } else { cut_members(&segments, &regions, &placed, *corner, *flip, sketch_x)? };
+    let mut cut = if corner.is_none() && corners.is_empty() {
+        Vec::new()
+    } else {
+        cut_members(&segments, &regions, &placed, (*corner, *flip), corners, sketch_x)?
+    };
     let mut made = Vec::with_capacity(segments.len());
     for (m, (id, a, b)) in segments.iter().enumerate() {
         if let Some(t) = cut.get_mut(m).and_then(Option::take) {
@@ -81,31 +84,53 @@ fn one_solid(mut bodies: Vec<kernel::Body>, id: &str) -> Result<kernel::Body> {
 }
 
 /// Each member cut at its corners (#4003), or `None` for a member no corner cuts (built square,
-/// as without corners). A cut member is built past each cut end far enough to reach the cut, then
-/// cut there; the cut face is named `corner_start` or `corner_end`. `placed(m, p)` is member m's
-/// section plane, square to its line, placed at `p`.
+/// as without corners). A corner is finished as its override in `overrides` says (the override
+/// naming its two lines, in either order), else as `finish` (type, flip) says. A cut member is
+/// built past each cut end far enough to reach the whole cut, then cut there; the cut face is
+/// named `corner_start` or `corner_end`. `placed(m, p)` is member m's section plane, square to
+/// its line, placed at `p`.
 fn cut_members(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
     placed: &dyn Fn(usize, Vec3) -> Plane,
-    corner: CornerType,
-    flip: bool,
+    finish: (CornerType, bool),
+    overrides: &[CornerOverride],
     sketch_x: Option<Vec3>,
 ) -> Result<Vec<Option<Traced>>> {
+    // A design file is hostile input: the command checks the list, a file may not.
+    if overrides.len() > MAX_MEMBERS {
+        return Err(DocError::Invalid(format!("at most {MAX_MEMBERS} corner overrides in one feature")));
+    }
+    fn pair<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
+        if a <= b { (a, b) } else { (b, a) }
+    }
+    let id = |m: usize| segments.get(m).map_or("", |s| s.0.as_str());
+    let corners = frame_corners::find_corners(segments);
+    let at: HashMap<(&str, &str), usize> = corners
+        .iter()
+        .enumerate()
+        .map(|(k, c)| {
+            let [(a, _), (b, _)] = c.ends;
+            (pair(id(a), id(b)), k)
+        })
+        .collect();
+    let mut finishes = vec![finish; corners.len()];
+    for o in overrides {
+        let [a, b] = &o.members;
+        let k = at.get(&pair(a, b)).ok_or_else(|| DocError::Invalid("A corner override is not at a corner of the frame".into()))?;
+        if let Some(f) = finishes.get_mut(*k) {
+            *f = (o.corner, o.flip);
+        }
+    }
     // Each member's cut at its [start, end], and how far past that end it is built.
     let mut ends: Vec<[Option<(Cut, f64)>; 2]> = vec![[None, None]; segments.len()];
-    for c in frame_corners::find_corners(segments) {
+    for (c, (kind, flip)) in corners.iter().zip(finishes) {
         // A Coped Butt's U is coped to T (the pair), not cut by a plane: not done yet, so U stays square.
-        let (cuts, _cope) = frame_corners::corner_cuts(corner, flip, &c, segments, placed, regions, sketch_x)?;
-        let angle = frame_corners::interior(segments, &c);
+        let (cuts, _cope) = frame_corners::corner_cuts(kind, flip, c, segments, placed, regions, sketch_x)?;
         for (m, at_start, cut) in cuts {
-            // The section's bounding circle about the line: every cut lies within it.
-            let plane = placed(m, c.point);
-            let [px, nx, py, ny] = [plane.x, -plane.x, plane.y, -plane.y].map(|d| frame_corners::reach(&plane, regions, c.point, d));
-            let ext = frame_corners::extension(angle, px.max(nx).hypot(py.max(ny)));
-            if !ext.is_finite() {
-                return Err(DocError::Invalid("the member profile has no area".into()));
-            }
+            let ext = frame_corners::away(segments, (m, at_start))
+                .and_then(|w| frame_corners::extension(&placed(m, c.point), regions, c.point, w, &cut))
+                .ok_or_else(|| DocError::Invalid(format!("the member on line `{}` can't be built out to its corner cut", id(m))))?;
             if let Some(end) = ends.get_mut(m).and_then(|e| e.get_mut(usize::from(!at_start))) {
                 *end = Some((cut, ext));
             }
@@ -128,6 +153,9 @@ fn cut_members(
             // The cut face is the cap of the half-space box in the plane: its start cap.
             let tool = crate::lineage::ProfileRoles { sketch: None, region: None, caps: [Some(role.into()), None], thin: None }.tool(tool, None);
             t = Traced::step(part, &[&t, &tool]);
+        }
+        if t.body.lumps()?.len() > 1 {
+            return Err(DocError::Invalid(format!("the member on line `{id}` is cut into pieces by its corners")));
         }
         out.push(Some(t));
     }

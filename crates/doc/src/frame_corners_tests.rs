@@ -173,6 +173,25 @@ fn reach_of_a_centred_square_and_a_bottom_left_one() {
 }
 
 #[test]
-fn extension_reaches_past_a_square_corner() {
-    assert!((extension(PI / 2.0, 28.3) - 41.022).abs() < 1e-3);
+fn extension_reaches_every_point_of_each_cut() {
+    let regions = square(-20.0, 20.0);
+    // How far past the corner each member a corner cuts is built, in `corner_cuts` order.
+    let built = |segs: &[(String, Vec3, Vec3)], kind| {
+        let c = find_corners(segs).into_iter().next().unwrap();
+        let place = placer(segs, Vec2::ZERO);
+        let (cuts, _) = corner_cuts(kind, false, &c, segs, &place, &regions, None).unwrap();
+        cuts.iter()
+            .map(|(m, s, cut)| extension(&place(*m, c.point), &regions, c.point, away(segs, (*m, *s)).unwrap(), cut).unwrap())
+            .collect::<Vec<_>>()
+    };
+    // A square mitre: the section's far corner is 20 back from the corner, and 1 mm more.
+    let e = built(&ell(), CornerType::Mitre);
+    assert!(e.iter().all(|e| (e - 21.0).abs() < 1e-9), "{e:?}");
+    // A butt at 150°: T (along +x) runs back to U's outer face, 20 (1 + cos 30°) / sin 150° =
+    // 74.641 at its far side. U is cut short of the corner and needs only the 1 mm.
+    let (c, s) = (150f64.to_radians().cos(), 150f64.to_radians().sin());
+    let wide = vec![seg("t", (0.0, 0.0), (400.0, 0.0)), seg("u", (0.0, 0.0), (300.0 * c, 300.0 * s))];
+    let e = built(&wide, CornerType::Butt);
+    let t = 20.0 * (1.0 + 30f64.to_radians().cos()) / s + 1.0;
+    assert!(e.len() == 2 && (e[0] - t).abs() < 1e-9 && (e[1] - 1.0).abs() < 1e-9, "{e:?} vs {t}");
 }

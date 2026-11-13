@@ -690,6 +690,208 @@ fn mitred_members_keep_their_names() {
     assert_eq!(names, ["Rect Tube 40x40x3", "Rect Tube 40x40x3 (2)", "Rect Tube 40x40x3 (3)", "Rect Tube 40x40x3 (4)"]);
 }
 
+/// The rectangle frame's bottom (600) and left (400) members, by their boxes.
+fn bottom_and_left(s: &mut Session) -> (Measured, Measured) {
+    let bs = bodies(s);
+    let bottom = bs.iter().find(|b| b.3[0] > 500.0 && b.3[1] < 200.0).unwrap_or_else(|| panic!("{bs:?}")).clone();
+    let left = bs.iter().find(|b| b.3[0] < 200.0 && b.3[1] > 300.0).unwrap_or_else(|| panic!("{bs:?}")).clone();
+    (bottom, left)
+}
+
+#[test]
+fn a_butted_rectangle_runs_its_long_sides_through() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "butt"}));
+    let (bottom, left) = bottom_and_left(&mut s);
+    // The 600 members run out to the 400s' outer faces; the 400s stop at their near faces.
+    assert!((bottom.2[0] + 20.0).abs() < 1e-6 && (bottom.3[0] - 620.0).abs() < 1e-6, "{bottom:?}");
+    assert!(rel(bottom.1, tube_area() * 640.0) < MEASURED, "{bottom:?} vs {}", tube_area() * 640.0);
+    assert!((left.2[1] - 20.0).abs() < 1e-6 && (left.3[1] - 380.0).abs() < 1e-6, "{left:?}");
+    assert!(rel(left.1, tube_area() * 360.0) < MEASURED, "{left:?} vs {}", tube_area() * 360.0);
+    // Each cut face is named for the end it finishes.
+    let st = s.model.state();
+    let names = solidcraft_doc::naming::face_names(st.body(&bottom.0).unwrap());
+    for role in ["corner_start", "corner_end"] {
+        assert!(names.iter().any(|n| n.contains(role)), "{role} in {names:?}");
+    }
+}
+
+#[test]
+fn flip_runs_the_short_sides_through() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "butt", "flip": true}));
+    let (bottom, left) = bottom_and_left(&mut s);
+    assert!((left.2[1] + 20.0).abs() < 1e-6 && (left.3[1] - 420.0).abs() < 1e-6, "{left:?}");
+    assert!((bottom.2[0] - 20.0).abs() < 1e-6 && (bottom.3[0] - 580.0).abs() < 1e-6, "{bottom:?}");
+}
+
+#[test]
+fn butts_at_70_and_110_degrees_meet_flush() {
+    for deg in [70.0f64, 110.0] {
+        let (c, sn) = (deg.to_radians().cos(), deg.to_radians().sin());
+        let (mut s, r) = polyline_frame(json!([[400, 0], [0, 0], [300.0 * c, 300.0 * sn]]), "butt");
+        r.unwrap_or_else(|e| panic!("{deg}: {e}"));
+        let bs = bodies(&mut s);
+        assert_eq!(bs.len(), 2, "{deg}: {bs:?}");
+        // T (the 400) runs h / sin φ past the corner to U's outer face; U stops that far short.
+        let (t, u) = (tube_area() * (400.0 + 20.0 / sn), tube_area() * (300.0 - 20.0 / sn));
+        assert!(bs.iter().any(|b| rel(b.1, t) < MEASURED), "{deg}: T {t} in {bs:?}");
+        assert!(bs.iter().any(|b| rel(b.1, u) < MEASURED), "{deg}: U {u} in {bs:?}");
+    }
+}
+
+#[test]
+fn a_butt_at_150_degrees_is_flush() {
+    let deg = 150.0f64.to_radians();
+    let (mut s, r) = polyline_frame(json!([[400, 0], [0, 0], [300.0 * deg.cos(), 300.0 * deg.sin()]]), "butt");
+    r.unwrap();
+    let bs = bodies(&mut s);
+    let t = bs.iter().find(|b| b.3[0] > 300.0).unwrap_or_else(|| panic!("{bs:?}"));
+    let want = tube_area() * (400.0 + 20.0 / deg.sin());
+    assert!(rel(t.1, want) < MEASURED, "{t:?} vs {want}");
+    // T is cut on U's outer face: the plane 20 from the corner along m = (−sin 30°, −cos 30°),
+    // facing −m. T's face y = +20 meets it furthest back: 0.5 (x + 10) + 0.866 (20 + 17.32) = 0,
+    // so x = −20 (1 + cos 30°) / sin 150° = −74.641.
+    let min_x = -20.0 * (1.0 + 30f64.to_radians().cos()) / deg.sin();
+    assert!((t.2[0] - min_x).abs() < 1e-6, "{t:?} vs {min_x}");
+}
+
+#[test]
+fn an_override_changes_only_its_corner() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let (bottom_line, left_line) = (line_at_y(&s, "Frame", 0.0), line_at_x(&s, "Frame", 0.0));
+    run(
+        &mut s,
+        "frame.member",
+        json!({"sketch": "Frame", "profile": tube(), "corner": "mitre",
+               "corners": [{"members": [bottom_line, left_line], "corner": "butt", "flip": true}]}),
+    );
+    let (bottom, left) = bottom_and_left(&mut s);
+    // Flipped, the shorter left member runs through at the bottom; the bottom's far end is mitred.
+    assert!((left.2[1] + 20.0).abs() < 1e-6, "{left:?}");
+    assert!((bottom.2[0] - 20.0).abs() < 1e-6 && (bottom.3[0] - 620.0).abs() < 1e-6, "{bottom:?}");
+}
+
+#[test]
+fn an_override_follows_its_corner_through_a_dimension_edit() {
+    let mut s = Session::default();
+    run(&mut s, "parameters.add", json!({"name": "W", "expression": "600 mm"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], ["W", 0], ["W", 400], [0, 400]], "closed": true}));
+    run(&mut s, "sketch.finish", json!({}));
+    let (bottom_line, left_line) = (line_at_y(&s, "Frame", 0.0), line_at_x(&s, "Frame", 0.0));
+    run(
+        &mut s,
+        "frame.member",
+        json!({"sketch": "Frame", "profile": tube(), "corner": "mitre",
+               "corners": [{"members": [left_line, bottom_line], "corner": "butt", "flip": true}]}),
+    );
+    run(&mut s, "parameters.change", json!({"name": "W", "expression": "800 mm"}));
+    let bs = bodies(&mut s);
+    let bottom = bs.iter().find(|b| b.3[0] > 700.0 && b.3[1] < 200.0).unwrap_or_else(|| panic!("{bs:?}"));
+    let left = bs.iter().find(|b| b.3[0] < 200.0 && b.3[1] > 300.0).unwrap_or_else(|| panic!("{bs:?}"));
+    assert!((left.2[1] + 20.0).abs() < 1e-6, "{left:?}");
+    assert!((bottom.2[0] - 20.0).abs() < 1e-6 && (bottom.3[0] - 820.0).abs() < 1e-6, "{bottom:?}");
+}
+
+#[test]
+fn an_override_whose_corner_has_gone_fails() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "V"}));
+    run(&mut s, "sketch.line", json!({"points": [[400, 0], [0, 0]], "ids": ["a"]}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [0, 300]], "ids": ["b"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "V", "profile": tube(), "corners": [{"members": ["a", "b"], "corner": "butt"}]}));
+    assert_eq!(bodies(&mut s).len(), 2);
+    // Line b drawn again 50 mm up: a and b no longer meet.
+    run(&mut s, "sketch.edit", json!({"sketch": "V"}));
+    run(&mut s, "sketch.delete", json!({"entities": ["b"]}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 50], [0, 300]], "ids": ["b"]}));
+    let finished = s.execute("sketch.finish", &json!({})).map_err(|e| e.to_string());
+    let member = s.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().id;
+    let e = finished.err().or_else(|| s.model.result(member).and_then(|r| r.error.clone())).unwrap_or_default();
+    assert!(e.contains("A corner override is not at a corner of the frame"), "{e} {:?}", sketch_lines(&s, "V"));
+}
+
+#[test]
+fn a_member_too_short_for_its_cuts_fails_by_name() {
+    let (mut s, r) = polyline_frame(json!([[0, 300], [0, 0], [30, 0], [30, 300]]), "butt");
+    let short = line_at_y(&s, "V", 0.0);
+    let e = r.unwrap_err();
+    assert!(e.contains(&format!("the member on line `{short}` was cut away completely")), "{e}");
+    assert!(bodies(&mut s).is_empty());
+}
+
+#[test]
+fn a_member_cut_into_pieces_fails_by_name() {
+    // A 10 mm member mitred at both ends keeps only the section within 5 mm of its inner side:
+    // a channel whose web is on its outer side keeps its two flanges, apart.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "V"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 300], [0, 0], [10, 0], [10, 300]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let short = line_at_y(&s, "V", 0.0);
+    let channel = json!({"kind": "channel", "height": 60, "width": 45, "web": 5, "flange": 6});
+    let e = s.execute("frame.member", &json!({"sketch": "V", "profile": channel, "mirror": true, "corner": "mitre"})).unwrap_err().to_string();
+    assert!(e.contains(&format!("the member on line `{short}` is cut into pieces by its corners")), "{e}");
+    assert!(bodies(&mut s).is_empty());
+}
+
+#[test]
+fn a_bottom_left_anchor_butts_flush_with_the_placed_section() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "butt", "anchor": "bottom_left"}));
+    let bs = bodies(&mut s);
+    // The members sit off their lines: find them by their runs along X and Y.
+    let t = bs.iter().find(|b| b.3[0] - b.2[0] > 500.0 && b.2[1] < 100.0).unwrap_or_else(|| panic!("{bs:?}"));
+    let u = bs.iter().find(|b| b.3[1] - b.2[1] > 300.0 && b.2[0] < 100.0).unwrap_or_else(|| panic!("{bs:?}"));
+    // T ends flush with U's outer face, and U ends on T's near face.
+    assert!((t.2[0] - u.2[0]).abs() < 1e-6, "{t:?} {u:?}");
+    assert!((u.2[1] - t.3[1]).abs() < 1e-6, "{t:?} {u:?}");
+}
+
+#[test]
+fn a_hand_edited_override_list_is_refused_not_a_panic() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let (bottom_line, left_line) = (line_at_y(&s, "Frame", 0.0), line_at_x(&s, "Frame", 0.0));
+    run(
+        &mut s,
+        "frame.member",
+        json!({"sketch": "Frame", "profile": tube(), "corner": "mitre",
+               "corners": [{"members": [bottom_line, left_line], "corner": "butt"}]}),
+    );
+    let member = s.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().id;
+    /// The saved override list: the array under `corners` beside `corner`.
+    fn overrides(v: &mut Value) -> Option<&mut Vec<Value>> {
+        if v.get("corner").is_some() && v.get("corners").is_some_and(Value::is_array) {
+            return v.get_mut("corners")?.as_array_mut();
+        }
+        match v {
+            Value::Object(m) => m.values_mut().find_map(overrides),
+            Value::Array(a) => a.iter_mut().find_map(overrides),
+            _ => None,
+        }
+    }
+    let saved: Value = serde_json::from_str(&s.doc.to_json()).unwrap();
+    let one = overrides(&mut saved.clone()).unwrap()[0].clone();
+    for (edit, why) in [
+        (vec![json!({"members": [bottom_line, "nope"], "corner": "butt"})], "A corner override is not at a corner of the frame"),
+        (vec![json!({"members": [bottom_line, bottom_line], "corner": "butt"})], "A corner override is not at a corner of the frame"),
+        (vec![one; solidcraft_doc::frame::MAX_MEMBERS + 1], "corner overrides"),
+    ] {
+        let mut file = saved.clone();
+        *overrides(&mut file).unwrap() = edit;
+        let reopened = Session::new(solidcraft_doc::Document::from_json(&file.to_string()).unwrap());
+        let e = reopened.model.result(member).and_then(|r| r.error.clone()).unwrap_or_default();
+        assert!(e.contains(why), "{why}: {e}");
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Regressions from the adversarial review of #4003
 

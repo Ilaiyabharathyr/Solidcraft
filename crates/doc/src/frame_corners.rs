@@ -114,7 +114,7 @@ pub fn find_corners(segments: &[(String, Vec3, Vec3)]) -> Vec<Corner> {
 }
 
 /// A member's unit direction away from the corner at its end `(member, at_start)`.
-fn away(segments: &[(String, Vec3, Vec3)], (m, at_start): (usize, bool)) -> Option<Vec3> {
+pub fn away(segments: &[(String, Vec3, Vec3)], (m, at_start): (usize, bool)) -> Option<Vec3> {
     let (_, a, b) = segments.get(m)?;
     (if at_start { *b - *a } else { *a - *b }).normalized()
 }
@@ -223,10 +223,15 @@ pub fn corner_cuts(
     Ok((vec![(te.0, te.1, t_cut), (ue.0, ue.1, u_cut)], None))
 }
 
-/// How far past its line end a member must be built to reach every cut at that end: a mitre's
-/// far corner, or a butt's run across the other member, which grows as the turn flattens.
-pub fn extension(interior: f64, radius: f64) -> f64 {
-    radius / (interior / 2.0).sin().min((PI - interior).sin().max(0.05)) + 1.0
+/// How far past its corner a member must be built for `cut` to cross its whole section, plus
+/// 1 mm (never less than 1 mm): `plane` is the member's section placed at the corner `point`, and
+/// `away` its unit direction away from the corner. A section point q meets the cut plane
+/// ((q - origin)·n) / (away·n) back from the corner, furthest for the q that reaches furthest
+/// along n. `None` when the section has no area or the cut runs along the member.
+pub fn extension(plane: &Plane, regions: &[Region2], point: Vec3, away: Vec3, cut: &Cut) -> Option<f64> {
+    let along = away.dot(cut.normal);
+    let back = (reach(plane, regions, point, cut.normal) - (cut.origin - point).dot(cut.normal)) / along;
+    (along > 1e-9 && back.is_finite()).then(|| back.max(0.0) + 1.0)
 }
 
 #[cfg(test)]
