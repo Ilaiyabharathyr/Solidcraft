@@ -405,9 +405,14 @@ fn section_plane((x, y): Axes, at: Vec2, p: Vec3) -> Plane {
 /// A member's body: `regions` on its section `plane` at its start, built along its line `d` ([`along`]) from `lo` to
 /// `hi`, each face named `face:<k>`. A member Auto runs against its line is built from its regions mirrored, which
 /// the kernel numbers otherwise, so its faces are named as the same member built on `unreversed` (its plane running
-/// the way its line is drawn) numbers them: each side face as the face at the same place in the section, each cap as
-/// the cap at the same end ([`position_numbers`]). A tube whose run turns round (an outline closed or opened) keeps
-/// each face's name: a centred section is the same solid either way, and an off-centre one is moved across its line.
+/// the way its line is drawn) numbers them ([`matched_numbers`]), each cap as the cap at the same end:
+/// - each side face as the face at the same place in the section, measured from the centre of the section's box: a
+///   section symmetric about its own centre line is then the same solid either way, or moved across its line, and
+///   each face keeps its name;
+/// - failing that (a section that is not, such as an angle or a channel), as the face swept from the same edge of
+///   the section;
+/// - failing both, as the kernel numbers it.
+///
 /// The kernel numbers an extrusion's faces by where it lies, not by profile segment, so they can't be renumbered by
 /// index alone.
 fn member_body(plane: Plane, unreversed: Option<Plane>, regions: &[Region2], d: Vec3, (lo, hi): (f64, f64), id: &str) -> Result<Traced> {
@@ -417,22 +422,24 @@ fn member_body(plane: Plane, unreversed: Option<Plane>, regions: &[Region2], d: 
         return Ok(crate::lineage::numbered_tool(body));
     };
     let plain = one_solid(kernel::extrude(&unreversed, regions, lo, hi)?, id)?;
-    Ok(match position_numbers((&body, &plane), (&plain, &unreversed)) {
+    let (mid_m, mid_p) = (frame::anchor_point(&built, frame::Anchor::Center), frame::anchor_point(regions, frame::Anchor::Center));
+    let at_place = matched_numbers(&body, &plain, |q| plane.dir_to_world(q - mid_m), |q| unreversed.dir_to_world(q - mid_p));
+    let by_edge = || matched_numbers(&body, &plain, |q| Vec3::new(-q.x, q.y, 0.0), |q| Vec3::new(q.x, q.y, 0.0));
+    Ok(match at_place.or_else(by_edge) {
         Some(k) => Traced::made(body, Some(k.into_iter().map(|k| vec![format!("face:{k}")]).collect())),
         None => crate::lineage::numbered_tool(body),
     })
 }
 
-/// For each face of `mirrored` (a section's regions mirrored and extruded on plane `pm`), the face of `plain` (the
-/// same section extruded on `pp`) at the same place in the section, measured from each plane's origin in the world
-/// (the two planes' origins differ only by the anchor's offset across the line), or the cap at the same end. `None`
-/// unless each face finds its own.
-fn position_numbers((mirrored, pm): (&kernel::Body, &Plane), (plain, pp): (&kernel::Body, &Plane)) -> Option<Vec<usize>> {
+/// For each face of `mirrored` (a section's regions mirrored and extruded), the face of `plain` (the same section
+/// extruded unmirrored) whose profile segment `fp` maps where `fm` maps the mirrored face's (both ends and its
+/// middle), or the cap at the same end. `None` unless each face finds its own.
+fn matched_numbers(mirrored: &kernel::Body, plain: &kernel::Body, fm: impl Fn(Vec2) -> Vec3, fp: impl Fn(Vec2) -> Vec3) -> Option<Vec<usize>> {
     use kernel::FaceSource::{ExtrudeCap, ExtrudeSide};
     fn source(b: &kernel::Body, i: usize) -> Option<&kernel::FaceSource> {
         b.face_sources().and_then(|s| s.get(i)).and_then(Option::as_ref)
     }
-    let near = |p: Vec2, q: Vec2| pm.dir_to_world(p).dist(pp.dir_to_world(q)) <= 1e-6;
+    let near = |p: Vec2, q: Vec2| fm(p).dist(fp(q)) <= 1e-6;
     let same = |i: usize, j: usize| match (source(mirrored, i), source(plain, j)) {
         (Some(ExtrudeCap { high: a, .. }), Some(ExtrudeCap { high: b, .. })) => a == b,
         (Some(ExtrudeSide { segment: s, .. }), Some(ExtrudeSide { segment: t, .. })) => {

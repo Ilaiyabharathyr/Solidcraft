@@ -2877,53 +2877,119 @@ fn an_end_cap_sits_on_a_tube_auto_runs_against_its_line() {
     assert!(near3(caps[1].2, [600.0, 0.0, 0.0]) && near3(caps[1].3, [606.0, 40.0, 40.0]), "{caps:?}");
 }
 
+/// A face of a body, as a point on its plane and its outward normal.
+type Pick = ([f64; 3], [f64; 3]);
+
+/// An open U on XY: the bottom (0,0)→(600,0), the right drawn down (600,400)→(600,0), the top (600,400)→(0,400), in
+/// Auto members of `member` (frame.member's profile and anchor), after `setup`. Open, nothing is outer and the right
+/// runs as drawn. Closed by the left (0,400)→(0,0), the outline runs up the right side, so Auto runs the right against
+/// its line. Gives the right tube and the names of its faces at `open`, then once the U is closed, at `closed`.
+fn names_across_closing(setup: impl Fn(&mut Session), member: Value, open: &[Pick], closed: &[Pick]) -> [(Measured, Vec<String>); 2] {
+    let mut s = Session::default();
+    setup(&mut s);
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
+    for points in [[[0, 0], [600, 0]], [[600, 400], [600, 0]], [[600, 400], [0, 400]]] {
+        run(&mut s, "sketch.line", json!({"points": points}));
+    }
+    run(&mut s, "sketch.finish", json!({}));
+    let mut p = json!({"sketch": "Frame", "corner": "auto"});
+    for (k, v) in member.as_object().unwrap() {
+        p[k] = v.clone();
+    }
+    run(&mut s, "frame.member", p);
+    let named = |s: &mut Session, picks: &[Pick]| {
+        let right = bodies(s).into_iter().find(|b| b.3[1] - b.2[1] > 300.0 && b.2[0] > 500.0).unwrap();
+        let names = solidcraft_doc::naming::face_names(s.model.state().body(&right.0).unwrap()).to_vec();
+        let picked = picks.iter().map(|(at, n)| names[face_pick(s, &right.0, *at, *n)["index"].as_u64().unwrap() as usize].clone()).collect();
+        (right, picked)
+    };
+    let before = named(&mut s, open);
+    run(&mut s, "sketch.edit", json!({"sketch": "Frame"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 400], [0, 0]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    assert_eq!(bodies(&mut s).len(), 4);
+    [before, named(&mut s, closed)]
+}
+
+/// The walls of a 40 × 40 box tube with 3 mm walls whose box starts at x0 and z0: facing +X, −X, +Z, −Z outside, then
+/// the bore's walls behind them.
+fn box_walls(x0: f64, z0: f64) -> [Pick; 8] {
+    let (mx, mz) = (x0 + 20.0, z0 + 20.0);
+    [
+        ([x0 + 40.0, 200.0, mz], [1.0, 0.0, 0.0]),
+        ([x0, 200.0, mz], [-1.0, 0.0, 0.0]),
+        ([mx, 200.0, z0 + 40.0], [0.0, 0.0, 1.0]),
+        ([mx, 200.0, z0], [0.0, 0.0, -1.0]),
+        ([x0 + 37.0, 200.0, mz], [-1.0, 0.0, 0.0]),
+        ([x0 + 3.0, 200.0, mz], [1.0, 0.0, 0.0]),
+        ([mx, 200.0, z0 + 37.0], [0.0, 0.0, -1.0]),
+        ([mx, 200.0, z0 + 3.0], [0.0, 0.0, 1.0]),
+    ]
+}
+
+/// The same tube before and after: the same box and volume.
+fn assert_same_solid(before: &Measured, after: &Measured) {
+    assert!(near3(before.2, after.2) && near3(before.3, after.3) && rel(after.1, before.1) < 1e-9, "{before:?} {after:?}");
+}
+
 #[test]
 fn closing_an_outline_keeps_a_tubes_face_names() {
-    // An open U on XY: the bottom (0,0)→(600,0), the right drawn down (600,400)→(600,0), the top (600,400)→(0,400).
-    // Open, nothing is outer and the right runs as drawn. Closed by the left (0,400)→(0,0), the outline runs up the
-    // right side, so Auto runs the right against its line. Each wall of the right tube keeps its name: the wall
-    // at the same place in its section, outer wall, bore wall, top and bottom alike.
-    //
-    // Centred, the tube is the same solid either way round, x 580…620, z −20…20. Anchored bottom left (−20, −20),
-    // its section's x is up × run: +X running as drawn (−Y), the tube outside the U at x 600…640; −X running up (+Y),
-    // inside the closed outline at x 560…600; z 0…40 both ways. Built from its section mirrored, it is the open
-    // tube moved 40 along −X: each wall keeps the name of the wall it was moved from, the +X wall's at x 640 then 600.
-    for (anchor, open_x, closed_x, z) in [("center", 580.0, 580.0, -20.0), ("bottom_left", 600.0, 560.0, 0.0)] {
-        let mut s = Session::default();
-        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
-        for points in [[[0, 0], [600, 0]], [[600, 400], [600, 0]], [[600, 400], [0, 400]]] {
-            run(&mut s, "sketch.line", json!({"points": points}));
-        }
-        run(&mut s, "sketch.finish", json!({}));
-        run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "anchor": anchor}));
-        // The right tube, and the name of each of its walls facing +X, −X, +Z, −Z outside, then the bore's
-        // walls behind them, from its low side x0.
-        let walls = |s: &mut Session, x0: f64| {
-            let right = bodies(s).into_iter().find(|b| b.3[1] - b.2[1] > 300.0 && b.2[0] > 500.0).unwrap();
-            assert!((right.2[0] - x0).abs() < 1e-6 && (right.3[0] - x0 - 40.0).abs() < 1e-6, "{anchor}: {right:?}");
-            let names = solidcraft_doc::naming::face_names(s.model.state().body(&right.0).unwrap()).to_vec();
-            let (mx, mz) = (x0 + 20.0, z + 20.0);
-            let (px, nx) = (x0 + 40.0, x0);
-            let picks = [
-                ([px, 200.0, mz], [1.0, 0.0, 0.0]),
-                ([nx, 200.0, mz], [-1.0, 0.0, 0.0]),
-                ([mx, 200.0, z + 40.0], [0.0, 0.0, 1.0]),
-                ([mx, 200.0, z], [0.0, 0.0, -1.0]),
-                ([px - 3.0, 200.0, mz], [-1.0, 0.0, 0.0]),
-                ([nx + 3.0, 200.0, mz], [1.0, 0.0, 0.0]),
-                ([mx, 200.0, z + 37.0], [0.0, 0.0, -1.0]),
-                ([mx, 200.0, z + 3.0], [0.0, 0.0, 1.0]),
-            ];
-            picks.map(|(at, n)| names[face_pick(s, &right.0, at, n)["index"].as_u64().unwrap() as usize].clone())
-        };
-        let open = walls(&mut s, open_x);
-        run(&mut s, "sketch.edit", json!({"sketch": "Frame"}));
-        run(&mut s, "sketch.line", json!({"points": [[0, 400], [0, 0]]}));
-        run(&mut s, "sketch.finish", json!({}));
-        assert_eq!(bodies(&mut s).len(), 4);
-        let closed = walls(&mut s, closed_x);
-        assert_eq!(open, closed, "{anchor}");
-    }
+    // Each wall of the right tube keeps its name: the wall at the same place in its section, outer wall, bore wall,
+    // top and bottom alike. Centred, the tube is the same solid either way round, x 580…620, z −20…20.
+    let walls = box_walls(580.0, -20.0);
+    let [(open, before), (closed, after)] = names_across_closing(|_| {}, json!({"profile": tube(), "anchor": "center"}), &walls, &walls);
+    assert_same_solid(&open, &closed);
+    assert_eq!(before, after);
+    // Anchored bottom left (−20, −20), its section's x is up × run: +X running as drawn (−Y), the tube outside the U at
+    // x 600…640; −X running up (+Y), inside the closed outline at x 560…600; z 0…40 both ways. Built from its section
+    // mirrored, it is the open tube moved 40 along −X: each wall keeps the name of the wall it was moved from.
+    let [(open, before), (closed, after)] =
+        names_across_closing(|_| {}, json!({"profile": tube(), "anchor": "bottom_left"}), &box_walls(600.0, 0.0), &box_walls(560.0, 0.0));
+    let at = |b: &Measured| [b.2[0], b.3[0], b.2[2], b.3[2]];
+    assert!(at(&open) == [600.0, 640.0, 0.0, 40.0] && at(&closed) == [560.0, 600.0, 0.0, 40.0], "{open:?} {closed:?}");
+    assert_eq!(before, after);
+}
+
+#[test]
+fn a_sketch_section_off_its_origin_keeps_its_face_names() {
+    // A square tube drawn in its own sketch about (100, 50), not about the sketch's origin: 40 × 40 with 3 mm walls
+    // and square corners, placed by its centre. It is the same solid either way round, x 580…620, z −20…20, and each
+    // wall keeps its name.
+    let section = |s: &mut Session| {
+        run(s, "sketch.create", json!({"plane": "XY", "name": "Tube section"}));
+        run(s, "sketch.rectangle.two_point", json!({"p0": [80, 30], "p1": [120, 70]}));
+        run(s, "sketch.rectangle.two_point", json!({"p0": [83, 33], "p1": [117, 67]}));
+        run(s, "sketch.finish", json!({}));
+    };
+    let walls = box_walls(580.0, -20.0);
+    let [(open, before), (closed, after)] =
+        names_across_closing(section, json!({"profile_sketch": "Tube section", "anchor": "center"}), &walls, &walls);
+    assert_same_solid(&open, &closed);
+    assert_eq!(before, after);
+}
+
+#[test]
+fn an_angle_section_keeps_its_face_names() {
+    // A 60 × 40 × 5 angle, centred: its 60 leg along the section's x at its bottom (z −20…−15), its 40 leg up its
+    // left side. Open, the right runs −Y and the section's x is +X: the 40 leg at x 570…575. Run the other way the
+    // section is mirrored and the 40 leg is at x 625…630. Each face keeps the name of the face swept from the same
+    // edge of the section: the 60 leg's outer (z −20) and inner (z −15) faces, and the 40 leg's outer face (x 570
+    // facing −X, then x 630 facing +X) and its inner face (x 575, then 625).
+    let open = [
+        ([600.0, 200.0, -20.0], [0.0, 0.0, -1.0]),
+        ([600.0, 200.0, -15.0], [0.0, 0.0, 1.0]),
+        ([570.0, 200.0, 0.0], [-1.0, 0.0, 0.0]),
+        ([575.0, 200.0, 0.0], [1.0, 0.0, 0.0]),
+    ];
+    let closed = [
+        ([600.0, 200.0, -20.0], [0.0, 0.0, -1.0]),
+        ([600.0, 200.0, -15.0], [0.0, 0.0, 1.0]),
+        ([630.0, 200.0, 0.0], [1.0, 0.0, 0.0]),
+        ([625.0, 200.0, 0.0], [-1.0, 0.0, 0.0]),
+    ];
+    let angle = json!({"kind": "angle", "width": 60, "height": 40, "thickness": 5});
+    let [(_, before), (_, after)] = names_across_closing(|_| {}, json!({"profile": angle, "anchor": "center"}), &open, &closed);
+    assert_eq!(before, after);
 }
 
 #[test]
