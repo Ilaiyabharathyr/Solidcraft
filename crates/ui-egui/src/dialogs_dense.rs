@@ -1382,6 +1382,15 @@ mod tests {
             let (x, y) = (e[0].as_f64().unwrap(), e[1].as_f64().unwrap());
             assert!(((x - 5.0).hypot(y - 5.0) - 1.0).abs() < 1e-3, "an edge off the hole's rim: {e}");
         }
+        // The edges the dialog's corners and bodies are read from leave them out too.
+        let items = h.app.dialog.as_ref().unwrap().items();
+        let ids = super::super::fillet_edge_ids(&h.app.session, &items);
+        let world = crate::open_meshing::session_world(&h.app.session);
+        assert_eq!(ids.len(), edges.len(), "{ids:?}");
+        for (body, i) in &ids {
+            let mid = polyline_mid(&world.body(body).unwrap().mesh().edges[*i]);
+            assert!(((mid.x - 5.0).hypot(mid.y - 5.0) - 1.0).abs() < 1e-3, "an edge off the hole's rim: {mid:?}");
+        }
         // And the fillet it asks for builds.
         h.app.run("solid.fillet", p).unwrap();
     }
