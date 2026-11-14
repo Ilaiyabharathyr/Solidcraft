@@ -479,7 +479,7 @@ impl<'de> Deserialize<'de> for CornerParam {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         serde_json::from_value::<CornerType>(Value::deserialize(d)?)
             .map(CornerParam)
-            .map_err(|_| D::Error::custom(whole("`corner` must be none, mitre, butt or coped_butt")))
+            .map_err(|_| D::Error::custom(whole("`corner` must be auto, none, mitre, butt or coped_butt")))
     }
 }
 
@@ -489,9 +489,9 @@ impl JsonSchema for CornerParam {
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
-            "description": "How two members ending at one point are cut.",
+            "description": "How members ending at one point are cut.",
             "type": "string",
-            "enum": ["none", "mitre", "butt", "coped_butt"]
+            "enum": ["auto", "none", "mitre", "butt", "coped_butt"]
         })
     }
 }
@@ -508,7 +508,7 @@ impl<'de> Deserialize<'de> for CornersParam {
         if a.len() > MAX_MEMBERS {
             return Err(fail());
         }
-        let entry = || D::Error::custom(whole("`corners` entries must be {members: [line or pair id, line or pair id], corner, flip?}"));
+        let entry = || D::Error::custom(whole("`corners` entries must be {members: [2 to 1000 line or pair ids], corner, flip?}"));
         a.into_iter().map(|v| serde_json::from_value(v).map_err(|_| entry())).collect::<Result<_, _>>().map(CornersParam)
     }
 }
@@ -519,13 +519,13 @@ impl JsonSchema for CornersParam {
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
-            "description": "Corners finished their own way: the ids (lines' or pairs') of the two members that meet there, the corner type, and whether the other member runs through.",
+            "description": "Corners finished their own way: the ids (lines' or pairs') of the 2 to 1000 members that meet there, the corner type, and whether the other member runs through.",
             "type": "array", "maxItems": MAX_MEMBERS,
             "items": {
                 "type": "object",
                 "properties": {
-                    "members": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2},
-                    "corner": {"type": "string", "enum": ["none", "mitre", "butt", "coped_butt"]},
+                    "members": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": MAX_MEMBERS},
+                    "corner": {"type": "string", "enum": ["auto", "none", "mitre", "butt", "coped_butt"]},
                     "flip": {"type": "boolean"}
                 },
                 "required": ["members", "corner"]
@@ -819,13 +819,16 @@ pub struct FrameMemberKeys {
     #[serde(default)]
     pub locate: Option<[f64; 2]>,
     /// How two members ending at one point are cut: `none` (ends square to their lines),
-    /// `mitre`, `butt` or `coped_butt`. Default: none.
+    /// `mitre`, `butt`, `coped_butt` or `auto` (each corner by its angle). Default: none.
     #[serde(default)]
     pub corner: Option<CornerParam>,
     /// With a butt or coped butt: the other member runs through. Default: false.
     #[serde(default)]
     pub flip: Option<bool>,
-    /// Corners finished their own way, each named by its two members' line or pair ids.
+    /// Free ends are fitted to the tubes of earlier Frame Members. Default: false.
+    #[serde(default)]
+    pub fit_ends: Option<bool>,
+    /// Corners finished their own way, each named by its members' (2 to 1000) line or pair ids.
     #[serde(default)]
     pub corners: Option<CornersParam>,
     /// How far the profile turns about the line, a number of degrees or an expression. Default:

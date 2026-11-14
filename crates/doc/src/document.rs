@@ -1393,7 +1393,10 @@ pub enum FeatureKind {
         /// With a butt: the other member runs through.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         flip: bool,
-        /// Corners finished their own way, each named by the lines of its two members.
+        /// Free ends are fitted to the tubes of earlier Frame Members.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        fit_ends: bool,
+        /// Corners finished their own way, each named by the lines of its members.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         corners: Vec<crate::frame::CornerOverride>,
         /// How far the profile turns about the line (see `frame::member_axes`).

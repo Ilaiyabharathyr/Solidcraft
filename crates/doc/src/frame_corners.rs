@@ -20,6 +20,8 @@ use crate::{DocError, Result};
 pub enum CornerType {
     #[default]
     None,
+    /// Each corner is finished by its angle (the rule is applied where the frame is built).
+    Auto,
     Mitre,
     Butt,
     CopedButt,
@@ -31,15 +33,15 @@ impl CornerType {
     }
     /// Whether Flip means anything: which member runs through.
     pub fn flips(&self) -> bool {
-        matches!(self, CornerType::Butt | CornerType::CopedButt)
+        matches!(self, CornerType::Auto | CornerType::Butt | CornerType::CopedButt)
     }
 }
 
-/// One corner finished its own way, named by the ids of the two members that meet there (a line's,
-/// or a pair's `pair<N>`).
+/// One corner finished its own way, named by the ids of the two or more members that meet there (a
+/// line's, or a pair's `pair<N>`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CornerOverride {
-    pub members: [String; 2],
+    pub members: Vec<String>,
     pub corner: CornerType,
     #[serde(default)]
     pub flip: bool,
@@ -207,7 +209,8 @@ pub fn corner_cuts(
     drawn: &[usize],
 ) -> Result<(Vec<(usize, bool, Cut)>, Option<(usize, usize)>)> {
     let angle = interior(segments, corner);
-    if kind.is_none() || angle > PI - IN_LINE_DEG.to_radians() {
+    // Until the Auto rule is built, Auto cuts nothing, as None.
+    if matches!(kind, CornerType::None | CornerType::Auto) || angle > PI - IN_LINE_DEG.to_radians() {
         return Ok((Vec::new(), None));
     }
     let p = corner.point;

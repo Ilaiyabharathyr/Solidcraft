@@ -542,7 +542,7 @@ fn corner_settings_are_taken_and_saved() {
     let kind = &reopened.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().kind;
     let solidcraft_doc::FeatureKind::FrameMember { corner, flip, corners, .. } = kind else { panic!("not a frame member") };
     assert_eq!((*corner, *flip), (CornerType::Butt, true));
-    assert_eq!(*corners, [CornerOverride { members: [l1, l2], corner: CornerType::Mitre, flip: false }]);
+    assert_eq!(*corners, [CornerOverride { members: vec![l1, l2], corner: CornerType::Mitre, flip: false }]);
 }
 
 #[test]
@@ -585,6 +585,82 @@ fn a_design_without_corner_settings_builds_as_before() {
     for key in ["\"corner\"", "\"flip\"", "\"corners\""] {
         assert!(!json.contains(key), "{key} saved");
     }
+}
+
+/// A frame sketch `Y` of three lines from the origin, by id.
+fn three_at_a_point(s: &mut Session) -> [String; 3] {
+    run(s, "sketch.create", json!({"plane": "XY", "name": "Y"}));
+    for end in [[600, 0], [0, 400], [-300, -300]] {
+        run(s, "sketch.line", json!({"points": [[0, 0], end]}));
+    }
+    run(s, "sketch.finish", json!({}));
+    let l = sketch_lines(s, "Y");
+    [l[0].0.clone(), l[1].0.clone(), l[2].0.clone()]
+}
+
+#[test]
+fn auto_and_fit_ends_are_taken_and_saved() {
+    use solidcraft_doc::frame::{CornerOverride, CornerType};
+    let mut s = Session::default();
+    let ids = three_at_a_point(&mut s);
+    run(
+        &mut s,
+        "frame.member",
+        json!({"sketch": "Y", "profile": tube(), "corner": "auto", "fit_ends": true,
+               "corners": [{"members": ids, "corner": "auto", "flip": true}]}),
+    );
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let kind = &reopened.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().kind;
+    let solidcraft_doc::FeatureKind::FrameMember { corner, fit_ends, corners, .. } = kind else { panic!("not a frame member") };
+    assert_eq!((*corner, *fit_ends), (CornerType::Auto, true));
+    assert_eq!(*corners, [CornerOverride { members: ids.to_vec(), corner: CornerType::Auto, flip: true }]);
+}
+
+#[test]
+fn an_old_two_member_override_still_loads() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let (l1, l2) = two_lines(&s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corners": [{"members": [l1, l2], "corner": "mitre"}]}));
+    let mut doc: Value = serde_json::from_str(&s.doc.to_json()).unwrap();
+    let text = doc.to_string();
+    assert!(text.contains(&format!("\"members\":[\"{l1}\",\"{l2}\"]")), "{text}");
+    doc = serde_json::from_str(&text).unwrap();
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&doc.to_string()).unwrap());
+    let kind = &reopened.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().kind;
+    let solidcraft_doc::FeatureKind::FrameMember { corners, .. } = kind else { panic!("not a frame member") };
+    assert_eq!(corners[0].members, vec![l1, l2]);
+}
+
+#[test]
+fn bad_auto_settings_are_refused() {
+    let mut s = Session::default();
+    let ids = three_at_a_point(&mut s);
+    let many: Vec<String> = (0..=solidcraft_doc::frame::MAX_MEMBERS).map(|k| format!("l{k}")).collect();
+    let cases = [
+        ("fit_ends", json!({"fit_ends": "yes"})),
+        ("corners", json!({"corners": [{"members": [ids[0]], "corner": "auto"}]})),
+        ("corners", json!({"corners": [{"members": [ids[0], ids[1], ids[0]], "corner": "auto"}]})),
+        ("corners", json!({"corners": [{"members": many, "corner": "auto"}]})),
+        ("corner", json!({"corner": "automatic"})),
+    ];
+    for (key, extra) in cases {
+        let mut p = json!({"sketch": "Y", "profile": tube()});
+        for (k, v) in extra.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        let e = s.execute("frame.member", &p).unwrap_err().to_string();
+        assert!(e.contains(&format!("`{key}`")), "{extra:.80}: {e}");
+    }
+    assert!(s.doc.features.iter().all(|f| !matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })));
+}
+
+#[test]
+fn a_design_without_fit_ends_saves_without_it() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "fit_ends": false}));
+    assert!(!s.doc.to_json().contains("fit_ends"));
 }
 
 /// A frame sketch `V` of the lines through `points` (one line per pair of neighbours), with tube

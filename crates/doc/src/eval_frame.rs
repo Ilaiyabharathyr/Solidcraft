@@ -43,6 +43,7 @@ pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
         Plane::new(origin, x, y).unwrap_or(Plane { origin, x, y })
     };
     // A frame with no corners to finish is built exactly as it always was.
+    // Until the Auto rule is built, Auto builds exactly as None.
     let mut cut = if corner.is_none() && corners.is_empty() {
         Vec::new()
     } else {
@@ -123,7 +124,13 @@ fn corner_ends(
         .collect();
     let mut finishes = vec![finish; corners.len()];
     for o in overrides {
-        let [a, b] = &o.members;
+        // Two members: the corner they meet at. Three or more are Auto's (not built yet).
+        let [a, b] = o.members.as_slice() else {
+            if o.members.len() < 2 {
+                return Err(DocError::Invalid("A corner override names at least two members".into()));
+            }
+            continue;
+        };
         let k = at.get(&pair(a, b)).ok_or_else(|| DocError::Invalid("A corner override is not at a corner of the frame".into()))?;
         if let Some(f) = finishes.get_mut(*k) {
             *f = (o.corner, o.flip);
@@ -508,7 +515,7 @@ pub fn corner_at_point(st: &ModelState, sketch: u64, lines: &[String], point: &s
 
 /// The sketch point at the corner where the lines `pair` end together (an end point of either
 /// line, named as a pick names it), or `None` when they no longer meet.
-pub fn corner_point(st: &ModelState, sketch: u64, pair: &[String; 2]) -> Option<String> {
+pub fn corner_point(st: &ModelState, sketch: u64, pair: &[String]) -> Option<String> {
     let ss = st.sketch(sketch)?;
     let corner = frame_corners::find_corners(&member_lines(ss, pair).ok()?).into_iter().next()?;
     let sk = &ss.sketch;
