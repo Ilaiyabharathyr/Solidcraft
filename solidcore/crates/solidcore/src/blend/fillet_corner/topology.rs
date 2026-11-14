@@ -626,8 +626,7 @@ impl FilletCorner {
                     // end, below a wall the bar's top meets) has no convexity: it is never
                     // of the opposite one, so it is the corner's edge
                     // (tangency-labs/smlib@1ff7353, WR-593).
-                    if (k.fixes.fillet_nx1_tangent_corner_edge
-                        && check_tangential_edgeuse_at_vertex(k, target, next, vertex, tol_deg)?)
+                    if check_tangential_edgeuse_at_vertex(k, target, next, vertex, tol_deg)?
                         || same_convexity_edges_round_vertex(k, target, filleted, next_edge)?
                     {
                         *need(corner_sides.get_mut(kk), "side index")? = next;
@@ -655,6 +654,7 @@ impl FilletCorner {
         let mixed = (!same0 || !same1) && !closes_onto_vertex;
         let mut end_face = None;
         let mut extend_edge = None;
+        let mut turned_back = [None, None];
 
         for rail in 0..2 {
             let side = *need(sides.get(rail), "side index")?;
@@ -724,9 +724,50 @@ impl FilletCorner {
                     *need(sides.get_mut(rail), "side index")? = radial(target, side)?;
                 }
             } else {
+                // Not upstream (solidcore-native): a rail rolled onto a face whose foot edge
+                // turns back at the rolled-over edge's vertex ends where it crosses the end
+                // face's surface, inside that face (`nx1_end::TurnedBack`)
+                // A rail that did not roll ends there too where it crosses the end face's
+                // surface on the side edge's continuation past its far end, inside its own face
+                // (`nx1_end::rail_passes_side_edge_end`)
+                let turned = match solver.rolled_faces.get(solver_rail).copied().flatten() {
+                    Some(rolled) if mixed => nx1_end::rolled_rail_turns_back(
+                        k,
+                        target,
+                        side,
+                        vertex,
+                        rolled,
+                        solver.tangency_tolerance,
+                    )?,
+                    // a failure in the decision finds nothing: the corner is main's (main
+                    // never asks this decision's queries)
+                    None if mixed => match nx1_end::rail_passes_side_edge_end(
+                        k,
+                        target,
+                        solver,
+                        matches!(&*solver_object, SolverObject::ConstantRadius(_)),
+                        solver_rail,
+                        side,
+                        vertex,
+                    ) {
+                        Ok(found) => found,
+                        // only Unported and a cancellation pass on: any other failure,
+                        // `FaceTrimsUnavailable` from the classification included, declines
+                        Err(e @ (SolidError::Unported { .. } | SolidError::Cancelled { .. })) => {
+                            return Err(e)
+                        }
+                        Err(_) => None,
+                    },
+                    _ => None,
+                };
                 pseudo
                     .fillet_vertex_mut(fv)?
-                    .set_fillet_vertex_type(FilletVertexType::RailXEdgeuse);
+                    .set_fillet_vertex_type(if turned.is_some() {
+                        FilletVertexType::RailXExtendedEdgeuse
+                    } else {
+                        FilletVertexType::RailXEdgeuse
+                    });
+                *need(turned_back.get_mut(rail), "side index")? = turned;
                 if is_fillet_side_face(target, filleted, face)? {
                     *need(sides.get_mut(rail), "side index")? = radial(target, side)?;
                 }
@@ -759,6 +800,7 @@ impl FilletCorner {
             sides,
             end_face,
             extend_edge,
+            turned_back,
         })
     }
 }
@@ -902,11 +944,10 @@ impl FilletCorner {
         }
 
         // The corner is the blend corner's Turn (WR-697): SmBlendCorner::Classify made a pair
-        // that is G1, or within 5 degrees at a face corner of the other convexity, a Join, with
-        // the same tests on the same edges and tolerance, so the Turn never blends here
-        // (`m_bG1Case` stays FALSE; the fork's smlib#113 e4083c8, #2400). Its edges are G1
-        // only where a sharp edge stands between the blends' faces: the blends still
-        // meet on their crossing. At four edges it is the two blends mitred, one
+        // whose balls are one at the vertex a Join, so the Turn never blends here
+        // (`m_bG1Case` stays FALSE; the fork's smlib#113 e4083c8, #2400). Its edges may meet
+        // within the solvers' tangency tolerance (a few degrees apart, or G1 where a sharp
+        // edge stands between the blends' faces): the blends still meet on their crossing. At four edges it is the two blends mitred, one
         // FILLET_X_FILLET edge; at three the edges' angle and the face corner's convexity
         // choose the mitre's kind.
         let (angle_deg, mixed_convexity) = if total == 3 {
