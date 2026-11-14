@@ -3193,6 +3193,34 @@ fn a_patterned_earlier_frame_is_fitted() {
 }
 
 #[test]
+fn an_end_on_the_second_diagonal_of_an_earlier_x_brace_is_fitted_to_it() {
+    // A: an X brace of solid 40 × 40 bar centred on its lines, (0, 0)…(400, 400) then (0, 400)…(400, 0), crossing at
+    // (200, 200), where each diagonal's middle lies inside the other. B's line runs square off the second diagonal
+    // from (300, 100) on it: its end is fitted to that diagonal's side, so B and A (2) don't overlap. The same for
+    // A's copies mirrored across YZ, which B meets at (−300, 100): B overlaps no tube of A or of its copies.
+    for mirrored in [false, true] {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "X"}));
+        run(&mut s, "sketch.line", json!({"points": [[0, 0], [400, 400]]}));
+        run(&mut s, "sketch.line", json!({"points": [[0, 400], [400, 0]]}));
+        run(&mut s, "sketch.finish", json!({}));
+        let bar = json!({"kind": "bar", "width": 40, "height": 40});
+        run(&mut s, "frame.member", json!({"sketch": "X", "profile": bar, "anchor": "center", "name": "A", "body_name": "A"}));
+        let a: Vec<String> = named(&mut s, "A").into_iter().map(|b| b.0).collect();
+        if mirrored {
+            run(&mut s, "solid.mirror", json!({"bodies": a, "plane": "YZ"}));
+        }
+        let x = if mirrored { -1.0 } else { 1.0 };
+        later_frame(&mut s, 0.0, &[[[300.0 * x, 100.0], [450.0 * x, 250.0]]], 25.0, true);
+        for other in bodies(&mut s).into_iter().map(|b| b.0).filter(|n| n != "B") {
+            let i = run(&mut s, "inspect.interference", json!({"bodies": ["B", other]}));
+            let o: f64 = i["interferences"].as_array().map_or(0.0, |all| all.iter().map(|x| f(&x["volume_mm3"])).sum());
+            assert!(o < 1e-3, "mirrored {mirrored}: B overlaps {other} by {o} mm³");
+        }
+    }
+}
+
+#[test]
 fn earlier_tubes_are_never_changed() {
     let mut s = Session::default();
     earlier_frame(&mut s);
