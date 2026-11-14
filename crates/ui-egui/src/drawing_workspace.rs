@@ -21,6 +21,37 @@ pub struct State {
     settings: Option<Rect>,
     /// The sheet page's camera, zoom and drawn marks: screen only, never saved.
     pub(crate) page: crate::drawing_sheet_page::Page,
+    status_revision: Option<u64>,
+    /// Last active drawing observed by the status card, including close/open transitions.
+    status_drawing_id: Option<String>,
+    pub(crate) status_controller: crate::drawing_status_controller::DrawingStatusController,
+    status_dirty: bool,
+    status_error: Option<String>,
+    repair_ui: crate::drawing_repair_ui::RepairUiState,
+}
+
+pub(crate) fn invalidate_status(app: &mut SolveApp) {
+    app.drawing_workspace.status_controller.invalidate();
+    app.drawing_workspace.status_dirty = true;
+    app.drawing_workspace.status_error = None;
+    app.drawing_workspace.repair_ui.clear();
+}
+
+fn refresh_status_if_needed(app: &mut SolveApp) {
+    let revision = app.session.revision;
+    // A drawing may be closed and reopened without changing the source model revision.
+    // Never keep the transient "no drawing open" status error for the reopened sheet.
+    let drawing_id = app.session.drawing("drawing.inspect").ok().map(|drawing| solidcraft_engine::doc::ids::encode(drawing.id));
+    if !app.drawing_workspace.status_dirty
+        && app.drawing_workspace.status_revision == Some(revision)
+        && app.drawing_workspace.status_drawing_id == drawing_id
+    {
+        return;
+    }
+    app.drawing_workspace.status_drawing_id = drawing_id;
+    app.drawing_workspace.status_revision = Some(revision);
+    app.drawing_workspace.status_dirty = false;
+    app.drawing_workspace.status_error = crate::drawing_status_engine::refresh(&mut app.session, &mut app.drawing_workspace.status_controller).err();
 }
 
 pub fn active(app: &SolveApp) -> bool {
@@ -112,6 +143,29 @@ pub(crate) fn left_inset(app: &SolveApp) -> f32 {
 
 /// Reuse Browser's existing content-hugging host and resize seam, with Drawing contents.
 pub(crate) fn browser_contents(app: &mut SolveApp, ui: &mut egui::Ui) {
+    refresh_status_if_needed(app);
+    ui.push_id("drawing_attention_status", |ui| {
+        if let Some(error) = &app.drawing_workspace.status_error {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.heading("Drawing status");
+                ui.label(format!("Status unavailable: {error}"));
+            });
+        } else if let Some(snapshot) = app.drawing_workspace.status_controller.snapshot() {
+            crate::drawing_attention_card::show(ui, &snapshot);
+            let repaired = crate::drawing_repair_ui::show(
+                ui,
+                &mut app.session,
+                &mut app.drawing_workspace.repair_ui,
+                &snapshot,
+            );
+            if repaired {
+                invalidate_status(app);
+            }
+        } else {
+            ui.label("Drawing status not yet available");
+        }
+    });
+    ui.add_space(Tokens::get().space_8);
     if let Ok(drawing) = app.session.drawing("drawing.inspect") {
         for sheet in &drawing.sheets {
             let id = ui.make_persistent_id(("drawing_browser_sheet", app.session.uid, drawing.id, sheet.id));
@@ -155,6 +209,7 @@ pub(crate) fn browser_contents(app: &mut SolveApp, ui: &mut egui::Ui) {
 /// The sheet page draws the open drawing's sheet; with no drawing open there is no paper, sample
 /// geometry or camera, only a note.
 pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
+    refresh_status_if_needed(app);
     if crate::drawing_sheet_page::show(app, ui) {
         return;
     }
@@ -676,6 +731,104 @@ fn panel_body(app: &mut SolveApp, ui: &mut egui::Ui) {
 mod tests {
     use super::*;
     use crate::scenario::Harness;
+
+    #[test]
+    fn status_refreshes_when_same_drawing_reopens_after_close() {
+        let mut h = Harness::new();
+        h.app.home.open = false;
+        h.app.ui.show_browser = true;
+        h.app.run("solid.box", serde_json::json!({"length":40,"width":20,"height":3})).unwrap();
+        enter(&mut h.app, true).unwrap();
+        h.app.run("drawing.create", serde_json::json!({})).unwrap();
+        let id = solidcraft_engine::doc::ids::encode(h.app.session.drawing("drawing.inspect").unwrap().id);
+        h.frames(3);
+        assert!(h.app.drawing_workspace.status_error.is_none());
+        h.app.run("drawing.close", serde_json::json!({})).unwrap();
+        h.frames(3);
+        assert!(h.app.drawing_workspace.status_error.is_some(), "the closed drawing must not show a stale successful status");
+        h.app.run("drawing.open", serde_json::json!({"drawing": id})).unwrap();
+        h.frames(3);
+        assert!(h.app.drawing_workspace.status_error.is_none(), "the reopened drawing must clear the transient closed-state error");
+    }
+
+    #[test]
+    fn repair_lost_bore_through_visible_buttons_review_confirm_and_undo() {
+        use solidcore_record::Vec3;
+        use solidcraft_viewport::vec::Vec3Ops;
+        let mut h = Harness::new();
+        h.app.home.open = false;
+        h.app.ui.show_browser = true;
+
+        // Real M2 acceptance plate, not a fixture card or a fake status response.
+        let recipe: serde_json::Value =
+            serde_json::from_str(include_str!("../../../examples/acceptance/drawing_m2.json")).unwrap();
+        let executed = h.app.session.run_script(&recipe).unwrap();
+        assert_eq!(executed.len(), 27);
+        let view = executed.last().unwrap()["view"].clone();
+        let drawing = h.app.run("drawing.inspect", serde_json::json!({})).unwrap()["id"]
+            .as_str().unwrap().to_owned();
+        let added = h.app.run("drawing.dimension.add", serde_json::json!({
+            "view": view,
+            "kind": {"radial": {"edge": [25, 20, 20]}}
+        })).unwrap();
+        let id = added["dimension"].as_str().unwrap().to_owned();
+        assert_eq!(added["status"], "ok");
+        enter(&mut h.app, true).unwrap();
+        h.frames(8);
+
+        // Round the upper Bore1 rim: engine reference is lost but a lower rim survives as a lead.
+        h.app.run("drawing.close", serde_json::json!({})).unwrap();
+        h.frames(3);
+        h.app.run("solid.fillet", serde_json::json!({
+            "body": "Plate", "radius": 1, "edges": [[25, 20, 20]]
+        })).unwrap();
+        h.app.run("drawing.open", serde_json::json!({"drawing": drawing})).unwrap();
+        h.frames(10);
+        let before = h.app.run("drawing.dimension.inspect", serde_json::json!({"dimension": id})).unwrap();
+        assert_eq!(before["status"], "lost", "{before}");
+        let candidates = before["candidates"].as_array().expect("engine must supply repair leads");
+        assert!(!candidates.is_empty(), "{before}");
+        let centre = Vec3::from([20.0, 20.0, 19.0]);
+        let model = h.app.session.model.state();
+        let mesh = model.body("Plate").unwrap().mesh();
+        let index = mesh.edges.iter()
+            .position(|line| line.iter().all(|p| (p.dist(centre) - 5.0).abs() < 1e-6))
+            .expect("a surviving circular rim below fillet");
+        let pick = serde_json::json!({"edge":{"body":"Plate","index":index}});
+        let candidate_index = candidates.iter().position(|item| item == &pick)
+            .unwrap_or_else(|| panic!("engine lead for lower bore rim not offered: {before}"));
+        let undo_before = h.app.session.undo.len();
+        let action = format!("Repair {id}");
+
+        // These are actual egui accessibility widget clicks with pointer events.
+        assert!(h.widget(&action).is_some(), "Repair button must be visible");
+        h.step(&serde_json::json!({"widget":action})).unwrap();
+        h.frames(4);
+        assert!(h.widget("Review repair").is_some(), "repair panel opens");
+        assert_eq!(h.app.session.undo.len(), undo_before, "opening repair must not mutate drawing");
+        if candidate_index != 0 {
+            h.step(&serde_json::json!({"widget":"Candidate 1"})).unwrap();
+            h.frames(2);
+            h.step(&serde_json::json!({"widget":pick.to_string()})).unwrap();
+            h.frames(2);
+        }
+        h.step(&serde_json::json!({"widget":"Review repair"})).unwrap();
+        h.frames(3);
+        assert_eq!(h.app.session.undo.len(), undo_before, "review is read-only");
+        assert!(h.widget("Confirm repair").is_some(), "only explicit confirmation may mutate");
+        h.step(&serde_json::json!({"widget":"Confirm repair"})).unwrap();
+        h.frames(6);
+        let repaired = h.app.run("drawing.dimension.inspect", serde_json::json!({"dimension":id})).unwrap();
+        assert_eq!(repaired["status"],"ok", "{repaired}");
+        assert_eq!(repaired["text"],"Ø10.00");
+        assert_eq!(h.app.session.undo.len(), undo_before+1, "one undo step for confirmed repair");
+        assert!(h.widget(&format!("Repair {id}")).is_none(), "fixed dimension must stop asking for repair");
+
+        h.app.run("edit.undo", serde_json::json!({})).unwrap();
+        h.frames(4);
+        let undone = h.app.run("drawing.dimension.inspect", serde_json::json!({"dimension":id})).unwrap();
+        assert_eq!(undone["status"], "lost", "undo must restore the lost reference");
+    }
 
     #[test]
     fn browser_lists_sheets_of_the_open_drawing() {
