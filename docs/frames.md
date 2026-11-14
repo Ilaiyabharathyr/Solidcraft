@@ -2,7 +2,7 @@
 
 Frames and weldments (#4003) are structural members (tube, angle, channel, beam, an aluminium
 extrusion of your own) laid along the lines of a frame sketch. This page covers what has landed:
-members and their profiles, and end caps. Corners, trims, gussets, welds and the cut list follow.
+members and their profiles, corner cuts and end caps. Trims, gussets, welds and the cut list follow.
 
 ## The workflow
 
@@ -23,7 +23,7 @@ members and their profiles, and end caps. Corners, trims, gussets, welds and the
 ```
 
 Members are ordinary bodies: mirror, pattern, move, drill and combine them with the usual
-commands. Where members meet they overlap until corner treatments land.
+commands. Where members meet they overlap unless you choose a corner type (see Corners).
 
 The **Weldments** ribbon tab gathers the frame commands: New Sketch, Frame Member, End Cap and
 Parameters. Like Sheet Metal it is always there, and it selects itself when a frame member is
@@ -36,12 +36,63 @@ the selected body (or the last body of the active component).
 - **Section (optional)**: pick the section's region in another sketch (the ring between two
   circles makes a tube). With nothing picked, **Profile** chooses a built-in profile and its
   dimensions follow; optional ones left empty take their defaults.
+- **Corner Type**, **Flip** and **Corner Overrides** cut the members where two of them meet, as
+  under Corners below. A new Frame Member starts on None.
 - **Anchor**, **Angle** and **Mirror** place the section on each line, as below. **Name** names
   the members (default: after the profile).
 - The preview shows the members as you change the values. **Edit Feature** reopens the dialog with
   the feature's values; the members keep their names through the edit, and a new **Name**
   renames them all. A member made with a whole profile sketch keeps it (the **Section** row shows
   the sketch; untick it for a built-in profile).
+
+## Corners
+
+**Corner Type** (`corner`) cuts the members where two of them meet: `none` (the default, members
+overlap as before), `mitre`, `butt` or `coped_butt`.
+
+A **corner** is a point where exactly two of the feature's members end, within 0.001 mm. Where three
+or more members end, where a member ends on the middle of another, and where lines cross, nothing is
+cut: those stay as before. Two members in line (within 0.01 degrees) stay square whatever the type.
+A corner sharper than 5 degrees inside is refused: "Corner at (x, y, z) is too sharp to finish".
+
+- **Mitre**: both members are cut on the plane that bisects the corner.
+- **Butt**: one member runs through and the other butts against it. Unflipped, the longer member
+  runs through; members within 1 mm of each other in length count as equal, and then the one nearer
+  the sketch's X axis runs through, then the one drawn first. **Flip** (`flip`) swaps them. The
+  through member ends flush with the outside of the other, and the other is cut flat on the near
+  face of the through member. A butt whose through member would run past the far end of the other
+  member is refused: "Corner at (x, y, z) is too flat to butt".
+- **Coped Butt**: the through member is as for Butt. The butting member is cut to the through
+  member's full outer shape, so it fits exactly (a fishmouth on round tube). It keeps its largest
+  piece on its own side of the through member, and a member that lies wholly inside the through
+  member is refused.
+
+**Corner Overrides** (`corners`) give single corners their own type and flip. Each is saved by the
+two lines that meet there, not by the point, so it survives a dimension change while the lines still
+meet. If they no longer do, the feature fails with "A corner override is not at a corner of the
+frame", and Edit Feature still opens with that override listed so it can be removed. Changing the
+feature's Corner Type leaves existing overrides alone; a new override starts as the feature's type.
+
+A member cut away completely fails with "the member on line `id` was cut away completely", and one
+its corners cut into pieces with "the member on line `id` is cut into pieces by its corners".
+
+An **End Cap** sits on a square cut end: the through member of a 90 degree butt. It refuses other
+cut ends (mitres, copes, angled butts).
+
+In the dialog, a box drag in the view picks the frame sketch's lines, and the corner points when
+Corner Overrides is active (Shift adds).
+
+```json
+{"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "round_tube", "diameter": 40, "wall": 3}, "corner": "coped_butt"}}
+{"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "rect_tube", "width": 40, "height": 40, "wall": 3}, "corner": "mitre", "corners": [{"members": ["l1", "l2"], "corner": "butt", "flip": true}]}}
+```
+
+**Known limits.** Each section is placed from world Z and the line's own drawn direction. Where two
+members' sections come in turned or offset differently (lines in a vertical plane, lines drawn head
+to head, or 3D sketches), a rectangular, off-centre, angle or channel section will not meet wall to
+wall at a mitre or butt: the cut planes are right, but no section is turned to match. Square and
+round tubes centred on their lines always meet. Corners of 3D-sketch lines cut (the tie falls to
+drawing order) but cannot be picked in the dialog; set them through `corners` in the command.
 
 ## frame.member
 
