@@ -2736,3 +2736,164 @@ fn a_three_tube_override_on_a_mitre_frame_still_fails() {
     let e = reopened.model.result(member).and_then(|r| r.error.clone()).unwrap_or_default();
     assert!(e.contains("A corner override is not at a corner of the frame"), "{e}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Auto lines sections up (#4003 stage 2, Goal 7): a group's sketch normal is up, outer tubes run round the outline
+
+/// A 600 × 400 rectangle on XZ (the front plane: sketch x = +X, sketch y = −Z, normal +Y), as the frame sketch
+/// `Frame`: x 0…600, z 0…400, drawn anticlockwise in the sketch, so Auto runs every side the way it is drawn.
+fn vertical_rectangle_frame(s: &mut Session) {
+    run(s, "sketch.create", json!({"plane": "XZ", "name": "Frame"}));
+    run(s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, -400]}));
+    run(s, "sketch.finish", json!({}));
+}
+
+/// A 40 × 20 flat bar, square cornered: A = 800.
+fn flat_bar() -> Value {
+    json!({"kind": "bar", "width": 40, "height": 20})
+}
+
+/// Every body's (min, max, volume), sorted by box.
+fn sorted_boxes(s: &mut Session) -> Vec<([f64; 3], [f64; 3], f64)> {
+    let mut bs: Vec<_> = bodies(s).into_iter().map(|b| (b.2, b.3, b.1)).collect();
+    // By the box to 1e-3, so rounding never reorders two boxes that share a corner coordinate.
+    bs.sort_by_key(|b| b.0.iter().chain(&b.1).map(|v| (v * 1e3).round() as i64).collect::<Vec<_>>());
+    bs
+}
+
+/// `got` are `want` (min, max, volume), boxes to 1e-6 and volumes to MEASURED.
+fn assert_boxes(got: &[([f64; 3], [f64; 3], f64)], want: &[([f64; 3], [f64; 3], f64)]) {
+    assert_eq!(got.len(), want.len(), "{got:?}");
+    for (g, w) in got.iter().zip(want) {
+        assert!(near3(g.0, w.0) && near3(g.1, w.1) && rel(g.2, w.2) < MEASURED, "got {g:?} want {w:?}\nall {got:?}");
+    }
+}
+
+#[test]
+fn auto_lines_up_a_vertical_rectangle() {
+    let mut s = Session::default();
+    vertical_rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": flat_bar(), "corner": "auto"}));
+    // Up is the sketch's normal, +Y, for all four: each bar's height (20) lies across the frame's plane, y −10…10,
+    // and its width (40) in the plane, ±20 about its line. (By world Z the 600s would lie flat, y −20…20.)
+    // Butts at 90°: the 600s run through to the 400s' outer faces, 20 past each end, x −20…620: A·640 = 512000.
+    // The 400s are fitted flat to the 600s' near faces, z 20…380: A·360 = 288000.
+    let (long, short) = (800.0 * 640.0, 800.0 * 360.0);
+    assert_boxes(
+        &sorted_boxes(&mut s),
+        &[
+            ([-20.0, -10.0, -20.0], [620.0, 10.0, 20.0], long),
+            ([-20.0, -10.0, 20.0], [20.0, 10.0, 380.0], short),
+            ([-20.0, -10.0, 380.0], [620.0, 10.0, 420.0], long),
+            ([580.0, -10.0, 20.0], [620.0, 10.0, 380.0], short),
+        ],
+    );
+}
+
+#[test]
+fn auto_lines_up_head_to_head_lines() {
+    // Two lines drawn away from the corner at the origin on XZ: along −X (600) and along +Z (400, sketch y −400).
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XZ", "name": "L"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [-600, 0]]}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [0, -400]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "L", "profile": flat_bar(), "corner": "auto", "anchor": "bottom_left"}));
+    // Up is +Y for both, and the bottom-left anchor (−20, −10) puts each section's y 10 above its line: both sit on
+    // the +Y side of the frame's plane, y 0…20. (By world Z, the −X line's x would be −Y and its bar y −40…0.)
+    // In the plane each section's x is y × its run: Z along −X, X along +Z, so the 600 occupies z 0…40 and the 400
+    // x 0…40. The 600 runs through to the 400's far face, x 40 (A·640); the 400 is fitted to the 600's top, z 40
+    // (A·360).
+    assert_boxes(
+        &sorted_boxes(&mut s),
+        &[([-600.0, 0.0, 0.0], [40.0, 20.0, 40.0], 800.0 * 640.0), ([0.0, 0.0, 40.0], [40.0, 20.0, 400.0], 800.0 * 360.0)],
+    );
+}
+
+/// A 600 × 400 rectangle on XY drawn clockwise seen from +Z, as the frame sketch `Frame`, with Auto members of
+/// `profile` anchored bottom left. Each side runs against the anticlockwise outline, so Auto turns its section round:
+/// then x = up × run points into the rectangle for every side, and the bottom-left anchor (−20, −20) puts each 40
+/// tube wholly inside it, 0…40 in from its line and z 0…40.
+fn clockwise_auto_frame(profile: Value) -> Session {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [0, 400], [600, 400], [600, 0], [0, 0]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": profile, "corner": "auto", "anchor": "bottom_left"}));
+    s
+}
+
+#[test]
+fn auto_runs_outer_tubes_round_the_outline() {
+    let mut s = clockwise_auto_frame(tube());
+    // The 600s run through to the 400s' outer faces, which lie on the lines x = 0 and 600: A·600. The 400s are
+    // fitted to the 600s' inner faces, y 40 and 360: A·320.
+    let (long, short) = (tube_area() * 600.0, tube_area() * 320.0);
+    assert_boxes(
+        &sorted_boxes(&mut s),
+        &[
+            ([0.0, 0.0, 0.0], [600.0, 40.0, 40.0], long),
+            ([0.0, 40.0, 0.0], [40.0, 360.0, 40.0], short),
+            ([0.0, 360.0, 0.0], [600.0, 400.0, 40.0], long),
+            ([560.0, 40.0, 0.0], [600.0, 360.0, 40.0], short),
+        ],
+    );
+}
+
+#[test]
+fn auto_lines_up_a_3d_chain_in_its_plane() {
+    // A post and a rail of a 3D sketch, in the plane y = 0: their chain's normal pointing up is +Y (no Z part).
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Tower"}));
+    run(&mut s, "sketch.options", json!({"sketch_3d": true}));
+    run(&mut s, "sketch.line3d", json!({"points": [[0, 0, 0], [0, 0, 1000], [600, 0, 1000]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Tower", "profile": {"kind": "bar", "width": 60, "height": 10}, "corner": "auto"}));
+    // Both bars' height (10) along Y, y −5…5, their width (60) in the plane: the post's along X, the rail's along Z.
+    // (By world Z the rail would lie flat, y −30…30.) Their chained corner is mitred on the plane through
+    // (0, 0, 1000) square to (1, 0, 1): the post reaches z 1030 at x −30, the rail x −30 at z 1030. A mitre through
+    // the centreline keeps A × the line: 600·1000 and 600·600.
+    assert_boxes(
+        &sorted_boxes(&mut s),
+        &[([-30.0, -5.0, 0.0], [30.0, 5.0, 1030.0], 600_000.0), ([-30.0, -5.0, 970.0], [600.0, 5.0, 1030.0], 360_000.0)],
+    );
+}
+
+#[test]
+fn an_end_cap_sits_on_a_tube_auto_runs_against_its_line() {
+    // The bottom, drawn (600, 0) → (0, 0), runs through and lies inside the rectangle, y 0…40, z 0…40; its ends are
+    // cut square at x = 600 (its drawn start) and x = 0 (its drawn end), the 400s' outer faces. End Cap measures
+    // the member from its drawn start, so both are open ends, and each cap covers the same 40 × 40, 6 thick past
+    // its end: x 600…606 and −6…0.
+    let mut s = clockwise_auto_frame(square_tube());
+    let bottom = bodies(&mut s).into_iter().find(|b| b.3[0] - b.2[0] > 500.0 && b.3[1] < 100.0).unwrap();
+    let start = face_pick(&s, &bottom.0, [600.0, 1.5, 20.0], [1.0, 0.0, 0.0]);
+    let end = face_pick(&s, &bottom.0, [0.0, 1.5, 20.0], [-1.0, 0.0, 0.0]);
+    run(&mut s, "frame.end_cap", json!({"faces": [start, end], "thickness": 6}));
+    let mut caps: Vec<Measured> = bodies(&mut s).into_iter().filter(|b| b.0.contains("End Cap")).collect();
+    caps.sort_by(|a, b| a.2[0].total_cmp(&b.2[0]));
+    assert_eq!(caps.len(), 2, "{caps:?}");
+    assert!(near3(caps[0].2, [-6.0, 0.0, 0.0]) && near3(caps[0].3, [0.0, 40.0, 40.0]), "{caps:?}");
+    assert!(near3(caps[1].2, [600.0, 0.0, 0.0]) && near3(caps[1].3, [606.0, 40.0, 40.0]), "{caps:?}");
+}
+
+#[test]
+fn mitre_frames_keep_todays_placement() {
+    // Only Auto lines sections up: the vertical rectangle under Mitre places each bar as stage 1 does, by world Z.
+    let mut s = Session::default();
+    vertical_rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": flat_bar(), "corner": "mitre"}));
+    // The 600s lie flat: width along Y (y −20…20), height in the plane (z ±10). The 400s stand on edge: width along X
+    // (x ±20), height along Y (y −10…10). Each mitre plane bisects its corner, through the corner point, so the
+    // 600s' outer faces (z −10, 410) reach x −10 and 610, and the 400s' (x −20, 620) reach z −20 and 420. A plane
+    // through the centreline keeps A × the line: A·600 = 480000, A·400 = 320000.
+    assert_boxes(
+        &sorted_boxes(&mut s),
+        &[
+            ([-20.0, -10.0, -20.0], [20.0, 10.0, 420.0], 320_000.0),
+            ([-10.0, -20.0, -10.0], [610.0, 20.0, 10.0], 480_000.0),
+            ([-10.0, -20.0, 390.0], [610.0, 20.0, 410.0], 480_000.0),
+            ([580.0, -10.0, -20.0], [620.0, 10.0, 420.0], 320_000.0),
+        ],
+    );
+}

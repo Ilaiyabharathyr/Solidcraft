@@ -908,6 +908,18 @@ pub fn member_axes(d: Vec3, angle: f64) -> Option<(Vec3, Vec3)> {
     Some((x * c + y * s, y * c - x * s))
 }
 
+/// [`member_axes`] for a member running along `dir` with its `up` given (#4003 Auto's lined-up sections): the
+/// profile's y is `up` made square to `dir` and x = y × dir; `turn` (radians) then turns the profile as
+/// [`member_axes`] does. `None` when either has no length or `up` runs along `dir` (within [`VERTICAL_TOLERANCE`]).
+pub fn group_axes(dir: Vec3, up: Vec3, turn: f64) -> Option<(Vec3, Vec3)> {
+    let (d, up) = (dir.normalized()?, up.normalized()?);
+    let y = up - d * up.dot(d);
+    let y = y.normalized().filter(|_| y.len() > VERTICAL_TOLERANCE)?;
+    let x = y.cross(d);
+    let (c, s) = (turn.cos(), turn.sin());
+    Some((x * c + y * s, y * c - x * s))
+}
+
 /// `region` turned by `angle` (radians, counter-clockwise) about its `anchor` point and moved so
 /// that point lands on `at`.
 pub fn placed(region: &Region2, anchor: Vec2, at: Vec2, angle: f64) -> Region2 {
