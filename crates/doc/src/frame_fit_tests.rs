@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-use solidcore_record::{Plane, Region2, Seg2, Vec2, Vec3};
+use solidcore_record::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
 use solidcraft_kernel as kernel;
 
 use super::*;
@@ -213,4 +213,29 @@ fn auto_groups_sharing_a_point_fit_across() {
     // cut end and r4's side (x = 20), s4 on r1's side (y = 20).
     assert!((bounds(0).min.x - 20.0).abs() < 1e-6, "{:?}", bounds(0));
     assert!((bounds(3).min.y - 20.0).abs() < 1e-6, "{:?}", bounds(3));
+}
+
+#[test]
+fn an_arc_between_nearly_parallel_lines_keeps_its_arc() {
+    // A slot-like end: a half-round arc of radius 5 between two lines 0.001° from parallel. The lines meet about
+    // 573 m away; squared, that corner would stand far out of the tube and cut ends nowhere near it. The arc stays,
+    // and the tool stays the size of the section.
+    let drift = 100.0 * 0.001_f64.to_radians().tan();
+    let (p0, p1, p2, p3) = (Vec2::new(-100.0, 0.0), Vec2::new(0.0, 0.0), Vec2::new(0.0, 10.0), Vec2::new(-100.0, 10.0 + drift));
+    let outer = Loop2 {
+        segs: vec![
+            Seg2::Line { a: p0, b: p1 },
+            Seg2::Arc { center: Vec2::new(0.0, 5.0), radius: 5.0, start: -PI / 2.0, sweep: PI },
+            Seg2::Line { a: p2, b: p3 },
+            Seg2::Line { a: p3, b: p0 },
+        ],
+    };
+    let out = squared_outline(&[Region2 { outer, holes: Vec::new() }]);
+    let segs = &out[0].outer.segs;
+    assert!(segs.iter().any(|s| matches!(s, Seg2::Arc { .. })), "{segs:?}");
+    for s in segs {
+        for p in [s.start(), s.end()] {
+            assert!(p.x.abs() <= 101.0 && p.y.abs() <= 11.0, "{p:?} in {segs:?}");
+        }
+    }
 }

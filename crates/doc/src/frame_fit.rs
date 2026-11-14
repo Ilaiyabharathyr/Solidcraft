@@ -16,7 +16,10 @@ pub fn squared_outline(regions: &[Region2]) -> Vec<Region2> {
     regions.iter().map(|r| Region2 { outer: squared(&r.outer), holes: Vec::new() }).collect()
 }
 
-/// `outline` with each arc between two lines replaced by the point where the lines meet.
+/// `outline` with each arc between two lines replaced by the point where the lines meet, when that point lies within
+/// twice the arc's radius of both its ends: lines nearly parallel round an arc meet far out, and that corner would
+/// stand out of the section and cut ends nowhere near the tube, so the arc stays (claude_fusion `fill.squared` keeps
+/// the shape when a squared corner stands out of its radius).
 fn squared(outline: &Loop2) -> Loop2 {
     let segs = &outline.segs;
     let n = segs.len();
@@ -24,10 +27,12 @@ fn squared(outline: &Loop2) -> Loop2 {
         Some(Seg2::Line { a, b }) => Some((*a, *b)),
         _ => None,
     };
-    // The corner replacing segment k, when it is an arc between two lines that meet.
-    let corner = |k: usize| match segs.get(k.checked_rem(n)?) {
-        Some(Seg2::Arc { .. }) => meet(line(k + n - 1)?, line(k + 1)?),
-        _ => None,
+    // The corner replacing segment k, when it is an arc between two lines that meet near it.
+    let corner = |k: usize| {
+        let arc = segs.get(k.checked_rem(n)?)?;
+        let Seg2::Arc { radius, .. } = *arc else { return None };
+        let at = meet(line(k + n - 1)?, line(k + 1)?)?;
+        (at.dist(arc.start()).max(at.dist(arc.end())) <= 2.0 * radius.abs()).then_some(at)
     };
     let segs = segs
         .iter()
