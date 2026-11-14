@@ -405,9 +405,10 @@ fn section_plane((x, y): Axes, at: Vec2, p: Vec3) -> Plane {
 /// A member's body: `regions` on its section `plane` at its start, built along its line `d` ([`along`]) from `lo` to
 /// `hi`, each face named `face:<k>`. A member Auto runs against its line is built from its regions mirrored, which
 /// the kernel numbers otherwise, so its faces are named as the same member built on `unreversed` (its plane running
-/// the way its line is drawn) numbers them: each side face as the face swept from the same profile segment, each cap
-/// as the cap at the same end. A tube whose run turns round (an outline closed or opened) keeps its face names. The
-/// kernel numbers an extrusion's faces by where it lies, not by profile segment, so they can't be renumbered by
+/// the way its line is drawn) numbers them: each side face as the face at the same place in the section, each cap as
+/// the cap at the same end ([`position_numbers`]). A tube whose run turns round (an outline closed or opened) keeps
+/// each face's name: a centred section is the same solid either way, and an off-centre one is moved across its line.
+/// The kernel numbers an extrusion's faces by where it lies, not by profile segment, so they can't be renumbered by
 /// index alone.
 fn member_body(plane: Plane, unreversed: Option<Plane>, regions: &[Region2], d: Vec3, (lo, hi): (f64, f64), id: &str) -> Result<Traced> {
     let (plane, built) = along(plane, regions, d);
@@ -416,27 +417,27 @@ fn member_body(plane: Plane, unreversed: Option<Plane>, regions: &[Region2], d: 
         return Ok(crate::lineage::numbered_tool(body));
     };
     let plain = one_solid(kernel::extrude(&unreversed, regions, lo, hi)?, id)?;
-    Ok(match source_numbers(&body, &plain) {
+    Ok(match position_numbers((&body, &plane), (&plain, &unreversed)) {
         Some(k) => Traced::made(body, Some(k.into_iter().map(|k| vec![format!("face:{k}")]).collect())),
         None => crate::lineage::numbered_tool(body),
     })
 }
 
-/// For each face of `mirrored` (a section's regions mirrored, x → −x, and extruded), the face of `plain` (the same
-/// regions extruded as they are) swept from the same profile segment, or the cap at the same end. `None` unless each
-/// face finds its own.
-fn source_numbers(mirrored: &kernel::Body, plain: &kernel::Body) -> Option<Vec<usize>> {
+/// For each face of `mirrored` (a section's regions mirrored and extruded on plane `pm`), the face of `plain` (the
+/// same section extruded on `pp`) at the same place in the section, measured from each plane's origin in the world
+/// (the two planes' origins differ only by the anchor's offset across the line), or the cap at the same end. `None`
+/// unless each face finds its own.
+fn position_numbers((mirrored, pm): (&kernel::Body, &Plane), (plain, pp): (&kernel::Body, &Plane)) -> Option<Vec<usize>> {
     use kernel::FaceSource::{ExtrudeCap, ExtrudeSide};
     fn source(b: &kernel::Body, i: usize) -> Option<&kernel::FaceSource> {
         b.face_sources().and_then(|s| s.get(i)).and_then(Option::as_ref)
     }
-    let back = |p: Vec2| Vec2::new(-p.x, p.y);
-    let near = |p: Vec2, q: Vec2| p.dist(q) <= 1e-6;
+    let near = |p: Vec2, q: Vec2| pm.dir_to_world(p).dist(pp.dir_to_world(q)) <= 1e-6;
     let same = |i: usize, j: usize| match (source(mirrored, i), source(plain, j)) {
         (Some(ExtrudeCap { high: a, .. }), Some(ExtrudeCap { high: b, .. })) => a == b,
         (Some(ExtrudeSide { segment: s, .. }), Some(ExtrudeSide { segment: t, .. })) => {
-            let (a, b) = (back(s.start()), back(s.end()));
-            near(back(s.point_at(0.5)), t.point_at(0.5)) && ((near(a, t.start()) && near(b, t.end())) || (near(a, t.end()) && near(b, t.start())))
+            let (a, b) = (s.start(), s.end());
+            near(s.point_at(0.5), t.point_at(0.5)) && ((near(a, t.start()) && near(b, t.end())) || (near(a, t.end()) && near(b, t.start())))
         }
         _ => false,
     };
