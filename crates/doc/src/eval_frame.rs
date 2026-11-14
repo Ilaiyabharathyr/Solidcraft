@@ -152,19 +152,20 @@ fn cut_members(
         let Some((t, u)) = cope else { continue };
         // U is built out across the whole of T, to past T's far side: the cope trims it back.
         let (Some(&te), Some(&ue)) = (c.ends.iter().find(|e| e.0 == t), c.ends.iter().find(|e| e.0 == u)) else { continue };
-        let reached = (frame_corners::away(segments, te), frame_corners::away(segments, ue));
-        let ext = match reached {
+        // n: square to T, towards U's side of it; T's near face lies `near` along it.
+        let reached = match (frame_corners::away(segments, te), frame_corners::away(segments, ue)) {
             (Some(wt), Some(wu)) => (wu - wt * wu.dot(wt)).normalized().and_then(|n| {
                 let far = Cut { origin: c.point - n * frame_corners::reach(&placed(t, c.point), regions, c.point, -n), normal: n };
-                frame_corners::extension(&placed(u, c.point), regions, c.point, wu, &far)
+                let near = frame_corners::reach(&placed(t, c.point), regions, c.point, n);
+                frame_corners::extension(&placed(u, c.point), regions, c.point, wu, &far).map(|ext| (n, near, ext))
             }),
             _ => None,
         };
-        let ext = ext.ok_or_else(|| DocError::Invalid(format!("the member on line `{}` can't be built out to its corner", id(u))))?;
+        let (n, near, ext) = reached.ok_or_else(|| DocError::Invalid(format!("the member on line `{}` can't be built out to its corner", id(u))))?;
         if let Some(end) = ends.get_mut(u).and_then(|e| e.get_mut(usize::from(!ue.1))) {
             *end = Some((None, ext));
         }
-        copes.push((t, u));
+        copes.push((t, u, c.point, n, near));
     }
     // Member m built out at its cut ends and cut there, from `regions`.
     let build = |m: usize, regions: &[Region2]| -> Result<Traced> {
@@ -196,9 +197,11 @@ fn cut_members(
         out.push(Some(t));
     }
     // Copes after every plane cut. T filled is T built from its outlines alone, holes closed;
-    // U keeps its largest piece (what lies past T, and slivers on T's far side, go).
+    // U keeps its largest piece on its own side of T: its centre of mass on U's side, and coming
+    // out past T's near face (what lies past T, and slivers in T's radii with nothing past them,
+    // go). A U too short to come out of T is cut away completely.
     let outlines: Vec<Region2> = regions.iter().map(|r| Region2 { outer: r.outer.clone(), holes: Vec::new() }).collect();
-    for (t, u) in copes {
+    for (t, u, point, n, near) in copes {
         let filled = crate::lineage::numbered_tool(build(t, &outlines)?.body);
         let Some(traced) = out.get_mut(u).and_then(Option::as_mut) else { continue };
         let gone = || DocError::Invalid(format!("the member on line `{}` was cut away completely", id(u)));
@@ -208,8 +211,14 @@ fn cut_members(
         let lineages = crate::lineage::Lineage::lumps(&cut.body, cut.lineage.as_ref(), &lumps);
         let mut best: Option<(f64, Traced)> = None;
         for (body, lineage) in lumps.into_iter().zip(lineages) {
-            let v = kernel::measure_mass(&body)?.volume;
-            if best.as_ref().is_none_or(|(most, _)| v > *most) {
+            let mass = kernel::measure_mass(&body)?;
+            let v = mass.volume;
+            let own_side = (mass.centroid - point).dot(n) > 0.0;
+            if !own_side || best.as_ref().is_some_and(|(most, _)| v <= *most) {
+                continue;
+            }
+            let mesh = body.mesh(&kernel::MeshTolerance::chord((body.size() * 1e-2).max(1e-2)))?;
+            if mesh.positions.iter().any(|q| (*q - point).dot(n) > near + 1e-3) {
                 best = Some((v, Traced { body, lineage, recipe: None }));
             }
         }

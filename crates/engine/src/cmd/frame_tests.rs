@@ -754,6 +754,33 @@ fn a_coped_round_tube_is_fishmouthed() {
     assert!(left.1 > area * 360.0 && left.1 < area * 400.0, "{left:?} vs {}..{}", area * 360.0, area * 400.0);
 }
 
+/// The line of sketch `name` that rises off y = 0.
+fn line_off_x_axis(s: &Session, name: &str) -> String {
+    sketch_lines(s, name).into_iter().find(|(_, a, b)| a[1].max(b[1]) > 1.0).unwrap().0
+}
+
+#[test]
+fn a_coped_member_too_short_to_reach_is_refused() {
+    // 15 mm of U ends inside T: what is left of it lies on T's far side only.
+    let (mut s, r) = polyline_frame(json!([[400, 0], [0, 0], [0, 15]]), "coped_butt");
+    let u = line_off_x_axis(&s, "V");
+    let e = r.unwrap_err();
+    assert!(e.contains(&format!("the member on line `{u}` was cut away completely")), "{e}");
+    assert!(bodies(&mut s).is_empty());
+}
+
+#[test]
+fn a_short_coped_brace_keeps_its_own_side() {
+    let deg = 30.0f64.to_radians();
+    let (mut s, r) = polyline_frame(json!([[400, 0], [0, 0], [70.0 * deg.cos(), 70.0 * deg.sin()]]), "coped_butt");
+    r.unwrap_or_else(|e| panic!("{e}"));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    // U is the one that does not run along T; it stays above T's near face, less T's radius.
+    let u = bs.iter().find(|b| b.3[0] - b.2[0] < 300.0).unwrap_or_else(|| panic!("{bs:?}"));
+    assert!(u.2[1] > 14.0 - 1e-3, "{u:?}");
+}
+
 #[test]
 fn butts_at_70_and_110_degrees_meet_flush() {
     for deg in [70.0f64, 110.0] {
