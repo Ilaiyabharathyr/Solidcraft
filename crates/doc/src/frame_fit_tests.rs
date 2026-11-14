@@ -176,3 +176,38 @@ fn an_x_brace_crossing_does_not_cut_the_brace() {
     assert!((got.max.x - 580.0).abs() < 1e-6, "{got:?}");
     assert!(volume(&fitted) > tube_area() * (len - 100.0) && volume(&fitted) < volume(&brace), "{} of {}", volume(&fitted), volume(&brace));
 }
+
+#[test]
+fn auto_groups_sharing_a_point_fit_across() {
+    // The planner's two groups sharing a point: a 400 square on XY and a 600 x 300 rectangle on XZ, meeting only at
+    // the origin. One Frame Member takes one 2D sketch, so the build is given the two planes' lines directly.
+    let p = Vec3::new;
+    let segs = vec![
+        ("s1".to_string(), p(0.0, 0.0, 0.0), p(400.0, 0.0, 0.0)),
+        ("s2".to_string(), p(400.0, 0.0, 0.0), p(400.0, 400.0, 0.0)),
+        ("s3".to_string(), p(400.0, 400.0, 0.0), p(0.0, 400.0, 0.0)),
+        ("s4".to_string(), p(0.0, 400.0, 0.0), p(0.0, 0.0, 0.0)),
+        ("r1".to_string(), p(0.0, 0.0, 0.0), p(-600.0, 0.0, 0.0)),
+        ("r2".to_string(), p(-600.0, 0.0, 0.0), p(-600.0, 0.0, 300.0)),
+        ("r3".to_string(), p(-600.0, 0.0, 300.0), p(0.0, 0.0, 300.0)),
+        ("r4".to_string(), p(0.0, 0.0, 300.0), p(0.0, 0.0, 0.0)),
+    ];
+    let mut planes = vec![Some((Vec3::Z, Vec3::X)); 4];
+    planes.extend([Some((-Vec3::Y, Vec3::X)); 4]);
+    let placed = |m: usize, at: Vec3| {
+        let (_, a, b) = &segs[m];
+        let (x, y) = frame::member_axes(*b - *a, 0.0).unwrap();
+        Plane::new(at, x, y).unwrap()
+    };
+    let drawn: Vec<usize> = (0..segs.len()).collect();
+    let built = crate::eval::frame_member::auto_members(&segs, &box_tube(), &placed, &planes, &[], (Some(Vec3::X), &drawn)).unwrap();
+    let bounds = |m: usize| built[m].as_ref().unwrap().body.exact_bounds().unwrap();
+    // The rectangle, laid first (its 600 is the longest tube), makes the origin's corner: a butt of r1 (600) and r4
+    // (300). r1 runs through to r4's outer face, x = 20; r4 is fitted to r1's top face, z = 20.
+    assert!((bounds(4).max.x - 20.0).abs() < 1e-6, "{:?}", bounds(4));
+    assert!((bounds(7).min.z - 20.0).abs() < 1e-6, "{:?}", bounds(7));
+    // The square's s1 and s4, laid later, end there too and are fitted to the rectangle's tubes: s1 stops on r1's
+    // cut end and r4's side (x = 20), s4 on r1's side (y = 20).
+    assert!((bounds(0).min.x - 20.0).abs() < 1e-6, "{:?}", bounds(0));
+    assert!((bounds(3).min.y - 20.0).abs() < 1e-6, "{:?}", bounds(3));
+}

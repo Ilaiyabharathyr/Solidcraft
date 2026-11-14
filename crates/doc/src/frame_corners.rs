@@ -52,9 +52,9 @@ pub const CORNER_TOL: f64 = 1e-3;
 /// Members within this length (mm) of each other are equally long.
 pub(crate) const EQUAL_LENGTH: f64 = 1.0;
 /// Members within this angle (degrees) of a straight run on are in line: nothing to cut.
-const IN_LINE_DEG: f64 = 0.01;
+pub(crate) const IN_LINE_DEG: f64 = 0.01;
 /// The sharpest interior angle (degrees) a corner can be finished at.
-const MIN_INTERIOR_DEG: f64 = 5.0;
+pub(crate) const MIN_INTERIOR_DEG: f64 = 5.0;
 
 /// Where exactly two members end. `ends[k] = (member index, at_start)`.
 #[derive(Clone, Debug, PartialEq)]
@@ -209,7 +209,7 @@ pub fn corner_cuts(
     drawn: &[usize],
 ) -> Result<(Vec<(usize, bool, Cut)>, Option<(usize, usize)>)> {
     let angle = interior(segments, corner);
-    // Until the Auto rule is built, Auto cuts nothing, as None.
+    // Auto is resolved into a joint by its caller (frame_layout's table); as a kind here it cuts nothing.
     if matches!(kind, CornerType::None | CornerType::Auto) || angle > PI - IN_LINE_DEG.to_radians() {
         return Ok((Vec::new(), None));
     }
@@ -238,6 +238,17 @@ pub fn corner_cuts(
     let n = across(u, t)?;
     let u_cut = Cut { origin: p + n * finite(reach(&placed(te.0, p), regions, p, n))?, normal: n };
     Ok((vec![(te.0, te.1, t_cut), (ue.0, ue.1, u_cut)], None))
+}
+
+/// Auto's angled butt (#4003 spec A5) at `corner`: the `long` member cut square to its own line at the corner, and
+/// the `short` one on that same plane, keeping its own side, so it sits on the long member's square end. Nothing when
+/// either is not at the corner or the long one has no length.
+pub fn angled_butt_cuts(corner: &Corner, long: usize, short: usize, segments: &[(String, Vec3, Vec3)]) -> Vec<(usize, bool, Cut)> {
+    let end = |m: usize| corner.ends.iter().copied().find(|e| e.0 == m);
+    let (Some(l), Some(s)) = (end(long), end(short)) else { return Vec::new() };
+    let Some(w) = away(segments, l) else { return Vec::new() };
+    let p = corner.point;
+    vec![(l.0, l.1, Cut { origin: p, normal: w }), (s.0, s.1, Cut { origin: p, normal: -w })]
 }
 
 /// How far past its corner a member must be built for `cut` to cross its whole section, plus

@@ -1418,15 +1418,17 @@ fn an_end_cap_is_flush_with_the_outside_unless_offset() {
 
 #[test]
 fn an_end_cap_goes_on_a_butted_through_end() {
-    let mut s = Session::default();
-    rectangle_frame(&mut s);
-    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": "butt"}));
-    let (bottom, _) = bottom_and_left(&mut s);
-    // The bottom member runs through: its start is cut square at x = -20, not at the line's end.
-    let start = face_pick(&s, &bottom.0, [-20.0, -18.5, 0.0], [-1.0, 0.0, 0.0]);
-    run(&mut s, "frame.end_cap", json!({"faces": [start], "thickness": 6}));
-    let cap = measured(&mut s, &format!("{} End Cap", bottom.0));
-    assert!((cap.3[0] + 20.0).abs() < 1e-6 && (cap.2[0] + 26.0).abs() < 1e-6, "{cap:?}");
+    for corner in ["butt", "auto"] {
+        let mut s = Session::default();
+        rectangle_frame(&mut s);
+        run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": corner}));
+        let (bottom, _) = bottom_and_left(&mut s);
+        // The bottom member runs through: its start is cut square at x = -20, not at the line's end.
+        let start = face_pick(&s, &bottom.0, [-20.0, -18.5, 0.0], [-1.0, 0.0, 0.0]);
+        run(&mut s, "frame.end_cap", json!({"faces": [start], "thickness": 6}));
+        let cap = measured(&mut s, &format!("{} End Cap", bottom.0));
+        assert!((cap.3[0] + 20.0).abs() < 1e-6 && (cap.2[0] + 26.0).abs() < 1e-6, "{corner}: {cap:?}");
+    }
 }
 
 #[test]
@@ -1451,7 +1453,8 @@ fn an_inward_end_cap_measures_a_member_as_cut() {
 
 #[test]
 fn an_end_cap_on_a_butted_or_coped_end_is_refused() {
-    for (corner, at) in [("butt", 380.0), ("coped_butt", 20.0)] {
+    // Auto's U is fitted, flat on T's near face at y = 380 in square tube.
+    for (corner, at) in [("butt", 380.0), ("coped_butt", 20.0), ("auto", 380.0)] {
         let mut s = Session::default();
         rectangle_frame(&mut s);
         run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": corner}));
@@ -2401,4 +2404,264 @@ fn removing_a_tube_drops_the_corner_overrides_that_name_it() {
     let solidcraft_doc::FeatureKind::FrameMember { corners, .. } = member_kind(&s, &fid) else { panic!() };
     assert!(corners.is_empty(), "{corners:?}");
     assert_eq!(member_boxes(&mut s).len(), 2, "the other tubes build: the overrides no longer point at a corner that has gone");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Auto corners (#4003 stage 2): each joint by its angle, and the frame's own tubes cut to fit
+
+/// A `polyline_frame` of a 400 line along +X to the origin and a 300 line out of it at `theta` degrees, "auto".
+fn auto_vee(theta: f64) -> (Session, Result<Value, String>) {
+    let t = theta.to_radians();
+    polyline_frame(json!([[400, 0], [0, 0], [300.0 * t.cos(), 300.0 * t.sin()]]), "auto")
+}
+
+/// The long (400, reaching x > 300) and the short member of an `auto_vee`.
+fn long_and_short(s: &mut Session) -> (Measured, Measured) {
+    let bs = bodies(s);
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    let long = bs.iter().find(|b| b.3[0] > 300.0).unwrap_or_else(|| panic!("{bs:?}")).clone();
+    let short = bs.iter().find(|b| b.0 != long.0).unwrap().clone();
+    (long, short)
+}
+
+#[test]
+fn auto_at_20_degrees_is_an_angled_butt() {
+    // The 300 leaves at 160°: 20° from running on in line with the 400 (along −X). The table's angled butt.
+    let (mut s, r) = auto_vee(160.0);
+    r.unwrap();
+    let (long, short) = long_and_short(&mut s);
+    // The long tube is cut square to its own line at the corner (x = 0), so its box runs x 0…400 and ±20
+    // (the half-width) across: [0, −20, −20]…[400, 20, 20], and its volume stays A·400.
+    assert!(near3(long.2, [0.0, -20.0, -20.0]) && near3(long.3, [400.0, 20.0, 20.0]), "{long:?}");
+    assert!(rel(long.1, tube_area() * 400.0) < MEASURED, "{long:?} vs {}", tube_area() * 400.0);
+    // The short tube is cut on that same plane x = 0, square to the long line, keeping x ≤ 0: it sits on the
+    // long tube's square end, so its box ends at x = 0 (left square, it would reach 20·sin 20° = 6.84 past it).
+    // The plane passes through its line at the corner, through the section's centroid, so its volume is A·300.
+    assert!(short.3[0].abs() < 1e-6, "{short:?}");
+    assert!(rel(short.1, tube_area() * 300.0) < MEASURED, "{short:?} vs {}", tube_area() * 300.0);
+    // The 400 is drawn first, (400,0)→(0,0): the corner is its end and the 300's start.
+    let st = s.model.state();
+    for (b, role) in [(&long, "corner_end"), (&short, "corner_start")] {
+        let names = solidcraft_doc::naming::face_names(st.body(&b.0).unwrap());
+        assert!(names.iter().any(|n| n.contains(role)), "{role} in {names:?}");
+    }
+}
+
+#[test]
+fn auto_at_45_and_140_degrees_mitres() {
+    for swing in [45.0f64, 140.0] {
+        let (mut s, r) = auto_vee(180.0 - swing);
+        r.unwrap_or_else(|e| panic!("{swing}: {e}"));
+        let (long, short) = long_and_short(&mut s);
+        // A mitre's plane passes through both lines at the corner: each keeps A × its line length.
+        assert!(rel(long.1, tube_area() * 400.0) < MEASURED, "{swing}: {long:?} vs {}", tube_area() * 400.0);
+        assert!(rel(short.1, tube_area() * 300.0) < MEASURED, "{swing}: {short:?} vs {}", tube_area() * 300.0);
+        // The inside angle is 180 − swing; the 400 runs past the corner on its outer side (y = −20) to where the
+        // bisecting plane meets it: x = −20 / tan(inside / 2): −8.284 at 45°, −54.950 at 140°.
+        let reach = -20.0 / ((180.0 - swing).to_radians() / 2.0).tan();
+        assert!((long.2[0] - reach).abs() < 1e-6, "{swing}: {reach} {long:?}");
+    }
+    // A swing of 176° (4° inside) is a mitre too sharp to finish, as stage 1 says.
+    let (mut s, r) = auto_vee(4.0);
+    let e = r.unwrap_err();
+    assert!(e.contains("Corner at (0, 0, 0) is too sharp to finish"), "{e}");
+    assert!(bodies(&mut s).is_empty());
+}
+
+#[test]
+fn auto_at_70_90_110_degrees_butts_and_fits() {
+    for swing in [70.0f64, 90.0, 110.0] {
+        let (mut s, r) = auto_vee(180.0 - swing);
+        r.unwrap_or_else(|e| panic!("{swing}: {e}"));
+        let (long, short) = long_and_short(&mut s);
+        // T, the 400, runs through to U's outer face: h / sin φ = 20 / sin φ past the corner along its line
+        // (21.28 at 70° and 110°, 20 at 90°).
+        let sn = swing.to_radians().sin();
+        let t = tube_area() * (400.0 + 20.0 / sn);
+        assert!(rel(long.1, t) < MEASURED, "{swing}: T {long:?} vs {t}");
+        // U, the 300, is fitted to T's squared-off box: flat on T's near face, a plane 20 from T's line which meets
+        // U's line 20 / sin φ from the corner. So U keeps A·(300 − 20 / sin φ).
+        let u = tube_area() * (300.0 - 20.0 / sn);
+        assert!(rel(short.1, u) < MEASURED, "{swing}: U {short:?} vs {u}");
+    }
+}
+
+#[test]
+fn auto_rectangle_runs_its_long_sides_through() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto"}));
+    // As stage 1's Butt rectangle: the 600s run out to the 400s' outer faces (x −20…620, A·640), and the 400s
+    // stop on the 600s' near faces (y 20…380, A·360), fitted flat to the squared box tube.
+    let (bottom, left) = bottom_and_left(&mut s);
+    assert!((bottom.2[0] + 20.0).abs() < 1e-6 && (bottom.3[0] - 620.0).abs() < 1e-6, "{bottom:?}");
+    assert!(rel(bottom.1, tube_area() * 640.0) < MEASURED, "{bottom:?} vs {}", tube_area() * 640.0);
+    assert!((left.2[1] - 20.0).abs() < 1e-6 && (left.3[1] - 380.0).abs() < 1e-6, "{left:?}");
+    assert!(rel(left.1, tube_area() * 360.0) < MEASURED, "{left:?} vs {}", tube_area() * 360.0);
+    let st = s.model.state();
+    let names = solidcraft_doc::naming::face_names(st.body(&bottom.0).unwrap());
+    for role in ["corner_start", "corner_end"] {
+        assert!(names.iter().any(|n| n.contains(role)), "{role} in {names:?}");
+    }
+    // The left's fitted faces are named for the end they finish and the line they fit: (0,400)→(0,0) starts
+    // against the top and ends against the bottom.
+    let names = solidcraft_doc::naming::face_names(st.body(&left.0).unwrap());
+    for (role, y) in [("corner_start", 400.0), ("corner_end", 0.0)] {
+        let fits = format!("{role}:{}:face:", line_at_y(&s, "Frame", y));
+        assert!(names.iter().any(|n| n.contains(&fits)), "{fits} in {names:?}");
+    }
+    // In round tube the 400s are fitted, not cut flat: a fishmouth whose tips reach the 600s' centrelines at
+    // their sides (y 0…400), A·400 less, at each end, the part inside the 600: stage 1's coped value,
+    // A·360 + 2∫(20 − √(400 − z²)) dA = 129458.17.
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let round = json!({"kind": "round_tube", "diameter": 40, "wall": 3});
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": round, "corner": "auto"}));
+    let (_, left) = bottom_and_left(&mut s);
+    assert!(left.2[1].abs() < 1e-3 && (left.3[1] - 400.0).abs() < 1e-3, "{left:?}");
+    assert!(rel(left.1, 129_458.17) < MEASURED, "{left:?} vs 129458.17");
+}
+
+/// The 600 × 400 rectangle `Frame` with a cross-member from (300, 0) to (300, 400).
+fn cross_member_frame(s: &mut Session) {
+    run(s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
+    run(s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]}));
+    run(s, "sketch.line", json!({"points": [[300, 0], [300, 400]]}));
+    run(s, "sketch.finish", json!({}));
+}
+
+#[test]
+fn auto_fits_a_t_junction() {
+    let mut s = Session::default();
+    cross_member_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto"}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 5, "{bs:?}");
+    // The bottom and top pass through x = 300: the cross-member's ends are fitted flat to their near faces,
+    // y = 20 and y = 380, leaving 360 of it.
+    let cross = bs.iter().find(|b| b.2[0] > 250.0 && b.3[0] < 350.0).unwrap_or_else(|| panic!("{bs:?}"));
+    assert!(near3(cross.2, [280.0, 20.0, -20.0]) && near3(cross.3, [320.0, 380.0, 20.0]), "{cross:?}");
+    assert!(rel(cross.1, tube_area() * 360.0) < MEASURED, "{cross:?} vs {}", tube_area() * 360.0);
+}
+
+#[test]
+fn auto_with_crossing_tubes_overlaps_without_error() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [600, 400]]}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 400], [600, 0]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto"}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 6, "{bs:?}");
+    // Each diagonal ends at two rectangle corners, where its end is fitted to the two sides' tubes (x ≤ 20 and
+    // y ≤ 20 go). Its edge 20 above its line meets x = 20 at y = 37.4, the one below meets y = 20 at x = 66.0,
+    // so it starts at x = 20 and y = 20, and ends likewise at the far corner: [20, 20, −20]…[580, 380, 20]. It
+    // runs on across the other diagonal whole: one body each, the crossing left overlapping.
+    let diagonals = bs.iter().filter(|b| near3(b.2, [20.0, 20.0, -20.0]) && near3(b.3, [580.0, 380.0, 20.0])).count();
+    assert_eq!(diagonals, 2, "{bs:?}");
+}
+
+#[test]
+fn auto_overrides_at_three_ends() {
+    // a (600) along X, b (400) down Y to the origin, c (283) out at 45°: a and b, laid first, make the corner
+    // (a butt at 90°), and c is fitted to both.
+    let build = |flip: Option<bool>| {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Y"}));
+        run(&mut s, "sketch.line", json!({"points": [[0, 0], [600, 0]], "ids": ["a"]}));
+        run(&mut s, "sketch.line", json!({"points": [[0, 400], [0, 0]], "ids": ["b"]}));
+        run(&mut s, "sketch.line", json!({"points": [[0, 0], [200, 200]], "ids": ["c"]}));
+        run(&mut s, "sketch.finish", json!({}));
+        let mut p = json!({"sketch": "Y", "profile": tube(), "corner": "auto", "names": {"a": "a", "b": "b", "c": "c"}});
+        if let Some(flip) = flip {
+            p["corners"] = json!([{"members": ["c", "a", "b"], "corner": "auto", "flip": flip}]);
+        }
+        run(&mut s, "frame.member", p);
+        boxes(&mut s)
+    };
+    // c: fitted to x ≤ 20 and y ≤ 20 near the origin (its edges meet them 48.3 along it); its far end is square
+    // at (200, 200), its corners ±20·(−0.707, 0.707) off it: x and y up to 214.142.
+    let h = 20.0 * std::f64::consts::FRAC_1_SQRT_2;
+    let c = ([20.0, 20.0, -20.0], [200.0 + h, 200.0 + h, 20.0]);
+    for flip in [None, Some(false)] {
+        let bs = build(flip);
+        // Unflipped, the longer a runs through to b's outer face (x = −20); b is fitted to a's near face (y = 20).
+        assert!(near3(bs["a"].0, [-20.0, -20.0, -20.0]) && near3(bs["a"].1, [600.0, 20.0, 20.0]), "{flip:?} {bs:?}");
+        assert!(near3(bs["b"].0, [-20.0, 20.0, -20.0]) && near3(bs["b"].1, [20.0, 400.0, 20.0]), "{flip:?} {bs:?}");
+        assert!(near3(bs["c"].0, c.0) && near3(bs["c"].1, c.1), "{flip:?} {bs:?}");
+    }
+    // Flipped, the roles swap: b runs through to a's outer face (y = −20), a is fitted to b's near face (x = 20).
+    let bs = build(Some(true));
+    assert!(near3(bs["b"].0, [-20.0, -20.0, -20.0]) && near3(bs["b"].1, [20.0, 400.0, 20.0]), "{bs:?}");
+    assert!(near3(bs["a"].0, [20.0, -20.0, -20.0]) && near3(bs["a"].1, [600.0, 20.0, 20.0]), "{bs:?}");
+    assert!(near3(bs["c"].0, c.0) && near3(bs["c"].1, c.1), "{bs:?}");
+}
+
+/// Each body's volume and box, and its sorted face names, by body name.
+type Built = (std::collections::BTreeMap<String, (f64, [f64; 3], [f64; 3])>, std::collections::BTreeMap<String, Vec<String>>);
+
+fn built(s: &mut Session) -> Built {
+    let faces = s
+        .model
+        .state()
+        .bodies
+        .iter()
+        .map(|b| {
+            let mut n = solidcraft_doc::naming::face_names(b).to_vec();
+            n.sort();
+            (b.name.clone(), n)
+        })
+        .collect();
+    (bodies(s).into_iter().map(|b| (b.0, (b.1, b.2, b.3))).collect(), faces)
+}
+
+#[test]
+fn auto_is_the_same_whatever_the_pick_order() {
+    let build = |reverse: bool| {
+        let mut s = Session::default();
+        cross_member_frame(&mut s);
+        let mut lines: Vec<String> = sketch_lines(&s, "Frame").into_iter().map(|l| l.0).collect();
+        assert_eq!(lines.len(), 5);
+        if reverse {
+            lines.reverse();
+        }
+        let names: serde_json::Map<String, Value> = lines.iter().map(|l| (l.clone(), json!(l))).collect();
+        run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "lines": lines, "names": names}));
+        built(&mut s)
+    };
+    let ((drawn, drawn_faces), (picked, picked_faces)) = (build(false), build(true));
+    assert_eq!(drawn.keys().collect::<Vec<_>>(), picked.keys().collect::<Vec<_>>());
+    for (line, (v, lo, hi)) in &drawn {
+        let (pv, plo, phi) = picked[line];
+        assert!(rel(pv, *v) < 1e-9 && near3(plo, *lo) && near3(phi, *hi), "{line}: drawn {drawn:?} picked {picked:?}");
+    }
+    assert_eq!(drawn_faces, picked_faces);
+}
+
+#[test]
+fn a_non_auto_frame_is_unchanged() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre"}));
+    let (got, faces) = built(&mut s);
+    // As `frame-corner-cuts` builds it (recorded there): each member runs out to the rectangle's outer corners, 20
+    // past its line's ends, and keeps A × its line: A·600 = 252493.80, A·400 = 168329.20.
+    let want = [
+        ("Rect Tube 40x40x3", 252_493.801_996_584_55, [-20.0, -20.0, -20.0], [620.0, 20.0, 20.0]),
+        ("Rect Tube 40x40x3 (2)", 168_329.201_030_185_65, [580.0, -20.0, -20.0], [620.0, 420.0, 20.0]),
+        ("Rect Tube 40x40x3 (3)", 252_493.801_996_583_7, [-20.0, 380.0, -20.0], [620.0, 420.0, 20.0]),
+        ("Rect Tube 40x40x3 (4)", 168_329.201_030_186_87, [-20.0, -20.0, -20.0], [20.0, 420.0, 20.0]),
+    ];
+    assert_eq!(got.len(), 4, "{got:?}");
+    // Its two mitred ends named for the ends they finish, and the tube's own faces.
+    let mut names: Vec<String> = ["corner_end", "corner_start"].iter().map(|n| format!("F2:{n}")).collect();
+    names.extend([0, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17].iter().map(|k| format!("F2:face:{k}")));
+    names.sort();
+    for (name, v, lo, hi) in want {
+        let (gv, glo, ghi) = got[name];
+        assert!(rel(gv, v) < 1e-12 && near3(glo, lo) && near3(ghi, hi), "{name}: {:?}", got[name]);
+        assert_eq!(faces[name], names, "{name}");
+    }
 }

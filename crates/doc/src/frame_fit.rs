@@ -1,8 +1,6 @@
 //! Cut to fit (#4003): a tube end cut to the tubes it meets, as a fabricator fits it. The tool is the other tube
 //! with its hole filled and its corner radii squared off, built from its section ([`squared_outline`]): a fitted
 //! end stops flat on a flat side, and is an exact fishmouth on a round tube. Exact geometry only, never a mesh.
-// The Auto build fits ends with these from the next task on.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use solidcore_record::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
 use solidcraft_geom::prelude::*;
