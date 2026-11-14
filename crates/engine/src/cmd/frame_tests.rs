@@ -2878,6 +2878,41 @@ fn an_end_cap_sits_on_a_tube_auto_runs_against_its_line() {
 }
 
 #[test]
+fn closing_an_outline_keeps_a_tubes_face_names() {
+    // An open U on XY: the bottom (0,0)→(600,0), the right drawn down (600,400)→(600,0), the top (600,400)→(0,400).
+    // Open, nothing is outer and the right runs as drawn. Closed by the left (0,400)→(0,0), the outline runs up the
+    // right side, so Auto runs the right against its line. Its joints don't change (fitted to the bottom and the
+    // top at both ends), and a centred box tube is the same solid either way round, so each face keeps its name:
+    // its top wall (z = 20) is still the face of that name.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
+    for points in [[[0, 0], [600, 0]], [[600, 400], [600, 0]], [[600, 400], [0, 400]]] {
+        run(&mut s, "sketch.line", json!({"points": points}));
+    }
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto"}));
+    let right = |s: &mut Session| bodies(s).into_iter().find(|b| b.2[0] > 500.0 && b.3[1] - b.2[1] > 300.0).unwrap();
+    // The right's own faces (not the faces fitted to the other tubes) and its top wall's name.
+    let named = |s: &mut Session| {
+        let r = right(s);
+        let top = face_pick(s, &r.0, [600.0, 200.0, 20.0], [0.0, 0.0, 1.0]);
+        let names = solidcraft_doc::naming::face_names(s.model.state().body(&r.0).unwrap()).to_vec();
+        let own: std::collections::BTreeSet<String> = names.iter().filter(|n| !n.contains("corner_")).cloned().collect();
+        (r, names[top["index"].as_u64().unwrap() as usize].clone(), own)
+    };
+    let (open, open_top, open_own) = named(&mut s);
+    run(&mut s, "sketch.edit", json!({"sketch": "Frame"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 400], [0, 0]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let (closed, closed_top, closed_own) = named(&mut s);
+    assert_eq!(bodies(&mut s).len(), 4);
+    // The same tube: y 20…380 (fitted to the 600s' near faces), A·360.
+    assert!(near3(open.2, closed.2) && near3(open.3, closed.3) && rel(open.1, closed.1) < 1e-9, "{open:?} {closed:?}");
+    assert_eq!(open_top, closed_top);
+    assert_eq!(open_own, closed_own);
+}
+
+#[test]
 fn mitre_frames_keep_todays_placement() {
     // Only Auto lines sections up: the vertical rectangle under Mitre places each bar as stage 1 does, by world Z.
     let mut s = Session::default();

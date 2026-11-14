@@ -36,17 +36,17 @@ pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
     };
     let Layout { segments, regions, description, at, turn, sketch_x, drawn, planes } = layout(doc, vals, f, st)?;
     let plan = auto_plan(*corner, &segments, &planes, corners, &drawn)?;
-    let axes = section_axes(&segments, &planes, plan.as_ref(), turn)?;
-    let placed = placer(&axes, at);
+    let (axes, plain) = section_axes(&segments, &planes, plan.as_ref(), turn)?;
+    let (placed, unreversed) = (placer(&axes, at), unreversed_placer(&plain, at));
     // Only an Auto frame builds by Auto's rules; an Auto override elsewhere is the frame's own type (corner_ends).
     let mut cut = if let Some(plan) = plan {
-        auto_members(&segments, &regions, &placed, plan, (sketch_x, &drawn))?
+        auto_members(&segments, &regions, (&placed, &unreversed), plan, (sketch_x, &drawn))?
     } else if corner.is_none() && corners.is_empty() {
         // A frame with no corners to finish is built exactly as it always was.
         Vec::new()
     } else {
         let (ends, copes) = corner_ends(&segments, &regions, &placed, (*corner, *flip), corners, (sketch_x, &drawn))?;
-        cut_members(&segments, &regions, &placed, &ends, copes)?
+        cut_members(&segments, &regions, (&placed, &|_, _| None), &ends, copes)?
     };
     let mut made = Vec::with_capacity(segments.len());
     for (m, (id, a, b)) in segments.iter().enumerate() {
@@ -56,8 +56,7 @@ pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
         }
         let (x, y) = axes.get(m).copied().ok_or_else(|| DocError::Invalid(format!("line `{id}` has no length")))?;
         let plane = Plane::new(*a - x * at.x - y * at.y, x, y).ok_or_else(|| DocError::Invalid(format!("line `{id}`: no plane square to it")))?;
-        let (plane, regions) = along(plane, &regions, *b - *a);
-        made.push(crate::lineage::numbered_tool(one_solid(kernel::extrude(&plane, &regions, 0.0, a.dist(*b))?, id)?));
+        made.push(member_body(plane, unreversed(m, *a), &regions, *b - *a, (0.0, a.dist(*b)), id)?);
     }
     if !f.body_names.is_empty() {
         // A copy (pasted, or in a copied component) names its members by position, as any
@@ -213,7 +212,7 @@ fn add_corner(
 fn cut_members(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
-    placed: &dyn Fn(usize, Vec3) -> Plane,
+    (placed, unreversed): Placing,
     ends: &[[Option<CutEnd>; 2]],
     copes: Vec<(usize, usize, Vec3, Vec3)>,
 ) -> Result<Vec<Option<Traced>>> {
@@ -222,8 +221,7 @@ fn cut_members(
     let build = |m: usize, regions: &[Region2]| -> Result<Traced> {
         let ((id, a, b), [start, end]) = segments.get(m).zip(ends.get(m)).ok_or_else(|| DocError::Invalid(format!("no member {m}")))?;
         let (lo, hi) = (start.map_or(0.0, |c| c.1), end.map_or(0.0, |c| c.1));
-        let (plane, regions) = along(placed(m, *a), regions, *b - *a);
-        let mut t = crate::lineage::numbered_tool(one_solid(kernel::extrude(&plane, &regions, -lo, a.dist(*b) + hi)?, id)?);
+        let mut t = member_body(placed(m, *a), unreversed(m, *a), regions, *b - *a, (-lo, a.dist(*b) + hi), id)?;
         for (cut, role) in [(start, "corner_start"), (end, "corner_end")] {
             let Some((Some(cut), _, _)) = cut else { continue };
             let plane =
@@ -301,7 +299,9 @@ fn auto_plan(
 /// plane takes the sketch's normal as up and runs the way its group lays it, an outer member round the outline
 /// ([`frame_layout::Rank`]); members in no sketch plane chained in one plane take that plane's normal, pointing up
 /// ([`chain_ups`]). Any other member, and every member of a frame that isn't Auto, keeps [`frame::member_axes`].
-fn section_axes(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], plan: Option<&Plan>, turn: f64) -> Result<Vec<(Vec3, Vec3)>> {
+/// Also, for each member Auto runs against its line, its axes running the way the line is drawn, to name its faces
+/// by ([`member_body`]).
+fn section_axes(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], plan: Option<&Plan>, turn: f64) -> Result<(Vec<Axes>, Vec<Option<Axes>>)> {
     let mut ups: Vec<Option<Vec3>> = vec![None; segments.len()];
     let mut reverse = vec![false; segments.len()];
     if let Some(plan) = plan {
@@ -317,14 +317,23 @@ fn section_axes(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], plan:
             }
         }
     }
-    let mut axes = Vec::with_capacity(segments.len());
+    let (mut axes, mut plain) = (Vec::with_capacity(segments.len()), Vec::with_capacity(segments.len()));
     for (m, (id, a, b)) in segments.iter().enumerate() {
-        let run = if reverse.get(m).copied().unwrap_or(false) { *a - *b } else { *b - *a };
-        let lined = ups.get(m).copied().flatten().and_then(|up| frame::group_axes(run, up, turn));
+        let reversed = reverse.get(m).copied().unwrap_or(false);
+        let up = ups.get(m).copied().flatten();
+        let lined = up.and_then(|up| frame::group_axes(if reversed { *a - *b } else { *b - *a }, up, turn));
+        plain.push(up.filter(|_| reversed && lined.is_some()).and_then(|up| frame::group_axes(*b - *a, up, turn)));
         axes.push(lined.or_else(|| frame::member_axes(*b - *a, turn)).ok_or_else(|| DocError::Invalid(format!("line `{id}` has no length")))?);
     }
-    Ok(axes)
+    Ok((axes, plain))
 }
+
+/// A section's (x, y) in the world.
+type Axes = (Vec3, Vec3);
+
+/// Each member's section plane placed on its line ([`placer`]), and for a member Auto runs against its line, its
+/// plane as it would be placed running the way its line is drawn ([`unreversed_placer`]).
+type Placing<'a> = (&'a dyn Fn(usize, Vec3) -> Plane, &'a dyn Fn(usize, Vec3) -> Option<Plane>);
 
 /// Each member's up when it is in a chain of members in no sketch plane (joined at `chained`'s corners) that lies in
 /// one plane: that plane's normal, pointing up ([`plane_up`]). `None` for any other member.
@@ -378,12 +387,73 @@ fn plane_up(points: &[Vec3]) -> Option<Vec3> {
 
 /// Member m's section plane, square to its line, placed at `p` on it: `axes` from [`section_axes`], `at` the profile
 /// point that sits on the line. A member Auto runs against its line has x × y against it too ([`along`]).
-fn placer(axes: &[(Vec3, Vec3)], at: Vec2) -> impl Fn(usize, Vec3) -> Plane + '_ {
-    move |m, p| {
-        let (x, y) = axes.get(m).copied().unwrap_or((Vec3::X, Vec3::Y));
-        let origin = p - x * at.x - y * at.y;
-        Plane::new(origin, x, y).unwrap_or(Plane { origin, x, y })
+fn placer(axes: &[Axes], at: Vec2) -> impl Fn(usize, Vec3) -> Plane + '_ {
+    move |m, p| section_plane(axes.get(m).copied().unwrap_or((Vec3::X, Vec3::Y)), at, p)
+}
+
+/// [`placer`] for the members [`section_axes`] gives unreversed axes: `None` for every other member.
+fn unreversed_placer(plain: &[Option<Axes>], at: Vec2) -> impl Fn(usize, Vec3) -> Option<Plane> + '_ {
+    move |m, p| plain.get(m).copied().flatten().map(|xy| section_plane(xy, at, p))
+}
+
+/// The section plane of axes (x, y) whose profile point `at` sits at `p`.
+fn section_plane((x, y): Axes, at: Vec2, p: Vec3) -> Plane {
+    let origin = p - x * at.x - y * at.y;
+    Plane::new(origin, x, y).unwrap_or(Plane { origin, x, y })
+}
+
+/// A member's body: `regions` on its section `plane` at its start, built along its line `d` ([`along`]) from `lo` to
+/// `hi`, each face named `face:<k>`. A member Auto runs against its line is built from its regions mirrored, which
+/// the kernel numbers otherwise, so its faces are named as the same member built on `unreversed` (its plane running
+/// the way its line is drawn) numbers them: each side face as the face swept from the same profile segment, each cap
+/// as the cap at the same end. A tube whose run turns round (an outline closed or opened) keeps its face names. The
+/// kernel numbers an extrusion's faces by where it lies, not by profile segment, so they can't be renumbered by
+/// index alone.
+fn member_body(plane: Plane, unreversed: Option<Plane>, regions: &[Region2], d: Vec3, (lo, hi): (f64, f64), id: &str) -> Result<Traced> {
+    let (plane, built) = along(plane, regions, d);
+    let body = one_solid(kernel::extrude(&plane, &built, lo, hi)?, id)?;
+    let (Cow::Owned(_), Some(unreversed)) = (&built, unreversed) else {
+        return Ok(crate::lineage::numbered_tool(body));
+    };
+    let plain = one_solid(kernel::extrude(&unreversed, regions, lo, hi)?, id)?;
+    Ok(match source_numbers(&body, &plain) {
+        Some(k) => Traced::made(body, Some(k.into_iter().map(|k| vec![format!("face:{k}")]).collect())),
+        None => crate::lineage::numbered_tool(body),
+    })
+}
+
+/// For each face of `mirrored` (a section's regions mirrored, x → −x, and extruded), the face of `plain` (the same
+/// regions extruded as they are) swept from the same profile segment, or the cap at the same end. `None` unless each
+/// face finds its own.
+fn source_numbers(mirrored: &kernel::Body, plain: &kernel::Body) -> Option<Vec<usize>> {
+    use kernel::FaceSource::{ExtrudeCap, ExtrudeSide};
+    fn source(b: &kernel::Body, i: usize) -> Option<&kernel::FaceSource> {
+        b.face_sources().and_then(|s| s.get(i)).and_then(Option::as_ref)
     }
+    let back = |p: Vec2| Vec2::new(-p.x, p.y);
+    let near = |p: Vec2, q: Vec2| p.dist(q) <= 1e-6;
+    let same = |i: usize, j: usize| match (source(mirrored, i), source(plain, j)) {
+        (Some(ExtrudeCap { high: a, .. }), Some(ExtrudeCap { high: b, .. })) => a == b,
+        (Some(ExtrudeSide { segment: s, .. }), Some(ExtrudeSide { segment: t, .. })) => {
+            let (a, b) = (back(s.start()), back(s.end()));
+            near(back(s.point_at(0.5)), t.point_at(0.5)) && ((near(a, t.start()) && near(b, t.end())) || (near(a, t.end()) && near(b, t.start())))
+        }
+        _ => false,
+    };
+    let n = plain.face_count();
+    if mirrored.face_count() != n {
+        return None;
+    }
+    let mut taken = vec![false; n];
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let j = (0..n).find(|&j| taken.get(j) == Some(&false) && same(i, j))?;
+        if let Some(t) = taken.get_mut(j) {
+            *t = true;
+        }
+        out.push(j);
+    }
+    Some(out)
 }
 
 /// A member's section `plane` and `regions` to build along its line `d`. A member Auto runs against its line
@@ -474,12 +544,12 @@ fn auto_ends(
 pub(crate) fn auto_members(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
-    placed: &dyn Fn(usize, Vec3) -> Plane,
+    (placed, unreversed): Placing,
     plan: Plan,
     tie: Tie,
 ) -> Result<Vec<Option<Traced>>> {
     let ((ends, copes), fits) = auto_ends(segments, regions, placed, plan, tie)?;
-    let mut out = cut_members(segments, regions, placed, &ends, copes)?;
+    let mut out = cut_members(segments, regions, (placed, unreversed), &ends, copes)?;
     let no_member = |m: usize| DocError::Invalid(format!("no member {m}"));
     // Member m as its plane cuts build it: a fitted or coped end stops at its line's end, inside the tube it meets.
     let tool = |m: usize| -> Result<Traced> {
@@ -638,7 +708,7 @@ pub(crate) fn member_section(
     let Layout { segments, regions, at, turn, sketch_x, drawn, planes, .. } = layout(doc, vals, f, st)?;
     let m = segments.iter().position(|(id, _, _)| id == line).ok_or_else(|| DocError::Unknown(format!("line `{line}` of the member feature")))?;
     let plan = auto_plan(*corner, &segments, &planes, corners, &drawn)?;
-    let axes = section_axes(&segments, &planes, plan.as_ref(), turn)?;
+    let (axes, _) = section_axes(&segments, &planes, plan.as_ref(), turn)?;
     let (x, y) = axes.get(m).copied().ok_or_else(|| DocError::Invalid(format!("line `{line}` has no length")))?;
     let (a, b) = segments.get(m).map(|s| (s.1, s.2)).ok_or_else(|| DocError::Unknown(format!("line `{line}` of the member feature")))?;
     let placed = placer(&axes, at);

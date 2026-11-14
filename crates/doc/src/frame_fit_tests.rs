@@ -202,7 +202,7 @@ fn auto_groups_sharing_a_point_fit_across() {
     let drawn: Vec<usize> = (0..segs.len()).collect();
     let built = {
         let plan = crate::frame_layout::plan(&segs, &planes, &drawn, &|_, _| true, &[]).unwrap();
-        crate::eval::frame_member::auto_members(&segs, &box_tube(), &placed, plan, (Some(Vec3::X), &drawn)).unwrap()
+        crate::eval::frame_member::auto_members(&segs, &box_tube(), (&placed, &|_, _| None), plan, (Some(Vec3::X), &drawn)).unwrap()
     };
     let bounds = |m: usize| built[m].as_ref().unwrap().body.exact_bounds().unwrap();
     // The rectangle, laid first (its 600 is the longest tube), makes the origin's corner: a butt of r1 (600) and r4
