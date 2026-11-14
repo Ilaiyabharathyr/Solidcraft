@@ -745,7 +745,10 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>) {
                     // What is left beside Flip (box, gap, label) and the bin.
                     let t = solidcraft_theme::Tokens::get();
                     let beside = t.space_14 + t.space_6 + crate::ui_kit::ContentWidth::label(ui, tr("Flip")) + t.control_height;
-                    let width = ui.available_width() - beside - 2.0 * ui.spacing().item_spacing.x;
+                    let room = ui.available_width() - beside - 2.0 * ui.spacing().item_spacing.x;
+                    // The type takes the width its longest label needs (never what Flip and the bin need).
+                    let translated = labels.map(solidcraft_ui_text::tr_label);
+                    let width = crate::ui_kit::ContentWidth::dropdown(ui, &translated).min(room);
                     crate::ui_kit::settings_control_width(ui, width, |ui| crate::ui_kit::dropdown(ui, &format!("frame_corner_{n}"), corner, &labels));
                     let enabled = flips(*corner);
                     ui.add_enabled_ui(enabled, |ui| {
@@ -755,6 +758,8 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>) {
                             *flip = on;
                         }
                     });
+                    // The bin sits at the right edge of the value column.
+                    ui.add_space((ui.available_width() - t.control_height).max(0.0));
                     if crate::ui_kit::bin_button(ui, tr("Remove this corner")).clicked() {
                         drop = Some(pick.clone());
                     }
@@ -773,6 +778,8 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>) {
         ui.scope_builder(egui::UiBuilder::new().id_salt(("frame_missing_corner", k)), |ui| {
             form_row(ui, &label, |ui| {
                 ui.label(tr("Missing corner"));
+                let t = solidcraft_theme::Tokens::get();
+                ui.add_space((ui.available_width() - t.control_height).max(0.0));
                 if crate::ui_kit::bin_button(ui, tr("Remove this corner")).clicked() {
                     gone = Some(k);
                 }

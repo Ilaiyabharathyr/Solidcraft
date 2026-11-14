@@ -1450,6 +1450,33 @@ fn each_corner_override_is_one_row() {
     assert_eq!(h.app.dialog.as_ref().unwrap().inputs[2].items, std::slice::from_ref(&picks[0]));
 }
 
+/// Flip shows in full on every override row (never "Fl…"), and the bin sits at the row's right edge.
+#[test]
+fn a_corner_override_row_shows_flip_in_full_with_the_bin_at_the_right() {
+    let (mut h, _) = overrides_dialog("butt");
+    h.frames(2);
+    let drawn: Vec<String> =
+        h.shapes.iter().filter_map(|s| if let egui::Shape::Text(t) = &s.shape { Some(t.galley.text().to_owned()) } else { None }).collect();
+    assert!(!drawn.iter().any(|t| t.starts_with("Fl") && t != "Flip"), "an elided Flip: {drawn:?}");
+    assert_eq!(drawn.iter().filter(|t| *t == "Flip").count(), 3, "{drawn:?}");
+    let t = solidcraft_theme::Tokens::get();
+    let need = t.space_14
+        + t.space_6
+        + h.ctx.fonts_mut(|f| f.layout_no_wrap("Flip".to_owned(), egui::FontId::proportional(t.font_label), egui::Color32::WHITE).size().x);
+    let tree = h.output.accesskit_update.as_ref().unwrap();
+    let flips: Vec<_> = tree.nodes.iter().filter(|(_, n)| n.label() == Some("Flip")).filter_map(|(_, n)| n.bounds()).collect();
+    for n in [1, 2] {
+        let [_, y] = h.widget(&format!("Corner {n}")).unwrap();
+        let f = flips.iter().find(|b| (f64::midpoint(b.y0, b.y1) - y).abs() < 2.0).unwrap_or_else(|| panic!("Corner {n}: a Flip on its row"));
+        assert!(f.x1 - f.x0 + 0.5 >= f64::from(need), "Corner {n}: Flip is {} wide, its text needs {need}", f.x1 - f.x0);
+    }
+    for n in [1, 2] {
+        let row = crate::scenario::rect_of(&format!("dialog:row:Corner {n}")).unwrap();
+        let bin = crate::scenario::rect_of(&format!("dialog:button:Corner {n}:×")).unwrap();
+        assert!((0.0..2.0).contains(&(row.right() - bin.right())), "Corner {n}: bin {bin:?} at the right of {row:?}");
+    }
+}
+
 /// Coped Butt reads as "Coped" wherever a person sees it; its value stays `coped_butt`.
 #[test]
 fn coped_butt_reads_as_coped() {
