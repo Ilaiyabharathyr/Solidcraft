@@ -192,9 +192,9 @@ impl Members {
             return Err(DocError::Invalid("not a frame member feature".into()));
         };
         let Layout { segments, regions, at, turn, sketch_x, drawn, planes, .. } = layout(doc, vals, g, st)?;
-        // ponytail: an earlier frame's corner that its own Fit Ends left Free is cut here as jointed (finding it
-        // would build the tools of the frames before that one too); the tool then reaches on inside the tube that
-        // corner lies in, which the fitted end is cut by anyway.
+        // ponytail: an earlier frame's corner or chain corner that its own Fit Ends left Free is cut here as jointed
+        // (finding it would build the tools of the frames before that one too); the tool then reaches on inside the
+        // tube that corner lies in, which the fitted end is cut by anyway.
         let plan = auto_plan(*corner, &segments, &planes, corners, &drawn)?;
         let (axes, _) = section_axes(&segments, &planes, plan.as_ref(), turn)?;
         let inside = regions.first().map(|r| r.interior_point()).ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;

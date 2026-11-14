@@ -342,7 +342,7 @@ fn tubes_in_no_plane_chain_and_mitre() {
     planes[5] = None;
     let p = plan(&segs, &planes, &in_order(&segs), &|_, _| true, &[]).unwrap();
     assert_eq!(p.corners.len(), 4, "the rectangle's corners only");
-    assert_eq!(p.chained, [ChainCorner { a: (4, false), b: (5, true), kind: CornerType::Mitre, flip: false }]);
+    assert_eq!(p.chained, [ChainCorner { a: (4, false), b: (5, true), kind: CornerType::Mitre, flip: false, overridden: false }]);
     assert_eq!(p.fits, [Fit { member: 4, at_start: true, against: vec![0] }]);
     // An override at the chained corner is at a corner of the frame.
     let o = CornerOverride { members: vec!["pair1".into(), "pair2".into()], corner: CornerType::Butt, flip: false };

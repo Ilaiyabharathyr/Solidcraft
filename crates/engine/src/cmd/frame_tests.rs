@@ -3264,6 +3264,58 @@ fn ends_at_a_free_corner_are_fitted_to_each_other_too() {
     assert!(o < 1e-3, "the braces overlap by {o} mm³: {bs:?}");
 }
 
+/// Construction points named after each `(name, point)`, for pairs to join.
+fn points(s: &mut Session, at: &[(&str, [f64; 3])]) {
+    for (name, p) in at {
+        run(s, "construct.point.vertex", json!({"point": {"point": p}, "name": name}));
+    }
+}
+
+/// A pair from construction point `a` to `b`, as `pairs` takes it.
+fn pair(a: &str, b: &str) -> Value {
+    json!({"a": {"construct_point": a}, "b": {"construct_point": b}})
+}
+
+#[test]
+fn pair_braces_meeting_inside_an_earlier_tube_are_fitted_not_chained() {
+    // Ruling A15: the braces of `ends_at_a_free_corner_are_fitted_to_each_other_too` as point pairs, tubes in no
+    // sketch plane. Their node (300, 0, 0) lies inside A's bottom tube: the chain corner there is Free, not mitred
+    // inside the tube, and both ends are fitted to A and to each other.
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    points(&mut s, &[("N", [300.0, 0.0, 0.0]), ("U", [300.0, 300.0, 0.0]), ("D", [500.0, 200.0, 0.0])]);
+    let pairs = json!([pair("N", "U"), pair("N", "D")]);
+    run(&mut s, "frame.member", json!({"pairs": pairs, "profile": square_of(20.0), "corner": "auto", "fit_ends": true, "body_name": "B"}));
+    let bs = named(&mut s, "B");
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    for b in &bs {
+        assert!(b.2[1] >= 20.0 - 1e-6, "{b:?}");
+    }
+    let o = overlap(&mut s, "B");
+    assert!(o < 1e-3, "the braces overlap by {o} mm³: {bs:?}");
+}
+
+#[test]
+fn pairs_ending_on_their_own_frames_tube_are_fitted_to_it_not_chained() {
+    // Ruling A15 (finding 6): the same two pair braces in the rectangle's own Frame Member, under Auto. Their node is
+    // on the bottom tube's middle, inside it: Free, so each brace is fitted to the bottom tube (laid first) and the
+    // later one to the earlier, not mitred inside the tube. No tube of the frame overlaps another.
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    points(&mut s, &[("N", [300.0, 0.0, 0.0]), ("U", [300.0, 300.0, 0.0]), ("D", [500.0, 200.0, 0.0])]);
+    let pairs = json!([pair("N", "U"), pair("N", "D")]);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "pairs": pairs, "profile": tube(), "corner": "auto", "fit_ends": true, "body_name": "B"}));
+    let bs = named(&mut s, "B");
+    assert_eq!(bs.len(), 6, "{bs:?}");
+    let braces: Vec<&Measured> = bs.iter().filter(|b| b.3[1] < 350.0 && b.2[0] > 250.0 && b.3[0] < 560.0).collect();
+    assert_eq!(braces.len(), 2, "{bs:?}");
+    for b in braces {
+        assert!(b.2[1] >= 20.0 - 1e-6, "{b:?}");
+    }
+    let o = overlap(&mut s, "B");
+    assert!(o < 1e-3, "the frame's tubes overlap by {o} mm³: {bs:?}");
+}
+
 #[test]
 fn a_mitre_frame_fits_its_free_ends_to_its_own_tubes_in_drawing_order() {
     // Ruling A14: with no earlier Frame Member, the Mitre rectangle's cross-member (300, 0)…(300, 400) has two free

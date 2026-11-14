@@ -459,6 +459,8 @@ pub struct ChainCorner {
     pub kind: CornerType,
     /// Its override's Flip.
     pub flip: bool,
+    /// Whether an override matched it: such a corner is jointed even where it lies inside a tube (ruling A15).
+    pub overridden: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -593,9 +595,10 @@ pub fn plan(
         if let [a, b, ..] = rest.as_slice() {
             done = 2;
             // An Auto override at a chain's corner is its own joint, a mitre.
-            let (kind, flip) = matched().map_or((CornerType::Mitre, false), |o| (o.corner, o.flip));
+            let o = matched();
+            let (kind, flip) = o.map_or((CornerType::Mitre, false), |o| (o.corner, o.flip));
             let kind = if kind == CornerType::Auto { CornerType::Mitre } else { kind };
-            chained.push(ChainCorner { a: (a.1, a.2), b: (b.1, b.2), kind, flip });
+            chained.push(ChainCorner { a: (a.1, a.2), b: (b.1, b.2), kind, flip, overridden: o.is_some() });
         }
         for (j, e) in rest.iter().enumerate().skip(done) {
             let earlier = rest.iter().take(j).map(|e| e.1);
