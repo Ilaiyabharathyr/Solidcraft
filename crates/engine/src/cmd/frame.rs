@@ -485,7 +485,16 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
     let (ids, later) = frame::member_parts(&st, &kind).map_err(|e| bad(cmd, e.to_string()))?;
     if let FeatureKind::FrameMember { corners, .. } = &kind {
         let mut pairs = std::collections::HashSet::new();
+        // An override names a corner by its lines and pairs, never by a piece of a line cut where tubes cross. A
+        // piece is told by where it is, not by its id: a sketch id may hold `>` itself.
+        let pieces: std::collections::HashSet<&str> = ids.iter().zip(&later).filter(|(_, l)| l.is_some()).map(|(id, _)| id.as_str()).collect();
         for c in corners {
+            if let Some(piece) = c.members.iter().find(|m| pieces.contains(m.as_str())) {
+                return Err(bad(
+                    cmd,
+                    format!("`corners`: `{piece}` is a piece of a tube cut where tubes cross: an override names the lines and pairs that meet"),
+                ));
+            }
             let mut sorted: Vec<&String> = c.members.iter().collect();
             sorted.sort();
             sorted.dedup();
@@ -545,15 +554,35 @@ fn remove_member(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(pins) = pins {
         *names = pins;
     }
-    let gone: std::collections::BTreeSet<&str> = members.iter().map(|(_, line)| line.as_str()).collect();
+    let mut gone: std::collections::BTreeSet<String> = members.into_iter().map(|(_, line)| line).collect();
     let is_pair = |line: &str, pairs: &[MemberPair]| pairs.iter().any(|p| p.id == line);
-    // No `lines` means every line of the sketch: they are listed as they are now before one goes,
-    // with the rule evaluation uses.
-    if lines.is_empty() && path_sketch.is_some() && gone.iter().any(|line| !is_pair(line, pairs)) {
-        let (every, later) = frame::member_parts(&s.model.state_before(f.id), &f.kind).map_err(|e| bad(cmd, e.to_string()))?;
-        // Under Auto the ids are pieces too: a later piece is no line of its own.
-        *lines = every.into_iter().zip(later).filter(|(l, piece)| piece.is_none() && !is_pair(l, pairs)).map(|(l, _)| l).collect();
+    // Listed lines are known without laying the frame out: one that no longer lays out (a line of it gone from
+    // its sketch) can still lose a tube, by line.
+    let parts = if path_sketch.is_some() && gone.iter().any(|line| !is_pair(line, pairs)) {
+        match frame::member_parts(&s.model.state_before(f.id), &f.kind) {
+            Ok(parts) => Some(parts),
+            Err(e) if lines.is_empty() => return Err(bad(cmd, e.to_string())),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    if let Some((every, later)) = parts {
+        // Under Auto a tube may be a later piece of a line cut where tubes cross: its whole line goes, once.
+        let line_of = |k: usize| later.get(k).copied().flatten().map_or(k, |(l, _)| l);
+        gone = gone.into_iter().map(|m| every.iter().position(|id| *id == m).and_then(|k| every.get(line_of(k)).cloned()).unwrap_or(m)).collect();
+        // The pieces that go with it, its own and those it cut, take their pinned names along.
+        let cut = |i: usize| every.get(i).is_some_and(|id| gone.contains(id));
+        let pieces: std::collections::HashSet<&str> =
+            every.iter().zip(&later).filter(|(_, p)| p.is_some_and(|(l, x)| cut(l) || cut(x))).map(|(id, _)| id.as_str()).collect();
+        names.retain(|id, _| !pieces.contains(id.as_str()));
+        // No `lines` means every line of the sketch: they are listed as they are now before one goes,
+        // with the rule evaluation uses. A later piece is no line of its own.
+        if lines.is_empty() {
+            *lines = every.iter().zip(&later).filter(|(l, piece)| piece.is_none() && !is_pair(l, pairs)).map(|(l, _)| l.clone()).collect();
+        }
     }
+    let gone: std::collections::BTreeSet<&str> = gone.iter().map(String::as_str).collect();
     if let Some(line) = gone.iter().find(|line| !is_pair(line, pairs) && !lines.iter().any(|l| l == *line)) {
         return Err(bad(cmd, format!("`{line}` is not a tube of {}", f.name)));
     }

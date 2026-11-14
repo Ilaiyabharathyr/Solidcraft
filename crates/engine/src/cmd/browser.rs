@@ -1371,14 +1371,27 @@ fn replace_body_name(v: &mut Value, old: &str, new: &str, names_body: bool, dept
     }
 }
 
-/// A frame member feature's bodies by line id, as its own result made them: what pins each
-/// member's name to its line. `None` for any other feature, or when they don't pair up.
+/// A frame member feature's bodies by member id (line, pair or piece), as its own result made
+/// them: what pins each member's name to its member. `None` for any other feature, or when they
+/// don't pair up: not one body per member, or a body named what another member is pinned to.
 pub(super) fn member_pins(s: &Session, fid: u64) -> Option<BTreeMap<String, String>> {
     let f = s.doc.feature(fid)?;
+    let FeatureKind::FrameMember { names, .. } = &f.kind else { return None };
     let result = s.model.result(fid)?;
     let lines = solidcraft_doc::frame::member_line_ids(&result.state, &f.kind).ok()?;
     let made: Vec<String> = result.state.bodies.iter().filter(|b| b.feature == fid).map(|b| b.name.clone()).collect();
-    (lines.len() == made.len()).then(|| lines.into_iter().zip(made).collect())
+    if lines.len() != made.len() {
+        return None;
+    }
+    // A feature that names its own members gives each its pinned name when it can, and that name
+    // to no other: a body with another member's pinned name was made for that member.
+    if f.body_names.is_empty() {
+        let pinned: std::collections::HashSet<&str> = lines.iter().filter_map(|l| names.get(l)).map(String::as_str).collect();
+        if lines.iter().zip(&made).any(|(l, n)| names.get(l) != Some(n) && pinned.contains(n.as_str())) {
+            return None;
+        }
+    }
+    Some(lines.into_iter().zip(made).collect())
 }
 
 /// Whether the `i`-th new body of `f` is numbered by the body counter (`BodyN`): it has no stored

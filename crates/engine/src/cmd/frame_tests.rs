@@ -2932,6 +2932,162 @@ fn auto_crossings_are_the_same_whatever_the_pick_order() {
     assert_eq!(drawn_faces, picked_faces);
 }
 
+/// The X brace frame made under Auto, d1 named `D1` and d2 `D2`: d1 whole, d2 cut into `d2` and `d2>d1`.
+fn x_brace_member(s: &mut Session) -> Value {
+    x_brace_frame(s);
+    run(s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "names": {"d1": "D1", "d2": "D2"}}))["feature"].clone()
+}
+
+/// The frame member `fid`'s pinned names.
+fn pinned_names(s: &Session, fid: &Value) -> std::collections::BTreeMap<String, String> {
+    let solidcraft_doc::FeatureKind::FrameMember { names, .. } = member_kind(s, fid) else { panic!() };
+    names
+}
+
+/// Sets the pinned names of the frame member `fid` as `change` says, without building it again.
+fn change_pins(s: &mut Session, fid: &Value, change: impl FnOnce(&mut std::collections::BTreeMap<String, String>)) {
+    if let Some(solidcraft_doc::FeatureKind::FrameMember { names, .. }) = s.doc_mut().feature_mut(fid.as_u64().unwrap()).map(|f| &mut f.kind) {
+        change(names);
+    }
+}
+
+#[test]
+fn piece_names_are_pinned_at_creation() {
+    let mut s = Session::default();
+    let fid = x_brace_member(&mut s);
+    let names = pinned_names(&s, &fid);
+    // Every member is pinned, the later piece too, under its piece id with the name it was given.
+    assert_eq!(names.len(), 7, "{names:?}");
+    assert_eq!(names.get("d2>d1").map(String::as_str), Some("D2 · D1"), "{names:?}");
+    let made: std::collections::BTreeSet<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+    assert_eq!(made, names.values().cloned().collect(), "{names:?}");
+}
+
+#[test]
+fn renaming_the_crossing_tube_doesnt_rename_the_pieces() {
+    // Also for a frame pinned before its piece was: the rename pins every member as it is now.
+    for unpinned in [false, true] {
+        let mut s = Session::default();
+        let fid = x_brace_member(&mut s);
+        if unpinned {
+            change_pins(&mut s, &fid, |names| {
+                names.remove("d2>d1");
+            });
+            s.refresh();
+            assert!(bodies(&mut s).iter().any(|b| b.0 == "D2 · D1"));
+        }
+        run(&mut s, "body.rename", json!({"body": "D1", "name": "Brace"}));
+        let made: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+        assert!(made.contains(&"Brace".to_string()) && made.contains(&"D2 · D1".to_string()), "{unpinned}: {made:?}");
+        let names = pinned_names(&s, &fid);
+        assert_eq!(names.get("d1").map(String::as_str), Some("Brace"), "{unpinned}: {names:?}");
+        assert_eq!(names.get("d2>d1").map(String::as_str), Some("D2 · D1"), "{unpinned}: {names:?}");
+    }
+}
+
+#[test]
+fn member_pins_pair_each_body_with_its_own_member() {
+    let mut s = Session::default();
+    let fid = x_brace_member(&mut s);
+    let id = fid.as_u64().unwrap();
+    assert_eq!(crate::cmd::browser::member_pins(&s, id), Some(pinned_names(&s, &fid)));
+    // Pins that no longer agree with the bodies made (here d1's and d2's swapped, not yet built) pair nothing, so a
+    // rename never pins a name to another member.
+    change_pins(&mut s, &fid, |names| {
+        names.insert("d1".into(), "D2".into());
+        names.insert("d2".into(), "D1".into());
+    });
+    assert_eq!(crate::cmd::browser::member_pins(&s, id), None);
+}
+
+#[test]
+fn a_corners_entry_with_a_piece_id_is_refused() {
+    let mut s = Session::default();
+    x_brace_frame(&mut s);
+    // An override names lines and pairs, never a piece: refused, naming `corners`.
+    let corners = json!([{"members": ["d2>d1", "d1"], "corner": "auto"}]);
+    let e = s.execute("frame.member", &json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "corners": corners})).unwrap_err().to_string();
+    assert!(e.contains("`corners`") && e.contains("d2>d1") && e.contains("piece"), "{e}");
+    // A crossing override names the lines through the point; its type isn't used (ruling C2), only Flip: d2 stays whole.
+    let corners = json!([{"members": ["d1", "d2"], "corner": "mitre", "flip": true}]);
+    run(
+        &mut s,
+        "frame.member",
+        json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "corners": corners, "names": {"d1": "D1", "d2": "D2"}}),
+    );
+    let made: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+    assert!(made.contains(&"D1 · D2".to_string()) && !made.contains(&"D2 · D1".to_string()), "{made:?}");
+}
+
+#[test]
+fn a_stale_piece_name_is_ignored() {
+    let mut s = Session::default();
+    x_brace_frame(&mut s);
+    // A `names` key for no member (a piece of a crossing there isn't) is no error, and names nothing.
+    let names = json!({"d1": "D1", "d2": "D2", "d2>gone": "Gone", "d1>d2": "Nor this"});
+    let fid = run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "names": names}))["feature"].clone();
+    let made: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+    assert!(made.len() == 7 && !made.iter().any(|n| n == "Gone" || n == "Nor this"), "{made:?}");
+    // The crossing taken away leaves d2>d1's pin behind: the frame still builds, and still edits.
+    delete_line(&mut s, "Frame", "d1");
+    assert!(pinned_names(&s, &fid).contains_key("d2>d1"));
+    assert_eq!(s.model.result(fid.as_u64().unwrap()).and_then(|r| r.error.clone()), None);
+    let made: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+    assert!(made.len() == 5 && made.contains(&"D2".to_string()), "{made:?}");
+    run(&mut s, "timeline.edit", json!({"feature": fid, "set": {"flip": true}}));
+    assert_eq!(bodies(&mut s).len(), 5);
+}
+
+#[test]
+fn remove_tube_on_a_piece_removes_its_line() {
+    // Its later piece, or both its pieces at once (the line goes once), takes out d2. The piece's pinned name goes with
+    // it, and also when the tube that cut it, d1, goes: then d2 is whole again.
+    for (members, line, kept) in [(vec!["d2>d1"], "d2", "D1"), (vec!["d2", "d2>d1"], "d2", "D1"), (vec!["d1"], "d1", "D2")] {
+        let mut s = Session::default();
+        let fid = x_brace_member(&mut s);
+        let members: Vec<Value> = members.iter().map(|m| json!({"feature": fid, "line": m})).collect();
+        remove(&mut s, json!(members));
+        let solidcraft_doc::FeatureKind::FrameMember { lines, names, .. } = member_kind(&s, &fid) else { panic!() };
+        assert!(lines.len() == 5 && !lines.iter().any(|l| l == line), "{lines:?}");
+        assert!(!names.contains_key(line) && !names.contains_key("d2>d1") && names.len() == 5, "{names:?}");
+        let made: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+        assert!(made.len() == 5 && made.contains(&kept.to_string()) && !made.iter().any(|n| n.contains('·')), "{made:?}");
+    }
+}
+
+#[test]
+fn remove_tube_mends_an_auto_frame_whose_line_is_gone() {
+    // A listed line deleted from the sketch fails the frame, which can't be laid out to find its pieces: its tube can
+    // still be taken out, by its line, and the frame builds again.
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let lines: Vec<String> = sketch_lines(&s, "Frame").into_iter().map(|l| l.0).collect();
+    let fid = run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "lines": lines}))["feature"].clone();
+    let right = line_at_x(&s, "Frame", 600.0);
+    delete_line(&mut s, "Frame", &right);
+    let error = |s: &Session| s.model.result(fid.as_u64().unwrap()).and_then(|r| r.error.clone());
+    assert!(error(&s).is_some());
+    remove(&mut s, json!([{"feature": fid, "line": right}]));
+    assert_eq!(error(&s), None);
+    assert_eq!(bodies(&mut s).len(), 3);
+}
+
+#[test]
+fn a_face_fitted_to_a_later_piece_is_named_with_its_id() {
+    // As in `a_crossing_tubes_far_end_override_still_applies`: c cuts a at (300, 0), and b's start is fitted to a's
+    // later piece `a>c`, which runs through at (600, 0). b's fitted faces carry the piece's id, not its line's.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "L"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [600, 0]], "ids": ["a"]}));
+    run(&mut s, "sketch.line", json!({"points": [[600, 0], [600, 400]], "ids": ["b"]}));
+    run(&mut s, "sketch.line", json!({"points": [[300, -400], [300, 400]], "ids": ["c"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "L", "profile": tube(), "corner": "auto", "names": {"a": "a", "b": "b", "c": "c"}}));
+    let (_, faces) = built(&mut s);
+    let fitted: Vec<&String> = faces["b"].iter().filter(|n| n.contains("corner_start:")).collect();
+    assert!(!fitted.is_empty() && fitted.iter().all(|n| n.contains("corner_start:a>c:face:")), "{:?}", faces["b"]);
+}
+
 #[test]
 fn auto_overrides_at_three_ends() {
     // a (600) along X, b (400) down Y to the origin, c (283) out at 45°: a and b, laid first, make the corner
