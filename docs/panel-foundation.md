@@ -341,12 +341,15 @@ With the Layout preference **Drag panels out of the app into their own windows**
 drop target, `Window`, for a title or tab drag. It is not a fallback for a
 missed target: it follows the same prepare, preview and commit path as the dock
 targets, and uses the same destination as **Pop out to window**. While it is
-selected, the app shows an outline window at the exact screen place the panel's
-window will open; release opens it there, and only after that outline was shown.
-Release over the app, Escape, focus loss or a changed app window cancels. A
-popped-out window then has a grip: dragging it over the app shows the normal dock
-target, and release docks the panel there. With the preference off, a drag past
-the app's edge keeps the panel in the app.
+selected, the window the panel will open in is shown at that screen place, with
+the panel's body as painted in that frame. Like live drag paint, it runs no
+second body and changes no layout. Release opens the panel there, only after that
+window was shown, and the panel keeps that same window. Release over the app,
+Escape, focus loss or a changed app window cancels and closes it. With the
+preference on, panel windows use the app's own title bar (the shared window
+chrome): the panel's title with its grip sits there, and dragging it over the
+app shows the normal dock target; release docks the panel there. With the
+preference off, a drag past the app's edge keeps the panel in the app.
 
 Panels in the workspace use the ribbon's theme fill and backdrop blur. The
 system's Reduce Transparency setting keeps the panels opaque. Explicit opacity

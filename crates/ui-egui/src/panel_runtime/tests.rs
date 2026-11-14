@@ -14384,6 +14384,37 @@ fn a_dropped_window_opens_at_the_shown_place_kept_on_its_monitor() {
     adapter.place(&ctx, &instance, edge);
     let builder = adapter.builder(&ctx, &host, &instance, "Panel".into(), preferred, bounds).unwrap();
     assert_eq!(builder.position, Some(edge.min));
+
+    // With the app's own title bar, the window has no OS frame: the drag shows
+    // the window itself at the landing, passed through and above other windows,
+    // and the panel's new host keeps that window when it opens.
+    adapter.set_title_bar(Some(crate::window_chrome::TitleBar { traffic_lights: true, caption_buttons: false }));
+    // It has the size the panel has in the app, not one remembered from before.
+    let docked = Size { width: 250.0, height: 355.0 };
+    assert_eq!(adapter.landing(&ctx, &instance, egui::pos2(100.0, 80.0), docked, bounds).unwrap().size(), egui::vec2(250.0, 355.0));
+    let other = InstanceId::new("other-panel").unwrap();
+    let landing = adapter.landing(&ctx, &other, egui::pos2(100.0, 80.0), preferred, bounds).unwrap();
+    assert_eq!(landing, egui::Rect::from_min_size(egui::pos2(100.0, 80.0), egui::vec2(360.0, 440.0)));
+    let (dropped, window) = adapter.drop_window(&other, "Other".into(), landing);
+    assert_eq!((window.position, window.inner_size), (Some(landing.min), Some(landing.size())));
+    assert_eq!((window.mouse_passthrough, window.window_level, window.active), (Some(true), Some(egui::WindowLevel::AlwaysOnTop), Some(false)));
+    assert_eq!((window.fullsize_content_view, window.title_shown), (Some(true), Some(false)));
+    assert_eq!(adapter.drop_window(&other, "Other".into(), landing).0, dropped, "one window for the whole drag");
+    let opened = HostId::new("drop-opened").unwrap();
+    let create = [HostEffect::CreateNative { host: opened.clone(), section: SectionId::new("opened-section").unwrap() }];
+    adapter.prepare(&create).unwrap();
+    adapter.commit(&create);
+    assert_eq!(adapter.adopt(&opened, &instance), None, "only the dropped panel's host keeps the window");
+    assert_eq!(adapter.adopt(&opened, &other), Some(dropped));
+    assert_eq!(adapter.viewport_id(&opened), Some(dropped));
+    adapter.place(&ctx, &other, landing);
+    let window = adapter.builder(&ctx, &opened, &other, "Other".into(), preferred, bounds).unwrap();
+    assert_eq!(
+        (window.mouse_passthrough, window.window_level, window.fullsize_content_view),
+        (Some(false), Some(egui::WindowLevel::Normal), Some(true))
+    );
+    assert_eq!((window.position, window.inner_size), (Some(landing.min), Some(landing.size())));
+    assert_ne!(adapter.drop_window(&other, "Other".into(), landing).0, dropped, "the next drag shows a new window");
 }
 
 #[test]
@@ -14395,6 +14426,8 @@ fn raw_host_drags_a_panel_out_to_a_desktop_window_and_back_by_its_grip_keeping_i
     let mut raw = RawPanelHost::new(h, 1.0);
     raw.inner_origin = Some(egui::pos2(200.0, 100.0));
     raw.host.set_drag_out(true);
+    // As in the app by default: live paint hides the panel leaving the app.
+    raw.host.set_live_drag(true);
     raw.frame(Vec::new(), false);
     let docked = raw.content.runtime.layout().layout().containing(&id("editor")).unwrap().location.clone();
     let start = raw.at(HostControlTarget::Pointer(HostPointerTarget::Header { instance: id("editor") }));
@@ -14409,6 +14442,17 @@ fn raw_host_drags_a_panel_out_to_a_desktop_window_and_back_by_its_grip_keeping_i
     assert_eq!(instance, id("editor"));
     // On the screen, the grabbed point of the header stays under the pointer.
     assert_eq!(corner, Point { x: 200.0 + outside.x - (start.x - card.origin.x), y: 100.0 + outside.y - (start.y - card.origin.y) });
+    // Its preview window shows the panel itself, from this frame's paint, in the window's content.
+    let target = egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(360.0, 440.0));
+    let mut output = egui::Context::default()
+        .run_ui(egui::RawInput::default(), |ui| raw.host.window_card().expect("the panel's paint goes with it").paint(ui, target));
+    output.textures_delta.clear();
+    let painted = output.shapes;
+    assert!(painted.iter().any(|shape| matches!(shape.shape, egui::Shape::Text(_))), "{painted:?}");
+    assert!(painted.iter().all(|shape| target.contains_rect(shape.clip_rect)), "{painted:?}");
+    // The window's title bar shows the title: the copy leaves out the docked header.
+    let title = raw.content.runtime.instance_presentation(&id("editor")).unwrap().title;
+    assert!(!painted.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == title)), "{painted:?}");
     let shown = LogicalRect { origin: corner, size: Size { width: 376.0, height: 488.0 } };
     raw.host.confirm_window_shown(shown);
     raw.frame(
@@ -14418,6 +14462,7 @@ fn raw_host_drags_a_panel_out_to_a_desktop_window_and_back_by_its_grip_keeping_i
     raw.frame(Vec::new(), false);
     assert_eq!(raw.content.runtime.layout().layout().containing(&id("editor")).unwrap().location.zone(), Zone::Window);
     assert_eq!(raw.host.take_window_landing(), Some((id("editor"), shown)));
+    assert!(raw.host.window_card().is_none(), "the preview ends with the drag");
     let state = raw.content.probe.state(&key).unwrap();
     assert_eq!((state.draft.as_str(), state.transaction_live), ("torn-off draft", true));
 

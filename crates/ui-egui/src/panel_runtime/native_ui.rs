@@ -1,7 +1,10 @@
 use solidcraft_engine::panels::*;
 
+use super::drag_paint::WindowCard;
+use super::workspace::WindowDragEvent;
 use super::{ContentServices, ContentSlot, FramePanelContent, PanelContext, PanelController, PanelHost, PanelPresentation, PanelRuntime};
-use crate::ui_kit::{self, BackingTooltipExt as _, Container, HostChrome, Surface};
+use crate::ui_kit::{self, BackingTooltipExt as _, Container, Edge, HostChrome, Surface};
+use crate::window_chrome::TitleBar;
 use solidcraft_theme::Tokens;
 
 pub(super) enum WindowAction {
@@ -10,10 +13,11 @@ pub(super) enum WindowAction {
     Content(InstanceId, ControlId),
     Redock,
     /// The grip is dragging the active panel back towards the app.
-    Drag(super::workspace::WindowDragEvent),
+    Drag(WindowDragEvent),
 }
 
-/// `drag_back` shows the grip that drags the panel back into the app.
+/// `title_bar`: the window shows the app's own title bar, whose grip drags the
+/// panel back into the app.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn paint(
     runtime: &mut PanelRuntime,
@@ -23,7 +27,7 @@ pub(super) fn paint(
     section: &Section,
     ui: &mut egui::Ui,
     enabled: bool,
-    drag_back: bool,
+    title_bar: Option<TitleBar>,
 ) -> PanelResult<Option<WindowAction>> {
     if ui.input(|input| input.viewport().close_requested()) {
         return Ok(Some(WindowAction::Redock));
@@ -33,9 +37,24 @@ pub(super) fn paint(
         return Ok(None);
     }
     let outer = super::workspace::logical_rect(ui.max_rect());
+    let mut action = None;
+    if let Some(bar) = title_bar {
+        let availability = section.tabs.iter().map(|id| (id.clone(), runtime.layout().availability(id))).collect();
+        if let Some(active) = presented_tab(section, &availability) {
+            let title = runtime.instance_presentation(active)?.title;
+            let rtl = runtime.environment().direction == Direction::Rtl;
+            let (drag, caption) = window_bar(ui, bar, host, active, &title, rtl, enabled);
+            action = drag.map(WindowAction::Drag);
+            if let Some(caption) = caption {
+                caption.send(ui.ctx());
+            }
+        }
+        if bar.caption_buttons {
+            crate::window_chrome::resize_zones(ui);
+        }
+    }
     let panel = Container::new(ui.ctx(), Surface::Viewport).central();
     let frame = Container::new(ui.ctx(), Surface::Panel).edge_frame(solidcraft_theme::Tokens::get().dialog_body);
-    let mut action = None;
     Container::show_central(ui, panel, frame, |ui| {
         ui.add_enabled_ui(enabled, |ui| {
             let availability = section.tabs.iter().map(|id| (id.clone(), runtime.layout().availability(id))).collect();
@@ -47,11 +66,8 @@ pub(super) fn paint(
             let spec = layout.registry().get(&layout.layout().instance(active)?.kind)?;
             let environment = runtime.environment();
             let tabs = section.tabs.iter().filter(|id| availability.get(*id) == Some(&Availability::Available));
-            if drag_back || section.tabs.len() > 1 || section.collapsed || !presentation.actions.is_empty() {
+            if section.tabs.len() > 1 || section.collapsed || !presentation.actions.is_empty() {
                 ui.horizontal_wrapped(|ui| {
-                    if drag_back {
-                        action = grip(ui, active, environment.direction == Direction::Rtl).map(WindowAction::Drag);
-                    }
                     if section.tabs.len() > 1 {
                         for id in tabs {
                             if let Ok(tab) = runtime.instance_presentation(id)
@@ -127,27 +143,72 @@ pub(super) fn paint(
     Ok(action)
 }
 
-/// The section grip a docked panel's header has, here dragging the panel back
-/// over the app. Positions are screen points; Escape cancels.
-fn grip(ui: &mut egui::Ui, active: &InstanceId, rtl: bool) -> Option<super::workspace::WindowDragEvent> {
-    use super::workspace::WindowDragEvent;
-    let (id, bounds) = ui.allocate_space(egui::Vec2::splat(Tokens::get().form_close_size));
-    let label = solidcraft_ui_text::tr("ui.panel_host.dock_grip");
+/// The window a drag shows before the panel opens in it: the same title bar,
+/// and the panel's body as painted this frame where its content will be.
+pub(super) fn paint_drop(ui: &mut egui::Ui, title_bar: Option<TitleBar>, active: &InstanceId, title: &str, rtl: bool, card: Option<&WindowCard>) {
+    if let Some(bar) = title_bar {
+        window_bar(ui, bar, "drop", active, title, rtl, true);
+    }
+    let panel = Container::new(ui.ctx(), Surface::Viewport).central();
+    let frame = Container::new(ui.ctx(), Surface::Panel).edge_frame(Tokens::get().dialog_body);
+    Container::show_central(ui, panel, frame, |ui| {
+        if let Some(card) = card {
+            card.paint(ui, ui.max_rect());
+        }
+    });
+}
+
+/// The window's own title bar, as the app window has: the OS's window controls,
+/// and the panel's title with its grip, which drags the panel back over the app.
+fn window_bar(
+    ui: &mut egui::Ui,
+    bar: TitleBar,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    active: &InstanceId,
+    title: &str,
+    rtl: bool,
+    enabled: bool,
+) -> (Option<WindowDragEvent>, Option<crate::window_chrome::WindowAction>) {
+    let edge = Container::new(ui.ctx(), Surface::ApplicationBar).edge(("sc_panel_window_bar", id), Edge::Top);
+    let frame = Container::new(ui.ctx(), Surface::ApplicationBar).edge_frame(Tokens::get().app_bar);
+    let height = crate::toolbar::APP_BAR_HEIGHT;
+    Container::new(ui.ctx(), Surface::ApplicationBar)
+        .show_edge(ui, edge.exact_size(height).show_separator_line(false), frame, |ui| {
+            if !enabled {
+                ui.disable();
+            }
+            let mut drag = None;
+            let rect = ui.max_rect();
+            let caption = bar.show(ui, rect, |ui, content| drag = title_grip(ui, content, active, title, rtl));
+            (drag, caption)
+        })
+        .inner
+}
+
+/// The panel's title with the section grip a docked header has, here dragging
+/// the panel back over the app. Positions are screen points; Escape cancels.
+fn title_grip(ui: &mut egui::Ui, content: egui::Rect, active: &InstanceId, title: &str, rtl: bool) -> Option<WindowDragEvent> {
+    let t = Tokens::get();
+    let text = ui.painter().layout_no_wrap(title.to_owned(), ui_kit::type_face::semibold(t.font_heading), t.form_ink).size().x;
+    // As the kit lays out a title control: insets, the grip and its gap, the text.
+    let width = (2.0 * t.space_12 + t.space_10 + t.space_8 + text).min(content.width());
+    let x = if rtl { content.right() - width } else { content.left() };
+    let bounds = egui::Rect::from_min_size(egui::pos2(x, content.top()), egui::vec2(width, content.height()));
+    let id = ui.make_persistent_id(("panel-window-title", active));
     let chrome = HostChrome {
-        label,
+        label: title,
         icon: None,
         icon_only: false,
         attention: false,
         selected: false,
         enabled: true,
         drag: true,
-        // The kit paints a header's section grip only for a title control.
         title: true,
-        grip_only: true,
+        grip_only: false,
         rtl,
     };
     let response = ui_kit::panel_host_control(ui, id, bounds, chrome);
-    response.clone().backing_on_hover_text(label);
+    response.clone().backing_on_hover_text(solidcraft_ui_text::tr("ui.panel_host.dock_grip"));
     let at = ui.input(|input| {
         let pointer = input.pointer.latest_pos()?;
         let origin = input.viewport().inner_rect?.min;

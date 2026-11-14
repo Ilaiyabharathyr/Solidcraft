@@ -1600,7 +1600,7 @@ fn move_preview(
         let projected = resolve_host_projected(service, &proposed, layout)?;
         let target_section = proposed.containing(instance)?;
         let card = projected.sections.iter().find(|card| card.section == target_section.id);
-        // A desktop window is not in this host; its outline is outside the app.
+        // A desktop window is not in this host; its preview is outside the app.
         let bounds = match (card, window) {
             (Some(card), None) => card.outer,
             (None, Some(_)) => fallback,

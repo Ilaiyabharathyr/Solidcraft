@@ -538,8 +538,10 @@ impl AppPanelRuntime {
         use super::native_ui::WindowAction;
 
         let (Some(desktop), Some(state)) = (self.desktop.clone(), self.production.clone()) else { return Ok(()) };
+        // With drag-out, a panel window's own title bar holds the grip that drags it back.
+        let title_bar = crate::window_chrome::TitleBar { traffic_lights: app.integrated_titlebar, caption_buttons: app.custom_titlebar };
+        desktop.set_title_bar(app.preferences.panel_drag_out.then_some(title_bar));
         self.show_drop_window(ctx, &desktop);
-        let drag_back = app.preferences.panel_drag_out;
         if !self.runtime.layout().layout().sections.iter().any(|section| section.location.zone() == Zone::Window) {
             return Ok(());
         }
@@ -591,7 +593,16 @@ impl AppPanelRuntime {
                             }
                             desktop.observe(ui.ctx(), &host, active);
                             solidcraft_ui_registry::isolated(|| {
-                                super::native_ui::paint(&mut self.runtime, &mut services, &mut content, &host, &section, ui, enabled, drag_back)
+                                super::native_ui::paint(
+                                    &mut self.runtime,
+                                    &mut services,
+                                    &mut content,
+                                    &host,
+                                    &section,
+                                    ui,
+                                    enabled,
+                                    desktop.title_bar(),
+                                )
                             })
                         });
                         self.services.set_presentation_viewport(None);
@@ -630,37 +641,38 @@ impl AppPanelRuntime {
         failure.map_or(Ok(()), Err)
     }
 
-    /// While a drag would pop a panel out, show the window it would open, as an
-    /// outline at that screen place: release opens it only where this showed it.
-    /// After the drop, the next window for that panel opens there.
+    /// While a drag would pop a panel out, show the window it would open in, at
+    /// that screen place, with the panel's own paint: release opens it only where
+    /// this showed it. The panel's window then keeps that same window.
     #[cfg(not(target_arch = "wasm32"))]
     fn show_drop_window(&mut self, ctx: &egui::Context, desktop: &super::native::DesktopNativeAdapter) {
         let Some(host) = self.host.as_mut() else { return };
         if let Some((instance, outer)) = host.take_window_landing() {
             desktop.place(ctx, &instance, super::workspace::egui_rect(outer));
+            let opened = self.runtime.layout().layout().containing(&instance).ok().and_then(|section| match &section.location {
+                SectionLocation::Window { host, .. } => Some(host.clone()),
+                _ => None,
+            });
+            if let Some(viewport) = opened.and_then(|opened| desktop.adopt(&opened, &instance)) {
+                ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
+            }
         }
         let Some((instance, corner)) = host.window_landing_preview() else { return };
+        // The window keeps the size the panel has in the app.
+        let in_app = host.frame().and_then(|frame| frame.layout.sections.iter().find(|card| card.instance == instance)).map(|card| card.outer.size);
         let layout = self.runtime.layout();
         let landing = layout.layout().containing(&instance).ok().zip(layout.layout().instance(&instance).ok()).and_then(|(section, panel)| {
             let bounds = layout.registry().get(&panel.kind).ok()?.size_bounds(Zone::Window);
-            desktop.landing(ctx, &instance, egui::pos2(corner.x, corner.y), window_size(section.size, bounds), bounds)
+            let size = in_app.unwrap_or_else(|| window_size(section.size, bounds));
+            desktop.landing(ctx, &instance, egui::pos2(corner.x, corner.y), size, bounds)
         });
         let Some(outer) = landing else { return };
         let title = self.runtime.instance_presentation(&instance).map(|presentation| presentation.title).unwrap_or_default();
-        let builder = egui::ViewportBuilder::default()
-            .with_title(title)
-            .with_decorations(false)
-            .with_transparent(true)
-            .with_mouse_passthrough(true)
-            .with_always_on_top()
-            .with_taskbar(false)
-            .with_active(false)
-            .with_resizable(false)
-            .with_position(outer.min)
-            .with_inner_size(outer.size());
-        let viewport = egui::ViewportId::from_hash_of("solidcraft-panel-drop-window");
+        let rtl = self.runtime.environment().direction == Direction::Rtl;
+        let (viewport, builder) = desktop.drop_window(&instance, title.clone(), outer);
+        let title_bar = desktop.title_bar();
         let shown = ctx.show_viewport_immediate(viewport, builder, |ui, class| {
-            crate::ui_kit::panel_host_preview(ui, ui.max_rect(), true, None, 1.0);
+            super::native_ui::paint_drop(ui, title_bar, &instance, &title, rtl, host.window_card());
             class != egui::ViewportClass::EmbeddedWindow && ui.input(|input| input.viewport().native_pixels_per_point.is_some())
         });
         if shown {

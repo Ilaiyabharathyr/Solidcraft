@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use solidcraft_engine::panels::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::drag_paint::WindowCard;
 use super::drag_paint::{CardPaint, DragPaint, shape_count};
 use super::runtime::{RuntimeHostProposal, standalone_header_action};
 use super::*;
@@ -283,6 +285,9 @@ pub struct WorkspacePanelHost {
     /// The panel a drag popped out, and the screen rectangle its window was
     /// shown at; the desktop adapter opens the window there.
     window_landing: Option<(InstanceId, LogicalRect)>,
+    /// The paint of a panel being dragged out, for its window's preview.
+    #[cfg(not(target_arch = "wasm32"))]
+    window_card: Option<WindowCard>,
     /// A popped-out panel dragged back by its window's grip. Its own capture:
     /// focus is in that window, which would cancel this host's pointer capture.
     window_drag: HostInteraction,
@@ -363,6 +368,12 @@ impl WorkspacePanelHost {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn window_landing_preview(&self) -> Option<(InstanceId, Point)> {
         self.interaction.window_landing().map(|(instance, origin)| (instance.clone(), origin))
+    }
+
+    /// How the panel being dragged out looks this frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn window_card(&self) -> Option<&WindowCard> {
+        self.window_card.as_ref()
     }
 
     /// The host showed that window at `shown` this frame.
@@ -475,6 +486,8 @@ impl WorkspacePanelHost {
             live_drag: false,
             drag_out: false,
             window_landing: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            window_card: None,
             window_drag: HostInteraction::default(),
             window_drag_events: Vec::new(),
             drag_paint: DragPaint::default(),
@@ -1078,8 +1091,8 @@ impl WorkspacePanelHost {
         let mut unpainted = Vec::new();
         self.content_reports.clear();
         let mut drag_cards = Vec::new();
-        let capture_drag =
-            self.live_drag && (self.interaction.is_captured() || self.drag_paint.active() || ui.input(|input| input.pointer.primary_down()));
+        let capture_drag = (self.live_drag || self.drag_out)
+            && (self.interaction.is_captured() || self.drag_paint.active() || ui.input(|input| input.pointer.primary_down()));
         let drag_layout = self
             .live_drag
             .then(|| {
@@ -1684,6 +1697,20 @@ impl WorkspacePanelHost {
         // A panel leaving the app has no landing in it: live paint shows the app without it.
         let leaving = frame.preview.as_ref().is_some_and(|preview| preview.window.is_some());
         let landing = frame.preview.as_ref().filter(|preview| preview.rejection.is_none() && !leaving).and_then(|preview| preview.projected.as_ref());
+        // Copied before live paint hides it: the window preview shows the panel.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.window_card = leaving
+                .then(|| source.and_then(|source| drag_cards.iter().find(|card| &card.instance == source)))
+                .flatten()
+                .zip(source.and_then(|source| frame.layout.sections.iter().find(|section| &section.instance == source)))
+                .map(|(card, section)| {
+                    // The window's title bar takes the header's place: copy the body only.
+                    let header = (section.header.origin.y + section.header.size.height - section.outer.origin.y).max(0.0);
+                    let body = egui::Rect::from_min_max(card.bounds.min + egui::vec2(0.0, header), card.bounds.max);
+                    WindowCard::copy(ui.ctx(), card, body)
+                });
+        }
         if source.is_none() && drag_cards.is_empty() {
             self.drag_paint.clear();
         }

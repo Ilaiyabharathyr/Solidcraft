@@ -10,10 +10,11 @@ use solidcraft_engine::panels::{
 };
 
 use super::NativeHostAdapter;
+use crate::window_chrome::TitleBar;
 
 const MAX_MONITORS: usize = 64;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
-/// A window's frame and title bar before the OS has reported its own.
+/// A window's OS frame and title bar before the OS has reported its own.
 const DEFAULT_DECORATION: egui::Vec2 = egui::vec2(16.0, 48.0);
 
 /// Physical monitor bounds and DPI from the desktop window service.
@@ -53,6 +54,10 @@ struct DesktopState {
     /// A drag asked where a window would land since the last refresh: the
     /// monitors are needed before any panel window is open.
     landing_asked: bool,
+    /// Panel windows show the app's own title bar (with the drag-back grip).
+    title_bar: Option<TitleBar>,
+    /// The window a drag shows for a panel; the panel's window keeps it on release.
+    drop: Option<(InstanceId, egui::ViewportId)>,
 }
 
 /// Both the layout runtime and the UI use the same desktop registration table.
@@ -122,7 +127,8 @@ impl DesktopNativeAdapter {
         let registration = state.hosts.get(host)?;
         let min = egui::vec2(min.width, min.height);
         let max = egui::vec2(max.width, max.height);
-        let builder = egui::ViewportBuilder::default().with_title(title).with_min_inner_size(min).with_max_inner_size(max).with_visible(true);
+        let builder =
+            state.chrome(egui::ViewportBuilder::default().with_title(title).with_min_inner_size(min).with_max_inner_size(max).with_visible(true));
         if registration.ready {
             return Some(builder);
         }
@@ -156,7 +162,7 @@ impl DesktopNativeAdapter {
             })
             .or_else(|| state.monitors.iter().find(|m| m.primary))
             .or_else(|| state.monitors.first());
-        let decoration = saved.map_or(DEFAULT_DECORATION, |saved| saved.decoration);
+        let decoration = state.decoration(instance);
         let Some((size, position)) = monitor.and_then(|monitor| fit(monitor, ctx.zoom_factor() * monitor.scale, size, min, decoration, offset))
         else {
             return Some(builder.with_inner_size(size));
@@ -217,23 +223,15 @@ impl DesktopNativeAdapter {
     }
 
     /// The outer screen rectangle a panel's window opens at when a drag puts its
-    /// corner at `corner`: its remembered size, else `preferred`, within `bounds`,
-    /// kept on the monitor under it exactly as `builder` keeps it.
-    pub fn landing(
-        &self,
-        ctx: &egui::Context,
-        instance: &InstanceId,
-        corner: egui::Pos2,
-        preferred: Size,
-        bounds: (Size, Size),
-    ) -> Option<egui::Rect> {
+    /// corner at `corner`: at `size` (the panel's size in the app) within
+    /// `bounds`, kept on the monitor under it exactly as `builder` keeps it.
+    pub fn landing(&self, ctx: &egui::Context, instance: &InstanceId, corner: egui::Pos2, size: Size, bounds: (Size, Size)) -> Option<egui::Rect> {
         let mut state = self.0.borrow_mut();
         state.landing_asked = true;
         let state = &*state;
-        let saved = state.placement.get(instance);
         let (min, max) = (egui::vec2(bounds.0.width, bounds.0.height), egui::vec2(bounds.1.width, bounds.1.height));
-        let size = saved.map_or_else(|| egui::vec2(preferred.width, preferred.height), |saved| saved.size).clamp(min, max);
-        let decoration = saved.map_or(DEFAULT_DECORATION, |saved| saved.decoration);
+        let size = egui::vec2(size.width, size.height).clamp(min, max);
+        let decoration = state.decoration(instance);
         let wanted = egui::Rect::from_min_size(corner, size + decoration);
         let scale = |monitor: &NativeMonitor| ctx.zoom_factor() * monitor.scale;
         // The monitor under the window's centre, else the nearest one.
@@ -248,7 +246,7 @@ impl DesktopNativeAdapter {
     /// Open the panel's next window at `outer`, the rectangle a drag showed.
     pub fn place(&self, ctx: &egui::Context, instance: &InstanceId, outer: egui::Rect) {
         let mut state = self.0.borrow_mut();
-        let decoration = state.placement.get(instance).map_or(DEFAULT_DECORATION, |saved| saved.decoration);
+        let decoration = state.decoration(instance);
         let size = outer.size() - decoration;
         if !outer.is_finite() || size.min_elem() <= 0.0 || size.max_elem() > MAX_LOGICAL {
             return;
@@ -256,9 +254,71 @@ impl DesktopNativeAdapter {
         let monitor = monitor_placement(&state.monitors, outer, |monitor| ctx.zoom_factor() * monitor.scale);
         state.remember(instance, Placement { size, decoration, monitor });
     }
+
+    /// Panel windows show the app's own title bar, or the OS's.
+    pub fn set_title_bar(&self, title_bar: Option<TitleBar>) {
+        self.0.borrow_mut().title_bar = title_bar;
+    }
+
+    pub fn title_bar(&self) -> Option<TitleBar> {
+        self.0.borrow().title_bar
+    }
+
+    /// The window a drag shows at `outer` for `instance`: the same window it
+    /// will open in, but passed through by the pointer, above other windows and
+    /// not activated while the drag lasts.
+    pub fn drop_window(&self, instance: &InstanceId, title: String, outer: egui::Rect) -> (egui::ViewportId, egui::ViewportBuilder) {
+        let mut state = self.0.borrow_mut();
+        let viewport = match &state.drop {
+            Some((shown, viewport)) if shown == instance => *viewport,
+            _ => next_viewport_id(("solidcraft-panel-drop", instance)),
+        };
+        state.drop = Some((instance.clone(), viewport));
+        let builder = state
+            .chrome(egui::ViewportBuilder::default().with_title(title))
+            .with_position(outer.min)
+            .with_inner_size(outer.size() - state.decoration(instance))
+            .with_mouse_passthrough(true)
+            .with_window_level(egui::WindowLevel::AlwaysOnTop)
+            .with_active(false);
+        (viewport, builder)
+    }
+
+    /// The panel dropped as `instance` opened as `host`: that host keeps the
+    /// window the drag showed, so no second window opens.
+    pub fn adopt(&self, host: &HostId, instance: &InstanceId) -> Option<egui::ViewportId> {
+        let mut state = self.0.borrow_mut();
+        let viewport = state.drop.as_ref().filter(|(shown, _)| shown == instance)?.1;
+        let registration = state.hosts.get_mut(host)?;
+        registration.viewport = viewport;
+        registration.startup = None;
+        registration.ready = false;
+        state.drop = None;
+        Some(viewport)
+    }
 }
 
 impl DesktopState {
+    /// The OS frame around a panel's content: none where the app's bar is the
+    /// title bar, else as last seen for it, else a typical one.
+    fn decoration(&self, instance: &InstanceId) -> egui::Vec2 {
+        if self.title_bar.is_some_and(|bar| bar.traffic_lights || bar.caption_buttons) {
+            return egui::Vec2::ZERO;
+        }
+        self.placement.get(instance).map_or(DEFAULT_DECORATION, |saved| saved.decoration)
+    }
+
+    /// With the app's own title bar: its window settings, and a window back from
+    /// a drag is an ordinary one again.
+    fn chrome(&self, builder: egui::ViewportBuilder) -> egui::ViewportBuilder {
+        match self.title_bar {
+            Some(bar) => crate::window_chrome::own_titlebar(builder, bar.caption_buttons)
+                .with_mouse_passthrough(false)
+                .with_window_level(egui::WindowLevel::Normal),
+            None => builder,
+        }
+    }
+
     fn remember(&mut self, instance: &InstanceId, placement: Placement) {
         if self.placement.len() >= MAX_INSTANCES && !self.placement.contains_key(instance) {
             self.placement.pop_first();
@@ -370,8 +430,8 @@ impl NativeHostAdapter for DesktopNativeAdapter {
     }
 }
 
-fn next_viewport_id(host: &HostId) -> egui::ViewportId {
+fn next_viewport_id(seed: impl std::hash::Hash + std::fmt::Debug) -> egui::ViewportId {
     static NEXT_VIEWPORT: AtomicU64 = AtomicU64::new(0);
     let generation = NEXT_VIEWPORT.fetch_add(1, Ordering::Relaxed);
-    egui::ViewportId::from_hash_of(("solidcraft-panel-window", host, generation))
+    egui::ViewportId::from_hash_of(("solidcraft-panel-window", seed, generation))
 }
