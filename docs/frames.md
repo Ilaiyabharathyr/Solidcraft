@@ -143,11 +143,29 @@ radii squared, and a fishmouth on a round tube.
 group, chained among themselves: where two of them end together they are mitred (or joined as an
 override there says), and a third one ending there is fitted to the tubes already there. Their free
 ends are fitted where they meet this frame's tubes or, with Fit Ends to Earlier Frames, earlier ones.
+A tube of this kind that ends on one of the frame's sketch tubes, or where sketch tubes end, is fitted
+to it, not mitred, whether or not Fit Ends is ticked; when two of them end at such a point, the second
+is fitted to the sketch tubes and the first.
+
+In the dialog a point-to-point tube is one **Path** row ("Tube n: a → b"). A first point waits with the
+prompt "Pick the second point" and is not a row yet.
 
 **Lined-up sections.** Under Auto the sections of all tubes are lined up: up is the sketch's normal
 and the outer tubes run round the outline anticlockwise, so square and rectangular sections meet wall
 to wall in any plane. A tube drawn against that direction is reversed; its face names stay the same.
 The section line-up limit under Corners (Known limits) applies only outside Auto.
+
+**Crossings.** Tubes of the sketch that cross are split at the crossing. The earliest in laying order
+stays whole; each other tube is cut into pieces, each fitted to the tube that stays whole, so nothing
+overlaps. Where more than two tubes pass through a point, or tubes also end there, the earliest stays
+whole and the rest are cut and fitted in laying order. A crossing override (**Crossing** row, picked at a
+sketch point lying at the crossing, also where another tube ends there) has **Flip** only: with it the
+other tube of the pair stays whole. Its type is ignored.
+
+Each piece is a tube of its own. The first piece keeps its line's name; a later piece is named
+`<line's name> · <crossing tube's name>`. Piece names are pinned like line names, so renaming a piece
+sticks. **Remove Tube** on a piece removes its whole line. Overrides name lines, never pieces: a
+`corners` entry naming a piece is refused. End Cap and `names` accept pieces.
 
 **Fit Ends to Earlier Frames** (`fit_ends`, ticked by default in the dialog, false when absent)
 fits the tubes' free ends to the tubes of Frame Members made earlier in the timeline, to the Move,
@@ -168,7 +186,12 @@ lives on each override row.
 {"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "rect_tube", "width": 25, "height": 25, "wall": 2}, "corner": "auto", "fit_ends": true}}
 ```
 
-**Known limits of Auto.** Tubes that cross each other overlap for now. A flat end
+**Known limits of Auto.** Crossings that involve point-to-point or 3D-sketch tubes still overlap. When a
+crossing first cuts a line, references to that line's far end (an End Cap, a face pick) are not moved and
+fail with an error. A crossing with no sketch point can only be overridden through the command's
+`corners`. A fitted face is named after the cutting tube's piece id, so its name changes if that piece's
+id changes. With an off-centre anchor a piece's crossing end can reach past the whole tube, and a later
+frame's end landing in that sliver is fitted to air. A frame has at most 1000 members, counting pieces. A flat end
 meeting a round tube's seam in some layouts is refused by the kernel with an error. A member's face
 numbers can change when its line moves, because the kernel's face order follows placement; faces
 fitted against a reversed tube can be renamed if its direction flips. A brace landing at a very

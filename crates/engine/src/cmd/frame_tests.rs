@@ -3949,6 +3949,18 @@ fn locost_sized_design_timing() {
         "frame.member",
         json!({"sketch": "Braces", "profile": json!({"kind": "rect_tube", "width": 20, "height": 20, "wall": 2}), "corner": "auto", "fit_ends": true, "body_name": "Brace"}),
     );
+    // Two X braces: each pair of diagonals crosses, so Auto cuts and fits pieces.
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Crossed", "offset": 50}));
+    for ((x0, x1), (y0, y1)) in [((0, 400), (0, 600)), ((600, 1000), (0, 600))] {
+        run(&mut s, "sketch.line", json!({"points": [[x0, y0], [x1, y1]]}));
+        run(&mut s, "sketch.line", json!({"points": [[x0, y1], [x1, y0]]}));
+    }
+    run(&mut s, "sketch.finish", json!({}));
+    run(
+        &mut s,
+        "frame.member",
+        json!({"sketch": "Crossed", "profile": json!({"kind": "rect_tube", "width": 20, "height": 20, "wall": 2}), "corner": "auto", "fit_ends": true, "body_name": "Cross"}),
+    );
     let json_doc = s.doc.to_json();
     let start = std::time::Instant::now();
     let mut reopened = Session::new(solidcraft_doc::Document::from_json(&json_doc).unwrap());
