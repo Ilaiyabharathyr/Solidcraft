@@ -1274,6 +1274,31 @@ fn an_end_cap_is_flush_with_the_outside_unless_offset() {
     assert!(near3(cap.2, [-18.0, -18.0, -4.0]) && near3(cap.3, [18.0, 18.0, 0.0]), "{cap:?}");
 }
 
+#[test]
+fn an_end_cap_goes_on_a_butted_through_end() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": "butt"}));
+    let (bottom, _) = bottom_and_left(&mut s);
+    // The bottom member runs through: its start is cut square at x = -20, not at the line's end.
+    let start = face_pick(&s, &bottom.0, [-20.0, -18.5, 0.0], [-1.0, 0.0, 0.0]);
+    run(&mut s, "frame.end_cap", json!({"faces": [start], "thickness": 6}));
+    let cap = measured(&mut s, &format!("{} End Cap", bottom.0));
+    assert!((cap.3[0] + 20.0).abs() < 1e-6 && (cap.2[0] + 26.0).abs() < 1e-6, "{cap:?}");
+}
+
+#[test]
+fn an_end_cap_on_a_mitred_end_is_refused() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": "mitre"}));
+    let (bottom, _) = bottom_and_left(&mut s);
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    let start = face_pick(&s, &bottom.0, [-19.0, -19.0, 0.0], [-h, h, 0.0]);
+    let e = s.execute("frame.end_cap", &json!({"faces": [start], "thickness": 6})).unwrap_err().to_string();
+    assert!(e.contains("not square"), "{e}");
+}
+
 /// A cap made while another is suppressed doesn't take that one's name: restored, each keeps its
 /// own, so what refers to the second cap by name still finds it.
 #[test]

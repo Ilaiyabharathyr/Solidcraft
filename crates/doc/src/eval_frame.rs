@@ -83,21 +83,19 @@ fn one_solid(mut bodies: Vec<kernel::Body>, id: &str) -> Result<kernel::Body> {
     }
 }
 
-/// Each member cut at its corners (#4003), or `None` for a member no corner cuts (built square,
-/// as without corners). A corner is finished as its override in `overrides` says (the override
-/// naming its two lines, in either order), else as `finish` (type, flip) says. A cut member is
-/// built past each cut end far enough to reach the whole cut, then cut there; the cut face is
-/// named `corner_start` or `corner_end`. A Coped Butt's U is built out across T and, after every
-/// plane cut, loses T's filled shape, keeping its largest piece. `placed(m, p)` is member m's
-/// section plane, square to its line, placed at `p`.
-fn cut_members(
+/// Each member's cut at its [start, end] (`None`: a coped end, built out but not cut by a plane)
+/// and how far past that end it is built, and each Coped Butt's (T, U, corner point, n). Shared
+/// by [`cut_members`] and [`member_section`], so both see the same corners.
+type CornerEnds = (Vec<[Option<(Option<Cut>, f64)>; 2]>, Vec<(usize, usize, Vec3, Vec3)>);
+
+fn corner_ends(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
     placed: &dyn Fn(usize, Vec3) -> Plane,
     finish: (CornerType, bool),
     overrides: &[CornerOverride],
     sketch_x: Option<Vec3>,
-) -> Result<Vec<Option<Traced>>> {
+) -> Result<CornerEnds> {
     // A design file is hostile input: the command checks the list, a file may not.
     if overrides.len() > MAX_MEMBERS {
         return Err(DocError::Invalid(format!("at most {MAX_MEMBERS} corner overrides in one feature")));
@@ -172,6 +170,26 @@ fn cut_members(
         }
         copes.push((t, u, c.point, n));
     }
+    Ok((ends, copes))
+}
+
+/// Each member cut at its corners (#4003), or `None` for a member no corner cuts (built square,
+/// as without corners). A corner is finished as its override in `overrides` says (the override
+/// naming its two lines, in either order), else as `finish` (type, flip) says. A cut member is
+/// built past each cut end far enough to reach the whole cut, then cut there; the cut face is
+/// named `corner_start` or `corner_end`. A Coped Butt's U is built out across T and, after every
+/// plane cut, loses T's filled shape, keeping its largest piece. `placed(m, p)` is member m's
+/// section plane, square to its line, placed at `p`.
+fn cut_members(
+    segments: &[(String, Vec3, Vec3)],
+    regions: &[Region2],
+    placed: &dyn Fn(usize, Vec3) -> Plane,
+    finish: (CornerType, bool),
+    overrides: &[CornerOverride],
+    sketch_x: Option<Vec3>,
+) -> Result<Vec<Option<Traced>>> {
+    let (ends, copes) = corner_ends(segments, regions, placed, finish, overrides, sketch_x)?;
+    let id = |m: usize| segments.get(m).map_or("", |s| s.0.as_str());
     // Member m built out at its cut ends and cut there, from `regions`.
     let build = |m: usize, regions: &[Region2]| -> Result<Traced> {
         let ((id, a, b), [start, end]) = segments.get(m).zip(ends.get(m)).ok_or_else(|| DocError::Invalid(format!("no member {m}")))?;
@@ -325,12 +343,40 @@ pub(crate) fn member_section(
     st: &ModelState,
     line: &str,
 ) -> Result<(Plane, f64, Region2)> {
-    let Layout { segments, regions, at, turn, .. } = layout(doc, vals, f, st)?;
-    let (_, a, b) = segments.iter().find(|(id, _, _)| id == line).ok_or_else(|| DocError::Unknown(format!("line `{line}` of the member feature")))?;
-    let (x, y) = frame::member_axes(*b - *a, turn).ok_or_else(|| DocError::Invalid(format!("line `{line}` has no length")))?;
-    let plane = Plane::new(*a - x * at.x - y * at.y, x, y).ok_or_else(|| DocError::Invalid(format!("line `{line}`: no plane square to it")))?;
+    let FeatureKind::FrameMember { corner, flip, corners, .. } = &f.kind else {
+        return Err(DocError::Invalid("not a frame member feature".into()));
+    };
+    let Layout { segments, regions, at, turn, sketch_x, .. } = layout(doc, vals, f, st)?;
+    let m = segments.iter().position(|(id, _, _)| id == line).ok_or_else(|| DocError::Unknown(format!("line `{line}` of the member feature")))?;
+    let mut axes = Vec::with_capacity(segments.len());
+    for (id, a, b) in &segments {
+        axes.push(frame::member_axes(*b - *a, turn).ok_or_else(|| DocError::Invalid(format!("line `{id}` has no length")))?);
+    }
+    let (x, y) = axes.get(m).copied().ok_or_else(|| DocError::Invalid(format!("line `{line}` has no length")))?;
+    let (a, b) = segments.get(m).map(|s| (s.1, s.2)).ok_or_else(|| DocError::Unknown(format!("line `{line}` of the member feature")))?;
+    let placed = |k: usize, p: Vec3| {
+        let (x, y) = axes.get(k).copied().unwrap_or((Vec3::X, Vec3::Y));
+        let origin = p - x * at.x - y * at.y;
+        Plane::new(origin, x, y).unwrap_or(Plane { origin, x, y })
+    };
+    // Each end where the member is cut, when the cut is square to its line (a mitre, or a
+    // through member at another angle, is not: End Cap refuses those from the face itself).
+    let ends = if corner.is_none() && corners.is_empty() {
+        Vec::new()
+    } else {
+        corner_ends(&segments, &regions, &placed, (*corner, *flip), corners, sketch_x)?.0
+    };
+    let dir = (b - a).normalized().ok_or_else(|| DocError::Invalid(format!("line `{line}` has no length")))?;
+    let [start, end] = ends.get(m).copied().unwrap_or([None, None]);
+    let square = |e: Option<(Option<Cut>, f64)>, p: Vec3| match e {
+        Some((Some(c), _)) if c.normal.dot(dir).abs() > 1.0 - 1e-9 => (c.origin - p).dot(dir),
+        _ => 0.0,
+    };
+    let (lo, hi) = (square(start, a), square(end, b));
+    let plane =
+        Plane::new(a + dir * lo - x * at.x - y * at.y, x, y).ok_or_else(|| DocError::Invalid(format!("line `{line}`: no plane square to it")))?;
     let region = regions.into_iter().next().ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;
-    Ok((plane, a.dist(*b), region))
+    Ok((plane, a.dist(b) + hi - lo, region))
 }
 
 /// The body name of the member on each of `lines`: its own name from `pinned` (by line id) when no
