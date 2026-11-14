@@ -30,6 +30,9 @@
 //!
 //! The tool is the source member as built ([`super::member_tool`]): its feature's members laid out and its corner
 //! plane cuts made as [`super::member_section`] makes them, then filled and squared ([`frame_fit::fit_tool`]).
+//! Under Auto its members are its pieces (#4003 stage 3, [`super::pieced`]): each piece is a member as above, its
+//! span, quarter points and tool its own, so a copy of a piece is matched to that piece. A piece's end at a crossing
+//! is fitted, so its tool stops at its line's end there, as a T-junction's does.
 //! Earlier tubes and their copies are only read, never changed.
 
 use std::collections::{BTreeMap, HashMap, HashSet};

@@ -3676,6 +3676,66 @@ fn an_end_on_the_second_diagonal_of_an_earlier_x_brace_is_fitted_to_it() {
     }
 }
 
+/// B ([`later_frame`], one 25 tube) is fitted to the earlier body `to`: its start is cut flat on it, so its box runs
+/// `lo`…`hi` (z ±12.5), its fitted faces are named for `to`, and it overlaps no other body.
+fn assert_b_fitted_to(s: &mut Session, to: &str, lo: [f64; 2], hi: [f64; 2]) {
+    let b = measured(s, "B");
+    assert!(near3(b.2, [lo[0], lo[1], -12.5]) && near3(b.3, [hi[0], hi[1], 12.5]), "B is not cut on {to}: {b:?}");
+    let faces = built(s).1;
+    let mark = format!("corner_start:{to}:face:");
+    assert!(faces["B"].iter().any(|n| n.contains(&mark)), "B is not fitted to {to}: {:?}", faces["B"]);
+    for other in bodies(s).into_iter().map(|b| b.0).filter(|n| n != "B") {
+        let i = run(s, "inspect.interference", json!({"bodies": ["B", other]}));
+        let o: f64 = i["interferences"].as_array().map_or(0.0, |all| all.iter().map(|x| f(&x["volume_mm3"])).sum());
+        assert!(o < 1e-3, "B overlaps {other} by {o} mm³");
+    }
+}
+
+#[test]
+fn a_later_end_fits_to_an_earlier_frames_piece() {
+    // A: the Auto X brace (x_brace_member), d1 whole, d2 cut at (300, 200) into D2 and D2 · D1, which runs on to
+    // (600, 0) (y = 400 − 2x/3). B's line runs square off it from (450, 100) on it to (530, 220), along
+    // (2, 3)/√13. Its start is fitted to D2 · D1's near face, 20 along: the end's centre (450, 100) + 20·(2, 3)/√13,
+    // its corners ±12.5·(3, −2)/√13 across. So B's box is x 450 + (40 − 37.5)/√13 … 530 + 37.5/√13,
+    // y 100 + (60 − 25)/√13 … 220 + 25/√13 (its far end square), against x 450 − 37.5/√13 unfitted.
+    let mut s = Session::default();
+    x_brace_member(&mut s);
+    later_frame(&mut s, 0.0, &[[[450.0, 100.0], [530.0, 220.0]]], 25.0, true);
+    let r = 13f64.sqrt();
+    assert_b_fitted_to(&mut s, "D2 · D1", [450.0 + 2.5 / r, 100.0 + 35.0 / r], [530.0 + 37.5 / r, 220.0 + 25.0 / r]);
+}
+
+#[test]
+fn a_mirrored_earlier_pieces_tool_is_placed_right() {
+    // The X brace mirrored across YZ: D2 · D1's copy runs (−300, 200)…(−600, 0), its material's middle near
+    // (−450, 100). B mirrors the last test's line, (−450, 100)…(−530, 220): it is fitted to that copy, its box the
+    // last one mirrored, x −530 − 37.5/√13 … −450 − 2.5/√13.
+    let mut s = Session::default();
+    x_brace_member(&mut s);
+    let a: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+    run(&mut s, "solid.mirror", json!({"bodies": a, "plane": "YZ"}));
+    let copy = bodies(&mut s)
+        .into_iter()
+        .find(|b| (-500.0..-400.0).contains(&b.4[0]) && (50.0..150.0).contains(&b.4[1]))
+        .unwrap_or_else(|| panic!("no copy of D2 · D1: {:?}", bodies(&mut s)))
+        .0;
+    later_frame(&mut s, 0.0, &[[[-450.0, 100.0], [-530.0, 220.0]]], 25.0, true);
+    let r = 13f64.sqrt();
+    assert_b_fitted_to(&mut s, &copy, [-530.0 - 37.5 / r, 100.0 + 35.0 / r], [-450.0 - 2.5 / r, 220.0 + 25.0 / r]);
+}
+
+#[test]
+fn a_later_end_fits_to_an_earlier_frames_whole_diagonal() {
+    // The same, B landing on d1, which the crossing leaves whole (y = 2x/3): from (450, 300) on it square off to
+    // (530, 180), along (2, −3)/√13. Fitted 20 along to D1's near face, B's box is x 450 + 2.5/√13 … 530 + 37.5/√13,
+    // y 180 − 25/√13 … 300 − 35/√13.
+    let mut s = Session::default();
+    x_brace_member(&mut s);
+    later_frame(&mut s, 0.0, &[[[450.0, 300.0], [530.0, 180.0]]], 25.0, true);
+    let r = 13f64.sqrt();
+    assert_b_fitted_to(&mut s, "D1", [450.0 + 2.5 / r, 180.0 - 25.0 / r], [530.0 + 37.5 / r, 300.0 - 35.0 / r]);
+}
+
 #[test]
 fn earlier_tubes_are_never_changed() {
     let mut s = Session::default();
