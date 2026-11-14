@@ -435,6 +435,9 @@ pub struct AutoCorner {
     pub kind: CornerType,
     /// Its override's Flip, already applied to `long` and `short`.
     pub flip: bool,
+    /// Whether an override matched it (an Auto one included): such a corner is jointed even inside an earlier Frame
+    /// Member's tube ([`Joint::Free`]).
+    pub overridden: bool,
 }
 
 /// A member's end cut to fit the tubes already at its point.
@@ -579,7 +582,7 @@ pub fn plan(
             };
             let point = points.at.get(n).copied().unwrap_or(Vec3::ZERO);
             let (kind, flip) = o.map_or((CornerType::Auto, false), |o| (o.corner, o.flip));
-            corners.push(AutoCorner { point, long, short, angle_deg, joint, kind, flip });
+            corners.push(AutoCorner { point, long, short, angle_deg, joint, kind, flip, overridden: o.is_some() });
         } else if group_whole.is_empty() {
             done = group.len(); // one end alone
         }

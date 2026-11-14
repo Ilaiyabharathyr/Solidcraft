@@ -3012,3 +3012,160 @@ fn mitre_frames_keep_todays_placement() {
         ],
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Fitting to earlier Frame Members and their copies (#4003 Goal 6)
+
+/// Frame Member `A`: the 600 × 400 rectangle `Frame` in 40 × 40 tube, its bodies `A`, `A (2)`…. Corner None
+/// leaves each tube square, from its line's start to its end: the bottom is x 0…600, y −20…20, z −20…20, the top
+/// y 380…420.
+fn earlier_frame(s: &mut Session) {
+    rectangle_frame(s);
+    run(s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "name": "A", "body_name": "A"}));
+}
+
+/// A `size` square tube, 2 thick.
+fn square_of(size: f64) -> Value {
+    json!({"kind": "rect_tube", "width": size, "height": size, "wall": 2})
+}
+
+/// Frame Member `B` (bodies `B`, `B (2)`…) under Auto: `lines` in a sketch on XY raised `z`, in `size` square tube.
+fn later_frame(s: &mut Session, z: f64, lines: &[[[f64; 2]; 2]], size: f64, fit_ends: bool) {
+    let mut sketch = json!({"plane": "XY", "name": "Later"});
+    if z != 0.0 {
+        sketch["offset"] = json!(z);
+    }
+    run(s, "sketch.create", sketch);
+    for l in lines {
+        run(s, "sketch.line", json!({"points": l}));
+    }
+    run(s, "sketch.finish", json!({}));
+    run(s, "frame.member", json!({"sketch": "Later", "profile": square_of(size), "corner": "auto", "fit_ends": fit_ends, "body_name": "B"}));
+}
+
+/// The bodies whose names start with `prefix`.
+fn named(s: &mut Session, prefix: &str) -> Vec<Measured> {
+    bodies(s).into_iter().filter(|b| b.0.starts_with(prefix)).collect()
+}
+
+/// The one body of B, as B's line (300, 0)…(300, 400) at `z` builds it: its bbox y runs `lo`…`hi`.
+fn assert_b_runs(s: &mut Session, lo: f64, hi: f64) {
+    let bs = named(s, "B");
+    assert_eq!(bs.len(), 1, "{bs:?}");
+    let b = &bs[0];
+    assert!((b.2[1] - lo).abs() < 1e-6 && (b.3[1] - hi).abs() < 1e-6, "B runs y {}…{}, not {lo}…{hi}: {b:?}", b.2[1], b.3[1]);
+}
+
+#[test]
+fn fit_ends_fits_a_later_frame_to_an_earlier_one() {
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    later_frame(&mut s, 0.0, &[[[300.0, 0.0], [300.0, 400.0]]], 25.0, true);
+    // B's ends lie on A's bottom tube (y −20…20) and top tube (y 380…420): each is fitted flat to the tube's near
+    // face, so B runs y 20…380.
+    assert_b_runs(&mut s, 20.0, 380.0);
+}
+
+#[test]
+fn without_fit_ends_the_later_frame_overlaps() {
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    later_frame(&mut s, 0.0, &[[[300.0, 0.0], [300.0, 400.0]]], 25.0, false);
+    // Square line ends: y 0…400, overlapping A's tubes.
+    assert_b_runs(&mut s, 0.0, 400.0);
+}
+
+#[test]
+fn two_braces_meeting_inside_an_earlier_tube_are_fitted_not_mitred() {
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    // Two braces from (300, 0), inside A's bottom tube, out to (150, 200) and (450, 200): a corner of B at 106°
+    // that Auto would butt, but it lies inside an earlier tube, so it isn't jointed. Both ends are fitted flat to
+    // the tube's near face, y = 20; jointed, the through brace would run on to its corner cut, below y = 0.
+    later_frame(&mut s, 0.0, &[[[300.0, 0.0], [150.0, 200.0]], [[300.0, 0.0], [450.0, 200.0]]], 20.0, true);
+    let bs = named(&mut s, "B");
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    for b in &bs {
+        assert!((b.2[1] - 20.0).abs() < 1e-6, "{b:?}");
+    }
+}
+
+#[test]
+fn a_moved_earlier_frame_is_fitted_where_it_is() {
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    let a: Vec<String> = named(&mut s, "A").into_iter().map(|b| b.0).collect();
+    run(&mut s, "solid.move", json!({"bodies": a, "translate": [0, 0, 100]}));
+    // A's tubes now lie at z 80…120: B, 100 up, ends on them and is fitted to them, y 20…380.
+    later_frame(&mut s, 100.0, &[[[300.0, 0.0], [300.0, 400.0]]], 25.0, true);
+    assert_b_runs(&mut s, 20.0, 380.0);
+}
+
+#[test]
+fn a_mirrored_earlier_frame_is_fitted() {
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    let a: Vec<String> = named(&mut s, "A").into_iter().map(|b| b.0).collect();
+    run(&mut s, "solid.mirror", json!({"bodies": a, "plane": "YZ"}));
+    // The copies lie at x −600…0: B at x = −300 ends on the mirrored bottom and top tubes and is fitted to their
+    // faces, y 20…380 (A's own tubes are 300 away).
+    later_frame(&mut s, 0.0, &[[[-300.0, 0.0], [-300.0, 400.0]]], 25.0, true);
+    assert_b_runs(&mut s, 20.0, 380.0);
+}
+
+#[test]
+fn a_patterned_earlier_frame_is_fitted() {
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    run(&mut s, "solid.pattern.rectangular", json!({"features": ["A"], "dir1": [0, 0, 1], "count1": 2, "spacing1": 300}));
+    // The second instance's tubes lie at z 280…320: B, 300 up, is fitted to them, y 20…380.
+    later_frame(&mut s, 300.0, &[[[300.0, 0.0], [300.0, 400.0]]], 25.0, true);
+    assert_b_runs(&mut s, 20.0, 380.0);
+}
+
+#[test]
+fn earlier_tubes_are_never_changed() {
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    let before = named(&mut s, "A");
+    later_frame(&mut s, 0.0, &[[[300.0, 0.0], [300.0, 400.0]], [[0.0, 200.0], [600.0, 200.0]]], 25.0, true);
+    assert_eq!(named(&mut s, "A"), before);
+}
+
+#[test]
+fn a_later_group_in_another_plane_is_fitted_where_it_shares_a_point() {
+    // A: a side frame, the 600 × 400 rectangle on XZ under Auto, a corner of it at the origin. B: on XY, an L from
+    // the origin out to (0, −400) and on to (600, −400). B's end at the origin lies in A's corner: it is fitted to
+    // A's tubes there, whose faces lie at y = ±20 (A is laid in XZ), so B's first tube runs y −400…−20 (from its
+    // line's far end, where B's own corner is jointed; its 40 × 40 section reaches y −420 round that corner).
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XZ", "name": "Side"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Side", "profile": tube(), "corner": "auto", "name": "A", "body_name": "A"}));
+    let before = named(&mut s, "A");
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Floor"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [0, -400]]}));
+    run(&mut s, "sketch.line", json!({"points": [[0, -400], [600, -400]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Floor", "profile": tube(), "corner": "auto", "fit_ends": true, "body_name": "B"}));
+    let bs = named(&mut s, "B");
+    let side = bs.iter().find(|b| b.3[0] < 30.0).unwrap_or_else(|| panic!("{bs:?}"));
+    assert!((side.3[1] + 20.0).abs() < 1e-6, "B's end at the origin stops on A's face y = −20: {side:?}");
+    assert_eq!(named(&mut s, "A"), before);
+}
+
+#[test]
+fn a_mitre_frame_fits_its_free_ends_and_none_never_does() {
+    // Fit Ends on a frame that isn't Auto fits the ends at no corner (B's line has two), and leaves its corners as
+    // stage 1 builds them; a None frame never fits. So B runs y 20…380 under Mitre, 0…400 under None.
+    for (corner, lo, hi) in [("mitre", 20.0, 380.0), ("none", 0.0, 400.0)] {
+        let mut s = Session::default();
+        earlier_frame(&mut s);
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Later"}));
+        run(&mut s, "sketch.line", json!({"points": [[300, 0], [300, 400]]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "frame.member", json!({"sketch": "Later", "profile": square_of(25.0), "corner": corner, "fit_ends": true, "body_name": "B"}));
+        assert_b_runs(&mut s, lo, hi);
+    }
+}
