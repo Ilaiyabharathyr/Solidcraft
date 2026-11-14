@@ -621,15 +621,31 @@ fn an_old_two_member_override_still_loads() {
     let mut s = Session::default();
     rectangle_frame(&mut s);
     let (l1, l2) = two_lines(&s);
-    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corners": [{"members": [l1, l2], "corner": "mitre"}]}));
+    run(
+        &mut s,
+        "frame.member",
+        json!({"sketch": "Frame", "profile": tube(), "corner": "butt", "corners": [{"members": [l1, l2], "corner": "butt"}]}),
+    );
+    // The design's override as a stage 1 build wrote it, by hand: two ids and no `flip`.
+    let old: Value = serde_json::from_str(&format!(r#"[{{"members":["{l1}","{l2}"],"corner":"mitre"}}]"#)).unwrap();
+    fn put(v: &mut Value, old: &Value) -> bool {
+        match v {
+            Value::Object(o) if o.contains_key("corners") => {
+                o.insert("corners".into(), old.clone());
+                true
+            }
+            Value::Object(o) => o.values_mut().any(|v| put(v, old)),
+            Value::Array(a) => a.iter_mut().any(|v| put(v, old)),
+            _ => false,
+        }
+    }
     let mut doc: Value = serde_json::from_str(&s.doc.to_json()).unwrap();
-    let text = doc.to_string();
-    assert!(text.contains(&format!("\"members\":[\"{l1}\",\"{l2}\"]")), "{text}");
-    doc = serde_json::from_str(&text).unwrap();
-    let reopened = Session::new(solidcraft_doc::Document::from_json(&doc.to_string()).unwrap());
+    assert!(put(&mut doc, &old), "no corners in {doc}");
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&doc.to_string()).unwrap());
     let kind = &reopened.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().kind;
     let solidcraft_doc::FeatureKind::FrameMember { corners, .. } = kind else { panic!("not a frame member") };
-    assert_eq!(corners[0].members, vec![l1, l2]);
+    assert_eq!((corners[0].members.clone(), corners[0].corner, corners[0].flip), (vec![l1, l2], solidcraft_doc::frame::CornerType::Mitre, false));
+    assert_eq!(bodies(&mut reopened).len(), 4);
 }
 
 #[test]
@@ -3398,10 +3414,11 @@ fn a_corner_on_an_earlier_frames_corner_is_free() {
 }
 
 /// A Locost-sized design (about 60 tubes over four Frame Members, all Auto with fit_ends), timed through a full
-/// evaluation. Run on demand: `cargo test ... locost_sized_design_evaluates_in_time -- --ignored --nocapture`.
+/// evaluation, which it prints (no time is asserted). Run on demand: `cargo test ... locost_sized_design_timing --
+/// --ignored --nocapture`.
 #[test]
 #[ignore = "timing check, run on demand"]
-fn locost_sized_design_evaluates_in_time() {
+fn locost_sized_design_timing() {
     let mut s = Session::default();
     let frame = |s: &mut Session, name: &str, plane: &str, offset: f64| {
         let mut sk = json!({"plane": plane, "name": name});

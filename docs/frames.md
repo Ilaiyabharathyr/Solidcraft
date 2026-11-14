@@ -111,9 +111,9 @@ one, or list them in `lines`.
 ## Auto
 
 **Corner Type Auto** (`corner: "auto"`) works out every joint of the frame for you. It is first in the
-Corner Type list and a new dialog starts on it; the command's default stays `none`. Where stage 1's
-types meet only two members at a point, Auto also handles T-junctions and points where three or more
-members end.
+Corner Type list and a new dialog starts on it; the command's default stays `none`. Where the other
+types finish only points where two members end, Auto also handles T-junctions and points where three
+or more members end.
 
 **Laying order.** Tubes are laid in this order, and each is fitted to the ones before it: outer
 tubes (the outline of the frame), longest first; then inner tubes that span the frame, squarest
@@ -132,34 +132,43 @@ rounded to 0.01 degrees:
 | over 120° | mitre |
 
 Between two different sections a mitre is replaced by a butt. A corner sharper than 5 degrees inside
-is refused as before. **Flip** swaps which tube is long and which is short.
+is refused as before. Under Auto the frame's own **Flip** is hidden: an override's Flip swaps which
+tube is long and which is short at its corner.
 
 **Fits.** A tube that ends against the side of another (a T-junction), or one of three or more tubes
 ending at a point, is cut to fit the tube it meets, only near its end: flat on a box tube, with the
 radii squared, and a fishmouth on a round tube.
 
+**Tubes in no sketch plane.** Point-to-point tubes (`pairs`) and 3D-sketch lines are laid after every
+group, chained among themselves: where two of them end together they are mitred (or joined as an
+override there says), and a third one ending there is fitted to the tubes already there. Their free
+ends are fitted where they meet this frame's tubes or, with Fit Ends to Earlier Frames, earlier ones.
+
 **Lined-up sections.** Under Auto the sections of all tubes are lined up: up is the sketch's normal
 and the outer tubes run round the outline anticlockwise, so square and rectangular sections meet wall
 to wall in any plane. A tube drawn against that direction is reversed; its face names stay the same.
-Stage 1's section line-up limit (Corners, Known limits) applies only outside Auto.
+The section line-up limit under Corners (Known limits) applies only outside Auto.
 
 **Fit Ends to Earlier Frames** (`fit_ends`, ticked by default in the dialog, false when absent)
-fits the tubes' free ends to the tubes of Frame Members made earlier in the timeline, and to the
-Move, Mirror and Pattern copies of those. A corner that lies inside an earlier tube, or on two of
-them, is fitted rather than jointed, and braces ending at such a corner are fitted to each other. On a
-Mitre, Butt or Coped frame only free ends (ends at no corner) are fitted; None never fits. Earlier
-tubes are never changed.
+fits the tubes' free ends to the tubes of Frame Members made earlier in the timeline, to the Move,
+Mirror and Pattern copies of those, and to this frame's own tubes laid before them. A corner that lies
+inside an earlier tube, or on two of them, is fitted rather than jointed, and braces ending at such a
+corner are fitted to each other. So is a corner of tubes in no sketch plane that lies inside an earlier
+tube or one of this frame's own sketch tubes. On a Mitre, Butt or Coped frame only free ends (ends at
+no corner) are fitted, to this frame's tubes before them in drawing order too, whether or not an
+earlier Frame Member exists; None never fits. Earlier tubes are never changed.
 
 **Overrides.** Under Auto a `corners` entry may name any points where two or more tubes meet:
-`members` holds 2 to 1000 distinct ids. Auto is in the override type list only on an Auto frame; an
-Auto override on another frame builds as that frame's type, with the override's own Flip. Flip is hidden
-in the dialog while the type is Auto.
+`members` holds 2 to 1000 distinct ids, the point-to-point tubes ending there included. Auto is in the
+override type list only on an Auto frame; an Auto override on another frame builds as that frame's
+type, with the override's own Flip. While Corner Type is Auto the frame's Flip row is hidden, and Flip
+lives on each override row.
 
 ```json
 {"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "rect_tube", "width": 25, "height": 25, "wall": 2}, "corner": "auto", "fit_ends": true}}
 ```
 
-**Known limits of Auto.** Tubes that cross each other overlap (stage 3 will split them). A flat end
+**Known limits of Auto.** Tubes that cross each other overlap for now. A flat end
 meeting a round tube's seam in some layouts is refused by the kernel with an error. A member's face
 numbers can change when its line moves, because the kernel's face order follows placement; faces
 fitted against a reversed tube can be renamed if its direction flips. A brace landing at a very

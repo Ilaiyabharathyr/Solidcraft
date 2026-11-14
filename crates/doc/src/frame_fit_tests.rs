@@ -239,3 +239,23 @@ fn an_arc_between_nearly_parallel_lines_keeps_its_arc() {
         }
     }
 }
+
+#[test]
+fn a_fitted_ends_clip_faces_are_named_for_the_zone() {
+    // A tool 3° off the member's line through its end grooves it far back: the end zone clips the tool, and the clip's
+    // face left on the member is named `fit_zone:<k>`, not one of the member's own `face:<k>`.
+    let m = member(&box_tube(), Vec3::ZERO, Vec3::X * 600.0, 0.0, 600.0);
+    let d = Vec3::new(3.0_f64.to_radians().cos(), 3.0_f64.to_radians().sin(), 0.0);
+    let (a, b) = (Vec3::X * 600.0 - d * 1000.0, Vec3::X * 600.0 + d * 200.0);
+    let tool = fit_tool(&square_to(a, b), &box_tube(), 0.0, a.dist(b), &[]).unwrap();
+    let fitted = fit_end(&m, Vec3::X * 600.0, Vec3::X, Vec3::new(300.0, 18.5, 0.0), &[&tool], "m").unwrap();
+    let lineage = fitted.lineage.as_ref().unwrap();
+    // The operands whose faces are named as the zone's, and a face of the fitted member that comes from one.
+    let zone: Vec<usize> = (0..lineage.operands.len())
+        .filter(
+            |&k| matches!(lineage.operands[k].as_ref(), crate::lineage::Operand::Made(r) if r.iter().flatten().any(|n| n.starts_with("fit_zone:"))),
+        )
+        .collect();
+    let from_zone = |o: &kernel::history::FaceOrigin| matches!(o, kernel::history::FaceOrigin::Face { operand, .. } if zone.contains(operand));
+    assert!(lineage.history.faces.iter().any(|f| f.origins.iter().any(from_zone)), "{:?}", lineage.operands);
+}

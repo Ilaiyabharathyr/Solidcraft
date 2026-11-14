@@ -71,10 +71,11 @@ pub fn fit_tool(plane: &Plane, regions: &[Region2], start: f64, end: f64, cuts: 
 }
 
 /// `member` with its end at `end_point` (its line's end, `toward` pointing out of the member) fitted to `tools`:
-/// only tools that reach the end zone ([`zone`], `w` the member's section diagonal, never past a quarter of the
-/// member) take part, each cut only within a zone deep enough to hold its whole crossing, so a tool crossing the
-/// member mid-span leaves it whole there (claude_fusion `cope_end`); the piece holding `middle` (a point inside
-/// the member's material near its line's middle) is kept; unchanged when no tool reaches the end.
+/// only tools whose exact bounds come within `w` of the end (the member's section diagonal) and that meet the end
+/// zone ([`zone`], never deeper than a quarter of the member) take part, each cut only within a zone deep enough to
+/// hold its whole crossing, so a tool crossing the member mid-span leaves it whole there (claude_fusion `cope_end`);
+/// the piece holding `middle` (a point inside the member's material near its line's middle) is kept; unchanged when
+/// no tool reaches the end.
 pub fn fit_end(member: &Traced, end_point: Vec3, toward: Vec3, middle: Vec3, tools: &[&Traced], id: &str) -> Result<Traced> {
     let gone = || DocError::Invalid(format!("the member on line `{id}` was cut away completely"));
     let toward = toward.normalized().ok_or_else(|| DocError::Invalid(format!("the member on line `{id}` has no direction")))?;
@@ -100,7 +101,10 @@ pub fn fit_end(member: &Traced, end_point: Vec3, toward: Vec3, middle: Vec3, too
         return Ok(member.clone());
     }
     // A tool that reaches the end is cut over its whole crossing, an oblique brace's included, and nowhere else.
-    let clip = numbered_tool(zone(end_point, toward, w, 2.0 * reach.iter().map(|r| r.1).fold(0.0, f64::max))?);
+    // Its faces are named for the zone, apart from the member's own `face:<k>`, where it leaves one on the member.
+    let clip = zone(end_point, toward, w, 2.0 * reach.iter().map(|r| r.1).fold(0.0, f64::max))?;
+    let roles = (0..clip.face_count()).map(|k| vec![format!("fit_zone:{k}")]).collect();
+    let clip = Traced::made(clip, Some(roles));
     let mut fitted: Option<Traced> = None;
     for (tool, _) in reach {
         // ponytail: every tool is clipped, even one wholly inside the zone; skip those if the boolean shows.
