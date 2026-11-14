@@ -2201,3 +2201,101 @@ fn a_vertex_pair_in_a_rotated_component_turns_like_a_line_member() {
     assert!(line.3[2] - line.2[2] > 30.0, "{line:?}");
     assert!(near3(line.2, pair.2) && near3(line.3, pair.3), "{line:?} vs {pair:?}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Corners of members between pairs of points (#4003, #15705)
+
+/// The frame members' measures, the box left out.
+fn members_measured(s: &mut Session) -> Vec<Measured> {
+    bodies(s).into_iter().filter(|b| b.0 != "Box").collect()
+}
+
+/// The member whose bounding box is `lo`..`hi`.
+fn member_at(bs: &[Measured], lo: [f64; 3], hi: [f64; 3]) -> Measured {
+    bs.iter().find(|b| near3(b.2, lo) && near3(b.3, hi)).unwrap_or_else(|| panic!("{lo:?}..{hi:?} in {bs:?}")).clone()
+}
+
+#[test]
+fn two_pair_members_meeting_at_a_point_are_mitred() {
+    let mut s = Session::default();
+    box_frame(&mut s);
+    // The top rail and the upright end together at (600, 0, 400).
+    run(&mut s, "frame.member", json!({"profile": tube(), "pairs": [top_rail(), upright()], "corner": "mitre"}));
+    let bs = members_measured(&mut s);
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    // Each runs out to the corner's outer side, where the 45° mitre meets x = 620 and z = 420, and
+    // keeps its centreline's volume.
+    let rail = member_at(&bs, [0.0, -20.0, 380.0], [620.0, 20.0, 420.0]);
+    assert!(rel(rail.1, tube_area() * 600.0) < MEASURED, "{rail:?} vs {}", tube_area() * 600.0);
+    let post = member_at(&bs, [580.0, -20.0, 0.0], [620.0, 20.0, 420.0]);
+    assert!(rel(post.1, tube_area() * 400.0) < MEASURED, "{post:?} vs {}", tube_area() * 400.0);
+}
+
+#[test]
+fn a_sketch_line_and_a_pair_member_butt_the_shorter_against_the_longer() {
+    let mut s = Session::default();
+    box_frame(&mut s);
+    // The base's 600 bottom line and the 400 upright end together at (600, 0, 0).
+    let bottom = line_at_y(&s, "Base", 0.0);
+    let frame = |extra: Value| {
+        let mut p = json!({"sketch": "Base", "lines": [bottom], "profile": tube(), "pairs": [upright()]});
+        for (k, v) in extra.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        p
+    };
+    let fid = run(&mut s, "frame.member", frame(json!({"corner": "butt"})))["feature"].as_u64().unwrap();
+    let bs = members_measured(&mut s);
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    // The longer line runs through to the upright's outer face; the upright stops on its top.
+    let line = member_at(&bs, [0.0, -20.0, -20.0], [620.0, 20.0, 20.0]);
+    assert!(rel(line.1, tube_area() * 620.0) < MEASURED, "{line:?} vs {}", tube_area() * 620.0);
+    let post = member_at(&bs, [580.0, -20.0, 20.0], [620.0, 20.0, 400.0]);
+    assert!(rel(post.1, tube_area() * 380.0) < MEASURED, "{post:?} vs {}", tube_area() * 380.0);
+    // Flipped, by a Mitre frame's override named by the line's and the pair's ids, the pair runs through.
+    run(&mut s, "timeline.delete", json!({"feature": fid}));
+    let over = json!({"corner": "mitre", "corners": [{"members": ["pair1", bottom], "corner": "butt", "flip": true}]});
+    run(&mut s, "frame.member", frame(over));
+    let bs = members_measured(&mut s);
+    member_at(&bs, [0.0, -20.0, -20.0], [580.0, 20.0, 20.0]);
+    member_at(&bs, [580.0, -20.0, -20.0], [620.0, 20.0, 400.0]);
+}
+
+#[test]
+fn a_tie_runs_the_sketch_line_through_then_the_first_pair() {
+    let mut s = Session::default();
+    box_frame(&mut s);
+    // The 400 left line (along Y) and a 400 post (along Z) at the origin: equally long, equally far
+    // from the sketch's X axis. The sketch's line comes before every pair.
+    let left = line_at_x(&s, "Base", 0.0);
+    let post = json!({"a": {"vertex": [0, 0, 0]}, "b": {"vertex": [0, 0, 400]}});
+    run(&mut s, "frame.member", json!({"sketch": "Base", "lines": [left], "profile": tube(), "pairs": [post], "corner": "butt"}));
+    let bs = members_measured(&mut s);
+    member_at(&bs, [-20.0, -20.0, -20.0], [20.0, 400.0, 20.0]);
+    member_at(&bs, [-20.0, -20.0, 20.0], [20.0, 20.0, 400.0]);
+    // Two pairs alike (the upright and the 400 top side at (600, 0, 400)): the first runs through.
+    let side = json!({"a": {"vertex": [600, 0, 400]}, "b": {"vertex": [600, 400, 400]}});
+    for (pairs, through) in [
+        (json!([upright(), side]), ([580.0, -20.0, 0.0], [620.0, 20.0, 420.0])),
+        (json!([side, upright()]), ([580.0, -20.0, 380.0], [620.0, 400.0, 420.0])),
+    ] {
+        let fid = run(&mut s, "frame.member", json!({"profile": tube(), "pairs": pairs, "corner": "butt"}))["feature"].as_u64().unwrap();
+        let bs = feature_boxes(&mut s, fid);
+        assert!(bs.values().any(|b| near3(b.0, through.0) && near3(b.1, through.1)), "{pairs}: {bs:?}");
+        run(&mut s, "timeline.delete", json!({"feature": fid}));
+    }
+}
+
+#[test]
+fn removing_a_tube_drops_the_corner_overrides_that_name_it() {
+    let mut s = Session::default();
+    box_frame(&mut s);
+    let bottom = line_at_y(&s, "Base", 0.0);
+    let p = json!({"sketch": "Base", "lines": [bottom], "profile": tube(), "pairs": [upright(), top_rail()], "corner": "mitre",
+                   "corners": [{"members": [bottom, "pair1"], "corner": "butt"}, {"members": ["pair1", "pair2"], "corner": "butt"}]});
+    let fid = run(&mut s, "frame.member", p)["feature"].clone();
+    remove(&mut s, json!([{"feature": fid, "line": "pair1"}]));
+    let solidcraft_doc::FeatureKind::FrameMember { corners, .. } = member_kind(&s, &fid) else { panic!() };
+    assert!(corners.is_empty(), "{corners:?}");
+    assert_eq!(member_boxes(&mut s).len(), 2, "the other tubes build: the overrides no longer point at a corner that has gone");
+}

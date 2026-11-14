@@ -491,7 +491,8 @@ fn pair_lines(
 /// The two member lines that end at the sketch's point `point` (a point id, or a 3D sketch's
 /// `wire:index` node): a corner as [`frame_corners::find_corners`] finds them among `lines` (none:
 /// every line of the sketch, as a feature with no lines takes them). A Corner Override names its
-/// corner by these.
+/// corner by these. Only the sketch's lines are looked at: a corner where a point-to-point member
+/// ends is named through `corners` with the pair's id.
 pub fn corner_at_point(st: &ModelState, sketch: u64, lines: &[String], point: &str) -> Result<[String; 2]> {
     let ss = st.sketch(sketch).ok_or_else(|| DocError::Unknown(format!("sketch {sketch}")))?;
     let at =
@@ -530,8 +531,11 @@ pub fn is_member_line(sk: &Sketch, ci: usize) -> bool {
     sk.curves.get(ci).is_some_and(|c| !c.construction && !c.centerline && c.link.is_none() && matches!(c.kind, CurveKind::Line { .. }))
 }
 
-/// Each member line's place in the sketch's drawing order: a 2D line's curve index, a 3D line's
-/// wire index after them (looked up as [`member_lines`] looks them up).
+/// Each member's place in the sketch's drawing order: a 2D line's curve index, a 3D line's wire
+/// index after them (looked up as [`member_lines`] looks them up). A pair's member isn't drawn in
+/// the sketch: it ranks after every line, and pairs tie among themselves, which `frame_corners::
+/// through` then settles by member index, the pairs' own order. (With no sketch, `drawn` is empty
+/// and every member ranks by its index alike.)
 fn drawn_order(sk: &Sketch, segments: &[(String, Vec3, Vec3)]) -> Vec<usize> {
     let rank = |id: &str| sk.wire_index(id).map(|w| sk.curves.len() + w).or_else(|| sk.curve_index(id)).unwrap_or(usize::MAX);
     segments.iter().map(|(id, _, _)| rank(id)).collect()

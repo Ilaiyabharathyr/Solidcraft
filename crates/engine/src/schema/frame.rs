@@ -496,7 +496,7 @@ impl JsonSchema for CornerParam {
     }
 }
 
-/// `corners`: up to 1000 corner overrides, as `frame.member` reads them. Whether the lines are
+/// `corners`: up to 1000 corner overrides, as `frame.member` reads them. Whether the members are
 /// the feature's and meet at a corner is the handler's to check.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CornersParam(pub Vec<CornerOverride>);
@@ -508,7 +508,7 @@ impl<'de> Deserialize<'de> for CornersParam {
         if a.len() > MAX_MEMBERS {
             return Err(fail());
         }
-        let entry = || D::Error::custom(whole("`corners` entries must be {members: [line id, line id], corner, flip?}"));
+        let entry = || D::Error::custom(whole("`corners` entries must be {members: [line or pair id, line or pair id], corner, flip?}"));
         a.into_iter().map(|v| serde_json::from_value(v).map_err(|_| entry())).collect::<Result<_, _>>().map(CornersParam)
     }
 }
@@ -519,7 +519,7 @@ impl JsonSchema for CornersParam {
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
-            "description": "Corners finished their own way: the lines of the two members that meet there, the corner type, and whether the other member runs through.",
+            "description": "Corners finished their own way: the ids (lines' or pairs') of the two members that meet there, the corner type, and whether the other member runs through.",
             "type": "array", "maxItems": MAX_MEMBERS,
             "items": {
                 "type": "object",
@@ -825,7 +825,7 @@ pub struct FrameMemberKeys {
     /// With a butt or coped butt: the other member runs through. Default: false.
     #[serde(default)]
     pub flip: Option<bool>,
-    /// Corners finished their own way, each named by the lines of its two members.
+    /// Corners finished their own way, each named by its two members' line or pair ids.
     #[serde(default)]
     pub corners: Option<CornersParam>,
     /// How far the profile turns about the line, a number of degrees or an expression. Default:

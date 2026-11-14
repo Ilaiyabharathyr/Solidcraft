@@ -51,15 +51,17 @@ the selected body (or the last body of the active component).
 overlap as before), `mitre`, `butt` or `coped_butt` (shown as **None**, **Mitre**, **Butt** and
 **Coped**).
 
-A **corner** is a point where exactly two of the feature's members end, within 0.001 mm. Where three
-or more members end, where a member ends on the middle of another, and where lines cross, nothing is
-cut: those stay as before. Two members in line (within 0.01 degrees) stay square whatever the type.
+A **corner** is a point where exactly two of the feature's members end, within 0.001 mm: sketch-line
+members and members between two points (`pairs`) alike. Where three or more members end, where a
+member ends on the middle of another, and where lines cross, nothing is cut: those stay as before. Two members in line (within 0.01 degrees) stay square whatever the type.
 A corner sharper than 5 degrees inside is refused: "Corner at (x, y, z) is too sharp to finish".
 
 - **Mitre**: both members are cut on the plane that bisects the corner.
 - **Butt**: one member runs through and the other butts against it. Unflipped, the longer member
   runs through; members within 1 mm of each other in length count as equal, and then the one nearer
-  the sketch's X axis runs through, then the one drawn first. **Flip** (`flip`) swaps them. The
+  the sketch's X axis runs through, then the one drawn first. In that drawing order the sketch's
+  lines come first and the point-to-point members after them, in their `pairs` order; a Frame Member
+  of pairs alone (no sketch, so no X axis) goes by the pairs' order. **Flip** (`flip`) swaps them. The
   through member ends flush with the outside of the other, and the other is cut flat on the near
   face of the through member. A butt whose through member would run past the far end of the other
   member is refused: "Corner at (x, y, z) is too flat to butt".
@@ -69,9 +71,10 @@ A corner sharper than 5 degrees inside is refused: "Corner at (x, y, z) is too s
   through member is refused.
 
 **Corner Overrides** (`corners`) give single corners their own type and flip. Each is saved by the
-two lines that meet there, not by the point, so it survives a dimension change while the lines still
-meet. If they no longer do, the feature fails with "A corner override is not at a corner of the
-frame", and Edit Feature still opens with that override listed so it can be removed. Changing the
+ids of the two members that meet there (a line's id, or a pair's `pair1`, `pair2`…), not by the
+point, so it survives a dimension change while the members still meet. If they no longer do, the
+feature fails with "A corner override is not at a corner of the frame", and Edit Feature still opens
+with that override listed so it can be removed. Changing the
 feature's Corner Type leaves existing overrides alone; a new override starts as the feature's type.
 
 A member cut away completely fails with "the member on line `id` was cut away completely", and one
@@ -98,8 +101,12 @@ members' sections come in turned or offset differently (lines in a vertical plan
 to head, or 3D sketches), a rectangular, off-centre, angle or channel section will not meet wall to
 wall at a mitre or butt: the cut planes are right, but no section is turned to match. Square and
 round tubes centred on their lines always meet. Corners of 3D-sketch lines cut (the tie falls to
-drawing order) but cannot be picked in the dialog; set them through `corners` in the command. A box
-drag in the dialog doesn't pick 3D-sketch lines: click them one by one, or list them in `lines`.
+drawing order) but cannot be picked in the dialog; set them through `corners` in the command. Nor
+can a corner where a point-to-point member ends: Corner Overrides takes the frame sketch's points and
+finds corners among its lines alone. Set those through `corners` with the pair's id; Edit Feature
+keeps them, each listed by its type with a bin to remove it, and Remove Tube drops the overrides that
+name the tube it takes out. A box drag in the dialog doesn't pick 3D-sketch lines: click them one by
+one, or list them in `lines`.
 
 ## frame.member
 

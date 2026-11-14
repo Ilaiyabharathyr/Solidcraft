@@ -1264,12 +1264,20 @@ fn an_edit_shows_the_corner_settings_and_overrides() {
     assert_eq!(c[0].1["params"]["corners"], corners, "{}", c[0].1);
 }
 
+/// A harness window tall enough for the whole Frame Member card with its corner rows: in the
+/// default one the card scrolls, and its OK and Cancel lie over the last rows.
+fn tall_harness() -> crate::scenario::Harness {
+    let mut h = crate::scenario::Harness::new();
+    h.call("ui.resize", json!({"width": 1600, "height": 1400}));
+    h.app.home.open = false;
+    h
+}
+
 /// An override whose two lines no longer meet still opens for editing: it is kept, listed as a
 /// Missing corner, and its row's bin removes it.
 #[test]
 fn an_edit_opens_with_an_override_whose_corner_has_gone() {
-    let mut h = crate::scenario::Harness::new();
-    h.app.home.open = false;
+    let mut h = tall_harness();
     for (id, p) in frame_commands() {
         h.app.run(id, p).unwrap();
     }
@@ -1295,6 +1303,30 @@ fn an_edit_opens_with_an_override_whose_corner_has_gone() {
     let d = h.app.dialog.as_ref().unwrap();
     assert!(d.extra.get("corners").is_none());
     assert!(apply_commands(&h.app, d).unwrap()[0].1["params"].get("corners").is_none());
+}
+
+/// An override of a corner where a point-to-point member ends (#15705) can't show as a picked
+/// sketch point: an edit keeps it as it is, its row says its type, and OK sends it back.
+#[test]
+fn an_edit_keeps_an_override_of_a_pair_members_corner() {
+    let mut app = frame_app();
+    // The bottom line, and a tube up the right side between its two corner points: they meet at (600, 0).
+    let bottom = lines_at(&app, 0.0, 0.0).into_iter().find(|l| lines_at(&app, 600.0, 0.0).contains(l)).unwrap();
+    let (a, b) = (point_at(&app, 600.0, 0.0), point_at(&app, 600.0, 400.0));
+    let over = json!([{"members": [bottom, "pair1"], "corner": "mitre", "flip": false}]);
+    app.run(
+        "frame.member",
+        json!({"sketch": "Frame", "lines": [bottom], "profile": tube(), "corners": over,
+               "pairs": [{"a": {"sketch": "Frame", "point": a}, "b": {"sketch": "Frame", "point": b}}]}),
+    )
+    .unwrap();
+    let f = app.session.doc.features.last().unwrap().id;
+    let e = edit_dialog(&app, f, None).unwrap();
+    assert!(e.inputs[2].items.is_empty());
+    assert_eq!(e.extra.get("corners"), Some(&over));
+    assert_eq!(kept_corner_text(&over[0]), "Mitre");
+    assert_eq!(kept_corner_text(&json!({"members": [bottom, "l9"], "corner": "mitre"})), "Missing corner");
+    assert_eq!(apply_commands(&app, &e).unwrap()[0].1["params"]["corners"], over);
 }
 
 /// A new Frame Member starts on None, unflipped, with no overrides, even after one made with Butt.
@@ -1389,8 +1421,7 @@ fn a_box_over_the_frame_sketch_picks_its_lines() {
 /// The frame dialog in a harness, the frame's lines picked, the feature's type `corner`, and the
 /// rectangle's corners at (0, 0) and (600, 400) picked into Corner Overrides.
 fn overrides_dialog(corner: &str) -> (crate::scenario::Harness, [Sel; 2]) {
-    let mut h = crate::scenario::Harness::new();
-    h.app.home.open = false;
+    let mut h = tall_harness();
     for (id, p) in frame_commands() {
         h.app.run(id, p).unwrap();
     }

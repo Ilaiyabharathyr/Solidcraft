@@ -35,7 +35,8 @@ impl CornerType {
     }
 }
 
-/// One corner finished its own way, named by the lines of the two members that meet there.
+/// One corner finished its own way, named by the ids of the two members that meet there (a line's,
+/// or a pair's `pair<N>`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CornerOverride {
     pub members: [String; 2],

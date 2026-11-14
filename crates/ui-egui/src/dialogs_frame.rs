@@ -709,6 +709,15 @@ pub(crate) fn toggle_own_rows(kind: &mut Kind, input: usize) -> bool {
 }
 
 /// "Corner n", the label of the n-th override row (from 1).
+/// What a kept override's row says: the type of one where a point-to-point member ends (Corner
+/// Overrides can't pick that corner, but it is no less there), else Missing corner.
+fn kept_corner_text(o: &Value) -> &str {
+    let mut ids = o.get("members").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+    let names_pair = ids.any(|id| frame::parse_pair_id(id).is_some());
+    let corner = CORNER_TYPES.iter().find(|c| o.get("corner").and_then(Value::as_str) == Some(c.0));
+    tr(corner.filter(|_| names_pair).map_or("Missing corner", |c| c.1))
+}
+
 fn corner_label(n: usize) -> String {
     solidcraft_ui_text::format("ui.frame_corner_number", &[("n", &n.to_string())])
 }
@@ -729,7 +738,7 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>) {
             m.overrides_open = true;
         }
     }
-    let missing = d.extra.get("corners").and_then(Value::as_array).map_or(0, Vec::len);
+    let kept: Vec<Value> = d.extra.get("corners").and_then(Value::as_array).cloned().unwrap_or_default();
     if !m.overrides_open && !picks.is_empty() {
         return;
     }
@@ -773,11 +782,11 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>) {
         input.items.retain(|x| *x != pick);
     }
     let mut gone = None;
-    for k in 0..missing {
+    for (k, o) in kept.iter().enumerate() {
         let label = corner_label(picks.len() + k + 1);
         ui.scope_builder(egui::UiBuilder::new().id_salt(("frame_missing_corner", k)), |ui| {
             form_row(ui, &label, |ui| {
-                ui.label(tr("Missing corner"));
+                ui.label(kept_corner_text(o));
                 let t = solidcraft_theme::Tokens::get();
                 ui.add_space((ui.available_width() - t.control_height).max(0.0));
                 if crate::ui_kit::bin_button(ui, tr("Remove this corner")).clicked() {
@@ -1049,8 +1058,9 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
     }
     m.corner = corner_index(corner);
     m.flip = *flip;
-    // Each override shows as the point of its corner; one whose lines no longer meet is kept as
-    // it is, listed as a missing corner so that it can be removed.
+    // Each override shows as the point of its corner; one whose lines no longer meet, or one of a
+    // corner where a point-to-point member ends (not a sketch point the input can show), is kept
+    // as it is, listed with a bin so that it can be removed ([`kept_corner_text`]).
     let mut missing = Vec::new();
     for o in corners {
         match path_sketch.and_then(|ps| Some((ps.0, frame::corner_point(&st, ps.0, &o.members)?))) {
