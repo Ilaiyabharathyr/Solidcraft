@@ -50,7 +50,7 @@ pub struct CornerOverride {
 /// How close (mm) two line ends must be to meet.
 pub const CORNER_TOL: f64 = 1e-3;
 /// Members within this length (mm) of each other are equally long.
-const EQUAL_LENGTH: f64 = 1.0;
+pub(crate) const EQUAL_LENGTH: f64 = 1.0;
 /// Members within this angle (degrees) of a straight run on are in line: nothing to cut.
 const IN_LINE_DEG: f64 = 0.01;
 /// The sharpest interior angle (degrees) a corner can be finished at.
