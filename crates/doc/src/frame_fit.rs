@@ -77,7 +77,24 @@ pub fn fit_tool(plane: &Plane, regions: &[Region2], start: f64, end: f64, cuts: 
 /// the piece holding `middle` (a point inside the member's material near its line's middle) is kept; unchanged when
 /// no tool reaches the end.
 pub fn fit_end(member: &Traced, end_point: Vec3, toward: Vec3, middle: Vec3, tools: &[&Traced], id: &str) -> Result<Traced> {
-    let gone = || DocError::Invalid(format!("the member on line `{id}` was cut away completely"));
+    fitted(member, (end_point, toward, middle), tools, id, false)?.ok_or_else(|| gone(id))
+}
+
+/// [`fit_end`] for a piece of a line cut where tubes cross (#4003 stage 3, ruling C4): the piece kept is the one
+/// reaching farthest from the end (its centre of mass farthest along the member, away from the end), so a short
+/// piece past a crossing keeps what lies past the face of the tube it crosses, though its middle lies inside that
+/// tube; `None` when nothing of it is left (it lies wholly inside the tubes it is fitted to).
+pub fn fit_piece_end(member: &Traced, end_point: Vec3, toward: Vec3, middle: Vec3, tools: &[&Traced], id: &str) -> Result<Option<Traced>> {
+    fitted(member, (end_point, toward, middle), tools, id, true)
+}
+
+fn gone(id: &str) -> DocError {
+    DocError::Invalid(format!("the member on line `{id}` was cut away completely"))
+}
+
+/// [`fit_end`], keeping the farthest piece (`far`, [`fit_piece_end`]) or the one holding `middle`; `None` when
+/// nothing is kept.
+fn fitted(member: &Traced, (end_point, toward, middle): (Vec3, Vec3, Vec3), tools: &[&Traced], id: &str, far: bool) -> Result<Option<Traced>> {
     let toward = toward.normalized().ok_or_else(|| DocError::Invalid(format!("the member on line `{id}` has no direction")))?;
     let w = diagonal(&member.body, end_point, toward, middle);
     let half = end_point.dist(middle);
@@ -98,7 +115,7 @@ pub fn fit_end(member: &Traced, end_point: Vec3, toward: Vec3, middle: Vec3, too
         }
     }
     if reach.is_empty() {
-        return Ok(member.clone());
+        return Ok(Some(member.clone()));
     }
     // A tool that reaches the end is cut over its whole crossing, an oblique brace's included, and nowhere else.
     // Its faces are named for the zone, apart from the member's own `face:<k>`, where it leaves one on the member.
@@ -111,18 +128,31 @@ pub fn fit_end(member: &Traced, end_point: Vec3, toward: Vec3, middle: Vec3, too
         let Some(part) = kernel::boolean(&tool.body, &clip.body, BoolOp::Intersect)? else { continue };
         let part = Traced::step(part, &[tool, &clip]);
         let from = fitted.as_ref().unwrap_or(member);
-        let cut = kernel::boolean(&from.body, &part.body, BoolOp::Cut)?.ok_or_else(gone)?;
+        let Some(cut) = kernel::boolean(&from.body, &part.body, BoolOp::Cut)? else { return Ok(None) };
         fitted = Some(Traced::step(cut, &[from, &part]));
     }
-    let Some(fitted) = fitted else { return Ok(member.clone()) };
+    let Some(fitted) = fitted else { return Ok(Some(member.clone())) };
     let lumps = fitted.body.lumps()?;
     let lineages = Lineage::lumps(&fitted.body, fitted.lineage.as_ref(), &lumps);
+    if far {
+        if lumps.len() == 1 {
+            return Ok(lumps.into_iter().zip(lineages).next().map(|(body, lineage)| Traced { body, lineage, recipe: None }));
+        }
+        let mut best: Option<(f64, Traced)> = None;
+        for (body, lineage) in lumps.into_iter().zip(lineages) {
+            let along = (end_point - kernel::measure_mass(&body)?.centroid).dot(toward);
+            if best.as_ref().is_none_or(|(most, _)| along > *most) {
+                best = Some((along, Traced { body, lineage, recipe: None }));
+            }
+        }
+        return Ok(best.map(|b| b.1));
+    }
     for (body, lineage) in lumps.into_iter().zip(lineages) {
         if body.classify_point(middle)? != PointClass::Outside {
-            return Ok(Traced { body, lineage, recipe: None });
+            return Ok(Some(Traced { body, lineage, recipe: None }));
         }
     }
-    Err(gone())
+    Ok(None)
 }
 
 /// The end zone: a box `w` out from the member's line each way, from `w` past `end` back `depth` into the

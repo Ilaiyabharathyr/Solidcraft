@@ -32,9 +32,28 @@ const MIN_LENGTH: f64 = 1e-6;
 const STRAIGHT_TOL: f64 = 1e-3;
 
 /// Evaluate a `FrameMember` feature: one new body per member (a line, a pair, or under Auto each piece of a line cut
-/// where tubes cross, [`pieced`]), each named ([`member_names`], or by position for a copy whose `body_names` were
-/// set).
+/// where tubes cross, [`pieced`], but for a piece left wholly inside the tubes it is fitted to), each named
+/// ([`member_names`], or by position for a copy whose `body_names` were set). An error about a piece names it by
+/// its line and the tube it starts past ([`pieces_by_line`]).
 pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut ModelState) -> Result<()> {
+    built(doc, vals, f, st).map_err(|e| pieces_by_line(st, f, e))
+}
+
+/// `e` with each later piece of a cut line (`L>X`, [`LaterPieces`]) told as "the piece of `L` past `X`" (ruling C4):
+/// a piece is no line of the sketch.
+fn pieces_by_line(st: &ModelState, f: &Feature, e: DocError) -> DocError {
+    let DocError::Invalid(mut msg) = e else { return e };
+    let Ok((ids, later)) = member_parts(st, &f.kind) else { return DocError::Invalid(msg) };
+    for (id, (l, x)) in ids.iter().zip(&later).filter_map(|(id, p)| Some((id, (*p)?))) {
+        let (Some(l), Some(x)) = (ids.get(l), ids.get(x)) else { continue };
+        let piece = format!("the piece of `{l}` past `{x}`");
+        msg = msg.replace(&format!("the member on line `{id}`"), &piece).replace(&format!("line `{id}`"), &piece);
+    }
+    DocError::Invalid(msg)
+}
+
+/// [`evaluate`], its errors naming pieces by their ids.
+fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut ModelState) -> Result<()> {
     let FeatureKind::FrameMember { body_name, names, corner, flip, corners, fit_ends, .. } = &f.kind else {
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
@@ -42,6 +61,7 @@ pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
     let mut plan = auto_plan(*corner, &segments, &planes, corners, &drawn)?;
     let parts = plan.as_ref().map(|p| later_pieces(&p.pieces, &segments)).unwrap_or_default();
     let (segments, planes, drawn) = pieced(segments, planes, drawn, plan.as_ref())?;
+    let crossed = plan.as_ref().map(cut_pieces).unwrap_or_default();
     let (axes, plain) = section_axes(&segments, &planes, plan.as_ref(), turn)?;
     let (placed, unreversed) = (placer(&axes, at), unreversed_placer(&plain, at));
     // Fit Ends to Earlier Frames (None never fits): the earlier Frame Members' tubes and their copies, as cutting
@@ -93,35 +113,40 @@ pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
         }
     }
     // Only an Auto frame builds by Auto's rules; an Auto override elsewhere is the frame's own type (corner_ends).
-    let mut cut = if let Some(plan) = plan {
+    let (mut cut, dropped) = if let Some(plan) = plan {
         auto_members(&segments, &regions, (&placed, &unreversed), plan, (sketch_x, &drawn))?
     } else if corner.is_none() && corners.is_empty() {
         // A frame with no corners to finish is built exactly as it always was.
-        Vec::new()
+        (Vec::new(), Vec::new())
     } else {
         let (ends, copes) = corner_ends(&segments, &regions, &placed, (*corner, *flip), corners, (sketch_x, &drawn))?;
-        cut_members(&segments, &regions, (&placed, &|_, _| None), &ends, copes)?
+        (cut_members(&segments, &regions, (&placed, &|_, _| None), &ends, copes)?, Vec::new())
     };
+    // Each member's body; `None` for a piece left wholly inside the tubes it is fitted to.
     let mut made = Vec::with_capacity(segments.len());
     for (m, (id, a, b)) in segments.iter().enumerate() {
+        if dropped.get(m) == Some(&true) {
+            made.push(None);
+            continue;
+        }
         if let Some(t) = cut.get_mut(m).and_then(Option::take) {
-            made.push(t);
+            made.push(Some(t));
             continue;
         }
         let (x, y) = axes.get(m).copied().ok_or_else(|| DocError::Invalid(format!("line `{id}` has no length")))?;
         let plane = Plane::new(*a - x * at.x - y * at.y, x, y).ok_or_else(|| DocError::Invalid(format!("line `{id}`: no plane square to it")))?;
-        made.push(member_body(plane, unreversed(m, *a), &regions, *b - *a, (0.0, a.dist(*b)), id)?);
+        made.push(Some(member_body(plane, unreversed(m, *a), &regions, *b - *a, (0.0, a.dist(*b)), id)?));
     }
     // A point in the section's material (a tube's wall, not its bore), half way along member m.
     let inside = regions.first().map(|r| r.interior_point()).ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;
     let middle = |m: usize| segments.get(m).map_or(Vec3::ZERO, |(_, a, b)| placed(m, (*a + *b) * 0.5).to_world(inside));
     let near = |k: usize, p: Vec3| near_with(&own_ends, k, p);
     let tool = |k: usize| member_tool(&segments, &regions, &placed, &own_ends, k);
-    fit_to_earlier(&mut made, &segments, &unjointed, &earlier, &mut Own { laid, near: &near, tool: &tool, tools }, &middle)?;
+    fit_to_earlier(&mut made, &segments, &unjointed, &earlier, &mut Own { laid, near: &near, tool: &tool, tools }, &middle, &crossed)?;
     if !f.body_names.is_empty() {
         // A copy (pasted, or in a copied component) names its members by position, as any
         // feature's bodies.
-        for (k, t) in made.into_iter().enumerate() {
+        for (k, t) in made.into_iter().flatten().enumerate() {
             let name = new_name(st, f, k);
             st.bodies.push(ModelBody::traced_new(name, t, f.id));
         }
@@ -129,7 +154,8 @@ pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
     }
     let base = body_name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map_or(description, str::to_string);
     let ids: Vec<String> = segments.into_iter().map(|(id, _, _)| id).collect();
-    for (name, t) in member_names(st, &ids, &parts, names, &base).into_iter().zip(made) {
+    // A piece with no body leaves its name unused.
+    for (name, t) in member_names(st, &ids, &parts, names, &base).into_iter().zip(made).filter_map(|(n, t)| Some((n, t?))) {
         st.bodies.push(ModelBody::traced_new(name, t, f.id));
     }
     Ok(())
@@ -392,6 +418,12 @@ fn pieced(segments: Vec<(String, Vec3, Vec3)>, planes: Vec<MemberPlane>, drawn: 
 
 /// A frame's members as [`pieced`] gives them: (id, start, end), each one's plane and its place in the drawing order.
 type Pieced = (Vec<(String, Vec3, Vec3)>, Vec<MemberPlane>, Vec<usize>);
+
+/// For each of `plan`'s pieces, whether it was cut where tubes cross (at either end): its ends are fitted by
+/// [`frame_fit::fit_piece_end`].
+fn cut_pieces(plan: &Plan) -> Vec<bool> {
+    plan.pieces.iter().map(|p| p.from > 0.0 || p.to < 1.0).collect()
+}
 
 /// More pieces than a feature may have members: crossings cut a line in as many pieces as cross it.
 fn too_many_pieces() -> DocError {
@@ -681,14 +713,18 @@ fn auto_ends(
 /// [`frame_fit::fit_tool`], made once). A fitted face is named for the end it finishes and the id of the member it
 /// fits (a piece's own id, [`pieced`]), `corner_start:<member>:face:<k>` (`corner_end:…`), so a member's fitted faces
 /// keep names of their own whatever the laying or pick order, and where three tubes cross. `plan`: the frame's
-/// [`frame_layout::plan`], over `segments` [`pieced`] by it.
+/// [`frame_layout::plan`], over `segments` [`pieced`] by it. A piece of a line cut where tubes cross keeps what lies
+/// past the tubes it is fitted to ([`frame_fit::fit_piece_end`], ruling C4): with nothing left it is dropped, as
+/// the second list says (`true`: no body).
 pub(crate) fn auto_members(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
     (placed, unreversed): Placing,
     plan: Plan,
     tie: Tie,
-) -> Result<Vec<Option<Traced>>> {
+) -> Result<(Vec<Option<Traced>>, Vec<bool>)> {
+    let crossed = cut_pieces(&plan);
+    let mut dropped = vec![false; segments.len()];
     let ((ends, copes), fits) = auto_ends(segments, regions, placed, plan, tie)?;
     let mut out = cut_members(segments, regions, (placed, unreversed), &ends, copes)?;
     let no_member = |m: usize| DocError::Invalid(format!("no member {m}"));
@@ -703,6 +739,9 @@ pub(crate) fn auto_members(
     // A point in the section's material (a tube's wall, not its bore).
     let inside = regions.first().map(|r| r.interior_point()).ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;
     for f in &fits {
+        if dropped.get(f.member) == Some(&true) {
+            continue;
+        }
         let (id, a, b) = segments.get(f.member).ok_or_else(|| no_member(f.member))?;
         let (end, toward) = if f.at_start { (*a, *a - *b) } else { (*b, *b - *a) };
         let middle = placed(f.member, (*a + *b) * 0.5).to_world(inside);
@@ -719,9 +758,16 @@ pub(crate) fn auto_members(
         let against: Vec<&Traced> = named.iter().collect();
         let slot = out.get_mut(f.member).ok_or_else(|| no_member(f.member))?;
         let member = slot.take().ok_or_else(|| no_member(f.member))?;
-        *slot = Some(frame_fit::fit_end(&member, end, toward, middle, &against, id)?);
+        if crossed.get(f.member) == Some(&true) {
+            *slot = frame_fit::fit_piece_end(&member, end, toward, middle, &against, id)?;
+            if let (None, Some(d)) = (slot.as_ref(), dropped.get_mut(f.member)) {
+                *d = true;
+            }
+        } else {
+            *slot = Some(frame_fit::fit_end(&member, end, toward, middle, &against, id)?);
+        }
     }
-    Ok(out)
+    Ok((out, dropped))
 }
 
 /// Member m's cutting tool ([`frame_fit::fit_tool`]) as its plane cuts (`ends`) build it: a fitted or coped end stops
@@ -889,20 +935,26 @@ struct Own<'a> {
 /// `made` (each member as built, by member) with each of `ends` fitted to the earlier Frame Members' tubes
 /// ([`frame_fit::fit_end`]), a free end to this frame's members laid before its own too (`own`), each tool built
 /// once. A fitted face is named for the end it finishes and the body or line it fits, `corner_start:<body>:face:<k>`
-/// (`corner_end:…`). `middle(m)`: a point in member m's material half way along.
+/// (`corner_end:…`). `middle(m)`: a point in member m's material half way along. A piece cut where tubes cross
+/// (`crossed`, [`cut_pieces`]) is fitted as [`frame_fit::fit_piece_end`] fits it, and has no body (`None` in `made`)
+/// when nothing of it is left.
 fn fit_to_earlier(
-    made: &mut [Traced],
+    made: &mut [Option<Traced>],
     segments: &[(String, Vec3, Vec3)],
     ends: &[(usize, bool, bool)],
     earlier: &[(String, Traced)],
     own: &mut Own,
     middle: &dyn Fn(usize) -> Vec3,
+    crossed: &[bool],
 ) -> Result<()> {
     let named = |role: &str, name: &str, body: &kernel::Body| {
         let roles = (0..body.face_count()).map(|k| vec![format!("{role}:{name}:face:{k}")]).collect();
         Traced::made(body.clone(), Some(roles))
     };
     for &(m, at_start, free) in ends {
+        if made.get(m).is_some_and(Option::is_none) {
+            continue;
+        }
         let (id, a, b) = segments.get(m).ok_or_else(|| DocError::Invalid(format!("no member {m}")))?;
         let (end, toward, role) = if at_start { (*a, *a - *b, "corner_start") } else { (*b, *b - *a, "corner_end") };
         let mut against: Vec<Traced> = earlier.iter().map(|(body, t)| named(role, body, &t.body)).collect();
@@ -920,8 +972,13 @@ fn fit_to_earlier(
             continue;
         }
         let against: Vec<&Traced> = against.iter().collect();
-        let member = made.get_mut(m).ok_or_else(|| DocError::Invalid(format!("no member {m}")))?;
-        *member = frame_fit::fit_end(member, end, toward, middle(m), &against, id)?;
+        let slot = made.get_mut(m).ok_or_else(|| DocError::Invalid(format!("no member {m}")))?;
+        let Some(member) = slot.as_ref() else { continue };
+        *slot = if crossed.get(m) == Some(&true) {
+            frame_fit::fit_piece_end(member, end, toward, middle(m), &against, id)?
+        } else {
+            Some(frame_fit::fit_end(member, end, toward, middle(m), &against, id)?)
+        };
     }
     Ok(())
 }

@@ -1374,6 +1374,8 @@ fn replace_body_name(v: &mut Value, old: &str, new: &str, names_body: bool, dept
 /// A frame member feature's bodies by member id (line, pair or piece), as its own result made
 /// them: what pins each member's name to its member. `None` for any other feature, or when they
 /// don't pair up: not one body per member, or a body named what another member is pinned to.
+/// Under Auto a piece left wholly inside the tubes it crosses has no body (ruling C4): then each
+/// member keeps its pinned name, which every body must have.
 pub(super) fn member_pins(s: &Session, fid: u64) -> Option<BTreeMap<String, String>> {
     let f = s.doc.feature(fid)?;
     let FeatureKind::FrameMember { names, .. } = &f.kind else { return None };
@@ -1381,7 +1383,9 @@ pub(super) fn member_pins(s: &Session, fid: u64) -> Option<BTreeMap<String, Stri
     let lines = solidcraft_doc::frame::member_line_ids(&result.state, &f.kind).ok()?;
     let made: Vec<String> = result.state.bodies.iter().filter(|b| b.feature == fid).map(|b| b.name.clone()).collect();
     if lines.len() != made.len() {
-        return None;
+        let pinned: BTreeMap<String, String> = lines.iter().filter_map(|l| Some((l.clone(), names.get(l)?.clone()))).collect();
+        let named = f.body_names.is_empty() && made.len() < lines.len() && made.iter().all(|n| pinned.values().filter(|v| *v == n).count() == 1);
+        return named.then_some(pinned);
     }
     // A feature that names its own members gives each its pinned name when it can, and that name
     // to no other: a body with another member's pinned name was made for that member.

@@ -2724,6 +2724,74 @@ fn adding_and_removing_a_crossing_keeps_other_names() {
     assert_eq!(before.1, after.1);
 }
 
+/// A plus on `Plus`: h (0, 0)…(400, 0), the longer, laid first and whole; v (200, −100)…(200, `top`) cut at (200, 0),
+/// its later piece `V · H` running from there to y = `top`. h's faces are at y = ±20. With the frame's feature.
+fn short_plus(top: f64) -> (Session, Value) {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Plus"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [400, 0]], "ids": ["h"]}));
+    run(&mut s, "sketch.line", json!({"points": [[200.0, -100.0], [200.0, top]], "ids": ["v"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let fid =
+        run(&mut s, "frame.member", json!({"sketch": "Plus", "profile": tube(), "corner": "auto", "names": {"h": "H", "v": "V"}}))["feature"].clone();
+    (s, fid)
+}
+
+#[test]
+fn a_short_piece_past_a_crossing_keeps_what_lies_past_the_tube() {
+    // Ruling C4: an overhang past a crossing is an ordinary layout. The piece keeps what lies past h's far face, y = 20.
+    for top in [10.0, 30.0, 50.0] {
+        let (mut s, _) = short_plus(top);
+        let (got, faces) = built(&mut s);
+        // v's first piece runs from its free end to h's near face, y = −20, whatever the overhang.
+        assert!(rel(got["V"].0, tube_area() * 80.0) < MEASURED, "{top}: {got:?}");
+        assert!(near3(got["V"].1, [180.0, -100.0, -20.0]) && near3(got["V"].2, [220.0, -20.0, 20.0]), "{top}: {got:?}");
+        if top < 20.0 {
+            // Wholly inside h: no body for it, and nothing overlaps.
+            assert_eq!(got.keys().collect::<Vec<_>>(), ["H", "V"], "{top}");
+        } else {
+            // Past h: y 20…top, fitted flat to h's face.
+            let piece = &got["V · H"];
+            assert!(rel(piece.0, tube_area() * (top - 20.0)) < MEASURED, "{top}: {piece:?}");
+            assert!(near3(piece.1, [180.0, 20.0, -20.0]) && near3(piece.2, [220.0, top, 20.0]), "{top}: {piece:?}");
+            assert!(faces["V · H"].iter().any(|n| n.contains("corner_start:h:face:")), "{top}: {:?}", faces["V · H"]);
+        }
+        let o = overlap_all(&mut s);
+        assert!(o < 1e-3, "{top}: the tubes overlap by {o} mm³");
+    }
+}
+
+#[test]
+fn a_rename_keeps_names_pinned_when_a_piece_has_no_body() {
+    // v's piece past h lies wholly inside h and has no body: a rename still pins each name to its member (the
+    // piece keeps its own), rather than naming the frame's bodies by position from then on.
+    let (mut s, fid) = short_plus(10.0);
+    run(&mut s, "body.rename", json!({"body": "V", "name": "Post"}));
+    let names = pinned_names(&s, &fid);
+    assert_eq!(names.get("v").map(String::as_str), Some("Post"), "{names:?}");
+    assert_eq!(names.get("h").map(String::as_str), Some("H"), "{names:?}");
+    assert_eq!(names.get("v>h").map(String::as_str), Some("V · H"), "{names:?}");
+    assert!(s.doc.feature(fid.as_u64().unwrap()).unwrap().body_names.is_empty());
+    let made: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+    assert_eq!(made, ["H", "Post"]);
+}
+
+#[test]
+fn an_error_about_a_piece_names_its_line() {
+    // The piece of v past h, (200, 0)…(200, 15), is the coped tube at its corner with w (200, 15)…(400, 15), which
+    // runs through: it lies wholly inside w, and the error names it by its line and the tube it is past, never `v>h`.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Plus"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [400, 0]], "ids": ["h"]}));
+    run(&mut s, "sketch.line", json!({"points": [[200, -100], [200, 15]], "ids": ["v"]}));
+    run(&mut s, "sketch.line", json!({"points": [[200, 15], [400, 15]], "ids": ["w"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let corners = json!([{"members": ["v", "w"], "corner": "coped_butt"}]);
+    let p = json!({"sketch": "Plus", "profile": tube(), "corner": "auto", "corners": corners});
+    let e = s.execute("frame.member", &p).unwrap_err().to_string();
+    assert!(e.contains("the piece of `v` past `h` was cut away completely") && !e.contains("v>h"), "{e}");
+}
+
 #[test]
 fn end_cap_goes_on_a_pieces_line_end_and_not_its_cut_end() {
     // A plus: h (0, 0)…(400, 0), the longer, laid first and whole; v (200, −100)…(200, 100) cut at (200, 0). Its
@@ -3722,6 +3790,28 @@ fn a_mirrored_earlier_pieces_tool_is_placed_right() {
     later_frame(&mut s, 0.0, &[[[-450.0, 100.0], [-530.0, 220.0]]], 25.0, true);
     let r = 13f64.sqrt();
     assert_b_fitted_to(&mut s, &copy, [-530.0 - 37.5 / r, 100.0 + 35.0 / r], [-450.0 - 2.5 / r, 220.0 + 25.0 / r]);
+}
+
+#[test]
+fn a_copy_of_a_crossing_tube_is_not_taken_for_a_short_piece_inside_it() {
+    // A plus, v (200, −100)…(200, 25) drawn first, h (0, 0)…(400, 0): v's piece past h runs 0…25 along its line, so
+    // the points a quarter, half and three quarters along it (y 6.25, 12.5, 18.75) lie in h's wall too. h's mirrored
+    // copy is h's, not that piece's: B, square off it from (−100, 0), is fitted to its near face y = 20.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Plus"}));
+    run(&mut s, "sketch.line", json!({"points": [[200, -100], [200, 25]], "ids": ["v"]}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [400, 0]], "ids": ["h"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Plus", "profile": tube(), "corner": "auto", "names": {"h": "H", "v": "V"}}));
+    let a: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+    run(&mut s, "solid.mirror", json!({"bodies": a, "plane": "YZ"}));
+    let copy = bodies(&mut s)
+        .into_iter()
+        .find(|b| near3(b.2, [-400.0, -20.0, -20.0]) && near3(b.3, [0.0, 20.0, 20.0]))
+        .unwrap_or_else(|| panic!("no copy of H: {:?}", bodies(&mut s)))
+        .0;
+    later_frame(&mut s, 0.0, &[[[-100.0, 0.0], [-100.0, 200.0]]], 25.0, true);
+    assert_b_fitted_to(&mut s, &copy, [-112.5, 20.0], [-87.5, 200.0]);
 }
 
 #[test]

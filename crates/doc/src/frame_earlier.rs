@@ -141,7 +141,14 @@ pub fn earlier_tools(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature
             };
             let candidates: Vec<usize> = match known {
                 Some(k) => vec![*k],
-                None => (0..source.points.len()).collect(),
+                // Longest first: a short piece past a crossing (#4003 ruling C4) may have all three points inside the
+                // tube it crosses, whose copy is that tube's, not the piece's.
+                None => {
+                    let mut all: Vec<usize> = (0..source.points.len()).collect();
+                    let length = |k: &usize| source.segments.get(*k).map_or(0.0, |(_, a, b)| a.dist(*b));
+                    all.sort_by(|j, k| length(k).total_cmp(&length(j)));
+                    all
+                }
             };
             for k in candidates {
                 let Some(points) = source.points.get(k) else { continue };
