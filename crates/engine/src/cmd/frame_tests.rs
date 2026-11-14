@@ -3284,3 +3284,46 @@ fn a_corner_on_an_earlier_frames_corner_is_free() {
         }
     }
 }
+
+/// A Locost-sized design (about 60 tubes over four Frame Members, all Auto with fit_ends), timed through a full
+/// evaluation. Run on demand: `cargo test ... locost_sized_design_evaluates_in_time -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing check, run on demand"]
+fn locost_sized_design_evaluates_in_time() {
+    let mut s = Session::default();
+    let frame = |s: &mut Session, name: &str, plane: &str, offset: f64| {
+        let mut sk = json!({"plane": plane, "name": name});
+        if offset != 0.0 {
+            sk["offset"] = json!(offset);
+        }
+        run(s, "sketch.create", sk);
+        run(s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [1000, 600]}));
+        for x in [200, 400, 600, 800] {
+            run(s, "sketch.line", json!({"points": [[x, 0], [x, 600]]}));
+        }
+        run(s, "sketch.finish", json!({}));
+        run(
+            s,
+            "frame.member",
+            json!({"sketch": name, "profile": json!({"kind": "rect_tube", "width": 25, "height": 25, "wall": 2}), "corner": "auto", "fit_ends": true, "body_name": name}),
+        );
+    };
+    frame(&mut s, "Left", "XZ", 0.0);
+    frame(&mut s, "Right", "XZ", 400.0);
+    frame(&mut s, "Floor", "XY", 0.0);
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Braces", "offset": 25}));
+    let zigzag: Vec<Value> = (0..=36).map(|i| json!([i as f64 * 1000.0 / 36.0, if i % 2 == 0 { 0 } else { 400 }])).collect();
+    run(&mut s, "sketch.line", json!({"points": zigzag}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(
+        &mut s,
+        "frame.member",
+        json!({"sketch": "Braces", "profile": json!({"kind": "rect_tube", "width": 20, "height": 20, "wall": 2}), "corner": "auto", "fit_ends": true, "body_name": "Brace"}),
+    );
+    let json_doc = s.doc.to_json();
+    let start = std::time::Instant::now();
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&json_doc).unwrap());
+    let n = bodies(&mut reopened).len();
+    println!("LOCOST tubes={n} full evaluation={:.2?}", start.elapsed());
+    assert!(n >= 50, "{n}");
+}

@@ -31,13 +31,13 @@ the selected body (or the last body of the active component).
 
 ## The Frame Member dialog
 
-- **Lines**: pick the frame sketch's lines in the view (2D or 3D sketch lines). **All Lines**
+- **Path**: pick the frame sketch's lines in the view (2D or 3D sketch lines). **All Lines**
   makes a member on every line of that sketch instead, including lines drawn later.
 - **Section (optional)**: pick the section's region in another sketch (the ring between two
   circles makes a tube). With nothing picked, **Profile** chooses a built-in profile and its
   dimensions follow; optional ones left empty take their defaults.
 - **Corner Type**, **Flip** and **Corner Overrides** cut the members where two of them meet, as
-  under Corners below. A new Frame Member starts on None.
+  under Corners below. A new Frame Member starts on Auto (see Auto below); the command's own default stays None.
 - **Anchor**, **Angle** and **Mirror** place the section on each line, as below. **Name** names
   the members (default: after the profile).
 - The preview shows the members as you change the values. **Edit Feature** reopens the dialog with
@@ -48,8 +48,8 @@ the selected body (or the last body of the active component).
 ## Corners
 
 **Corner Type** (`corner`) cuts the members where two of them meet: `none` (the default, members
-overlap as before), `mitre`, `butt` or `coped_butt` (shown as **None**, **Mitre**, **Butt** and
-**Coped**).
+overlap as before), `mitre`, `butt`, `coped_butt` or `auto` (shown as **Auto**, **None**, **Mitre**,
+**Butt** and **Coped**). **Auto** is described in its own section below.
 
 A **corner** is a point where exactly two of the feature's members end, within 0.001 mm: sketch-line
 members and members between two points (`pairs`) alike. Where three or more members end, where a
@@ -80,8 +80,8 @@ feature's Corner Type leaves existing overrides alone; a new override starts as 
 A member cut away completely fails with "the member on line `id` was cut away completely", and one
 its corners cut into pieces with "the member on line `id` is cut into pieces by its corners".
 
-An **End Cap** goes on an uncut end, or on the through member's end of a Butt or Coped corner, which
-is cut square to its own line. It refuses every other end: a mitre, the butting member's end of a
+An **End Cap** goes on an uncut end, or on the through member's square cut end of a Butt or Coped
+corner at a 90° corner, which is cut square to its own line. It refuses every other end: a mitre, the butting member's end of a
 Butt (it lies against the through member), and the cope face of a Coped corner.
 
 In the dialog, a box drag in the view picks the frame sketch's straight lines (not construction,
@@ -107,6 +107,63 @@ finds corners among its lines alone. Set those through `corners` with the pair's
 keeps them, each listed by its type with a bin to remove it, and Remove Tube drops the overrides that
 name the tube it takes out. A box drag in the dialog doesn't pick 3D-sketch lines: click them one by
 one, or list them in `lines`.
+
+## Auto
+
+**Corner Type Auto** (`corner: "auto"`) works out every joint of the frame for you. It is first in the
+Corner Type list and a new dialog starts on it; the command's default stays `none`. Where stage 1's
+types meet only two members at a point, Auto also handles T-junctions and points where three or more
+members end.
+
+**Laying order.** Tubes are laid in this order, and each is fitted to the ones before it: outer
+tubes (the outline of the frame), longest first; then inner tubes that span the frame, squarest
+first; then other inner tubes; then bridges. Tubes within 1 mm of each other in length tie; the tie
+goes to the tube nearer the sketch's X axis, then to the drawing order. Member ids, body names and
+face names do not depend on the laying order.
+
+**Joint by angle.** At a corner of two tubes the angle is how far the short tube swings from in line,
+rounded to 0.01 degrees:
+
+| Swing from in line | Joint |
+|---|---|
+| 30° or less | angled butt |
+| over 30° and under 60° | mitre |
+| 60° to 120° | butt: the long tube runs through, the short tube is cut to fit |
+| over 120° | mitre |
+
+Between two different sections a mitre is replaced by a butt. A corner sharper than 5 degrees inside
+is refused as before. **Flip** swaps which tube is long and which is short.
+
+**Fits.** A tube that ends against the side of another (a T-junction), or one of three or more tubes
+ending at a point, is cut to fit the tube it meets, only near its end: flat on a box tube, with the
+radii squared, and a fishmouth on a round tube.
+
+**Lined-up sections.** Under Auto the sections of all tubes are lined up: up is the sketch's normal
+and the outer tubes run round the outline anticlockwise, so square and rectangular sections meet wall
+to wall in any plane. A tube drawn against that direction is reversed; its face names stay the same.
+Stage 1's section line-up limit (Corners, Known limits) applies only outside Auto.
+
+**Fit Ends to Earlier Frames** (`fit_ends`, ticked by default in the dialog, false when absent)
+fits the tubes' free ends to the tubes of Frame Members made earlier in the timeline, and to the
+Move, Mirror and Pattern copies of those. A corner that lies inside an earlier tube, or on two of
+them, is fitted rather than jointed, and braces ending at such a corner are fitted to each other. On a
+Mitre, Butt or Coped frame only free ends (ends at no corner) are fitted; None never fits. Earlier
+tubes are never changed.
+
+**Overrides.** Under Auto a `corners` entry may name any points where two or more tubes meet:
+`members` holds 2 to 1000 distinct ids. Auto is in the override type list only on an Auto frame; an
+Auto override on another frame builds as that frame's type, with the override's own Flip. Flip is hidden
+in the dialog while the type is Auto.
+
+```json
+{"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "rect_tube", "width": 25, "height": 25, "wall": 2}, "corner": "auto", "fit_ends": true}}
+```
+
+**Known limits of Auto.** Tubes that cross each other overlap (stage 3 will split them). A flat end
+meeting a round tube's seam in some layouts is refused by the kernel with an error. A member's face
+numbers can change when its line moves, because the kernel's face order follows placement; faces
+fitted against a reversed tube can be renamed if its direction flips. A brace landing at a very
+shallow angle can leave a small step.
 
 ## frame.member
 
