@@ -119,6 +119,11 @@ pub fn corner_error(p: Vec3, what: &str) -> DocError {
     DocError::Invalid(format!("Corner at ({}, {}, {}) is {what}", r(p.x), r(p.y), r(p.z)))
 }
 
+/// Member `m`'s end at `corner`: (m, at_start).
+pub fn end_at(corner: &Corner, m: usize) -> Result<(usize, bool)> {
+    corner.ends.iter().copied().find(|e| e.0 == m).ok_or_else(|| DocError::Invalid(format!("member {m} is not at the corner it is coped at")))
+}
+
 /// A member's unit direction away from the corner at its end `(member, at_start)`.
 pub fn away(segments: &[(String, Vec3, Vec3)], (m, at_start): (usize, bool)) -> Option<Vec3> {
     let (_, a, b) = segments.get(m)?;
@@ -126,8 +131,9 @@ pub fn away(segments: &[(String, Vec3, Vec3)], (m, at_start): (usize, bool)) -> 
 }
 
 /// Index into `corner.ends` (0 or 1) of the member that runs through, unflipped: the longer, then
-/// the one nearer the sketch's X axis, then the one drawn first.
-pub fn through(segments: &[(String, Vec3, Vec3)], corner: &Corner, sketch_x: Option<Vec3>) -> usize {
+/// the one nearer the sketch's X axis, then the one drawn first: `drawn[m]` is member m's place in
+/// the sketch's drawing order (a member missing from it ranks by its index), never the pick order.
+pub fn through(segments: &[(String, Vec3, Vec3)], corner: &Corner, sketch_x: Option<Vec3>, drawn: &[usize]) -> usize {
     let [e0, e1] = corner.ends;
     let pick = |first: bool| if first { 0 } else { 1 };
     let length = |m: usize| segments.get(m).map_or(0.0, |(_, a, b)| a.dist(*b));
@@ -142,7 +148,8 @@ pub fn through(segments: &[(String, Vec3, Vec3)], corner: &Corner, sketch_x: Opt
             return pick(c0 > c1);
         }
     }
-    pick(e0.0 <= e1.0)
+    let rank = |m: usize| drawn.get(m).copied().unwrap_or(m);
+    pick((rank(e0.0), e0.0) <= (rank(e1.0), e1.0))
 }
 
 /// The interior angle (radians) at a corner: π for in line.
@@ -196,6 +203,7 @@ pub fn corner_cuts(
     placed: &dyn Fn(usize, Vec3) -> Plane,
     regions: &[Region2],
     sketch_x: Option<Vec3>,
+    drawn: &[usize],
 ) -> Result<(Vec<(usize, bool, Cut)>, Option<(usize, usize)>)> {
     let angle = interior(segments, corner);
     if kind.is_none() || angle > PI - IN_LINE_DEG.to_radians() {
@@ -211,7 +219,7 @@ pub fn corner_cuts(
         let n = (dir(e0)? - dir(e1)?).normalized().ok_or_else(|| DocError::Invalid("a mitre corner has no bisector".into()))?;
         return Ok((vec![(e0.0, e0.1, Cut { origin: p, normal: n }), (e1.0, e1.1, Cut { origin: p, normal: -n })], None));
     }
-    let (te, ue) = if (through(segments, corner, sketch_x) == 0) != flip { (e0, e1) } else { (e1, e0) };
+    let (te, ue) = if (through(segments, corner, sketch_x, drawn) == 0) != flip { (e0, e1) } else { (e1, e0) };
     let (t, u) = (-dir(te)?, dir(ue)?);
     // d made square to `axis`: the normal of a side face of the member along axis.
     let across =

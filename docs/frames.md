@@ -76,11 +76,12 @@ feature's Corner Type leaves existing overrides alone; a new override starts as 
 A member cut away completely fails with "the member on line `id` was cut away completely", and one
 its corners cut into pieces with "the member on line `id` is cut into pieces by its corners".
 
-An **End Cap** sits on a square cut end: the through member of a 90 degree butt. It refuses other
-cut ends (mitres, copes, angled butts).
+An **End Cap** goes on an uncut end, or on the through member's end of a Butt or Coped Butt corner,
+which is cut square to its own line. It refuses every other end: a mitre, the butting member's end of
+a Butt (it lies against the through member), and the cope face of a Coped Butt corner.
 
-In the dialog, a box drag in the view picks the frame sketch's lines, and the corner points when
-Corner Overrides is active (Shift adds).
+In the dialog, a box drag in the view picks the frame sketch's straight lines (not construction,
+projected lines or arcs), and the corner points when Corner Overrides is active (Shift adds).
 
 ```json
 {"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "round_tube", "diameter": 40, "wall": 3}, "corner": "coped_butt"}}
@@ -92,7 +93,8 @@ members' sections come in turned or offset differently (lines in a vertical plan
 to head, or 3D sketches), a rectangular, off-centre, angle or channel section will not meet wall to
 wall at a mitre or butt: the cut planes are right, but no section is turned to match. Square and
 round tubes centred on their lines always meet. Corners of 3D-sketch lines cut (the tie falls to
-drawing order) but cannot be picked in the dialog; set them through `corners` in the command.
+drawing order) but cannot be picked in the dialog; set them through `corners` in the command. A box
+drag in the dialog doesn't pick 3D-sketch lines: click them one by one, or list them in `lines`.
 
 ## frame.member
 
@@ -136,7 +138,9 @@ vendor's aluminium extrusion for example, comes from a sketch: draw it or insert
 
 **End Cap** (WELDMENTS › CREATE, `frame.end_cap`) closes open ends of members with plates, one
 separate body per end, named after the member (`Post End Cap`). Pick the end faces in the view:
-each must be a flat end of a frame member, square to its line.
+each must be a flat open end of a frame member, square to its line: an uncut end, or the through
+member's end of a Butt or Coped Butt corner. The butting member's end and a cope face are refused
+("not an open end of the member"), as is a mitre ("not square to the member's line").
 
 - The plate covers the outside of the profile: on a closed section (a square or rectangular
   tube, a pipe, a bar) it is the profile's outer outline; on an open section (an angle, a

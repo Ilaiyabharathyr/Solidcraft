@@ -73,15 +73,15 @@ fn the_longer_member_runs_through() {
     let corner = |segs: &[(String, Vec3, Vec3)]| find_corners(segs).into_iter().next().unwrap();
     // The longer one, though the other lies along X.
     let longer = vec![seg("a", (0.0, 0.0), (400.0, 0.0)), seg("b", (0.0, 0.0), (0.0, 600.0))];
-    assert_eq!(through(&longer, &corner(&longer), Some(Vec3::X)), 1);
+    assert_eq!(through(&longer, &corner(&longer), Some(Vec3::X), &[]), 1);
     // Within 1 mm: the one nearer X.
     let tie = vec![seg("a", (0.0, 0.0), (0.0, 400.5)), seg("b", (0.0, 0.0), (400.0, 0.0))];
-    assert_eq!(through(&tie, &corner(&tie), Some(Vec3::X)), 1);
+    assert_eq!(through(&tie, &corner(&tie), Some(Vec3::X), &[]), 1);
     // Both at 45° to X and within 1 mm: the earlier.
     let diagonal = vec![seg("a", (0.0, 0.0), (300.0, 300.0)), seg("b", (0.0, 0.0), (-300.5, 300.5))];
-    assert_eq!(through(&diagonal, &corner(&diagonal), Some(Vec3::X)), 0);
+    assert_eq!(through(&diagonal, &corner(&diagonal), Some(Vec3::X), &[]), 0);
     // No sketch plane: the earlier.
-    assert_eq!(through(&tie, &corner(&tie), None), 0);
+    assert_eq!(through(&tie, &corner(&tie), None, &[]), 0);
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn mitre_cuts_on_the_bisector() {
     let segs = ell();
     let c = find_corners(&segs).into_iter().next().unwrap();
     let place = placer(&segs, Vec2::ZERO);
-    let (cuts, cope) = corner_cuts(CornerType::Mitre, false, &c, &segs, &place, &square(-20.0, 20.0), Some(Vec3::X)).unwrap();
+    let (cuts, cope) = corner_cuts(CornerType::Mitre, false, &c, &segs, &place, &square(-20.0, 20.0), Some(Vec3::X), &[]).unwrap();
     assert_eq!(cope, None);
     assert_eq!(cuts.len(), 2);
     let d = Vec3::new(FRAC_1_SQRT_2, -FRAC_1_SQRT_2, 0.0);
@@ -111,7 +111,7 @@ fn butt_through_member_is_flush_with_the_other_outer_face() {
     let regions = square(-20.0, 20.0);
     let cut_of = |cuts: &[(usize, bool, Cut)], m: usize| cuts.iter().find(|(k, _, _)| *k == m).map(|(_, _, cut)| *cut).unwrap();
 
-    let (cuts, cope) = corner_cuts(CornerType::Butt, false, &c, &segs, &place, &regions, Some(Vec3::X)).unwrap();
+    let (cuts, cope) = corner_cuts(CornerType::Butt, false, &c, &segs, &place, &regions, Some(Vec3::X), &[]).unwrap();
     assert_eq!((cuts.len(), cope), (2, None));
     // T is the 600 member: it keeps x ≥ −20, and U keeps y ≥ 20.
     let t = cut_of(&cuts, 0);
@@ -119,7 +119,7 @@ fn butt_through_member_is_flush_with_the_other_outer_face() {
     let u = cut_of(&cuts, 1);
     assert!(close(u.normal, Vec3::Y) && (u.origin.y - 20.0).abs() < 1e-9, "{u:?}");
 
-    let (cuts, _) = corner_cuts(CornerType::Butt, true, &c, &segs, &place, &regions, Some(Vec3::X)).unwrap();
+    let (cuts, _) = corner_cuts(CornerType::Butt, true, &c, &segs, &place, &regions, Some(Vec3::X), &[]).unwrap();
     // Flipped, T is the 400 member: it keeps y ≥ −20, and U keeps x ≥ 20.
     let t = cut_of(&cuts, 1);
     assert!(close(t.normal, Vec3::Y) && (t.origin.y + 20.0).abs() < 1e-9, "{t:?}");
@@ -127,7 +127,7 @@ fn butt_through_member_is_flush_with_the_other_outer_face() {
     assert!(close(u.normal, Vec3::X) && (u.origin.x - 20.0).abs() < 1e-9, "{u:?}");
 
     // Coped Butt: T's cut only, and the pair (T, U) to cope.
-    let (cuts, cope) = corner_cuts(CornerType::CopedButt, false, &c, &segs, &place, &regions, Some(Vec3::X)).unwrap();
+    let (cuts, cope) = corner_cuts(CornerType::CopedButt, false, &c, &segs, &place, &regions, Some(Vec3::X), &[]).unwrap();
     assert_eq!(cuts.len(), 1);
     assert_eq!(cuts[0].0, 0);
     assert_eq!(cope, Some((0, 1)));
@@ -139,22 +139,22 @@ fn none_in_line_and_too_sharp() {
     let c = find_corners(&place_ell).into_iter().next().unwrap();
     let place = placer(&place_ell, Vec2::ZERO);
     let regions = square(-20.0, 20.0);
-    assert_eq!(corner_cuts(CornerType::None, false, &c, &place_ell, &place, &regions, None).unwrap(), (vec![], None));
+    assert_eq!(corner_cuts(CornerType::None, false, &c, &place_ell, &place, &regions, None, &[]).unwrap(), (vec![], None));
 
     let straight = vec![seg("a", (0.0, 0.0), (100.0, 0.0)), seg("b", (100.0, 0.0), (200.0, 0.0))];
     let c = find_corners(&straight).into_iter().next().unwrap();
     assert!((interior(&straight, &c) - PI).abs() < 1e-12);
     let place = placer(&straight, Vec2::ZERO);
-    assert_eq!(corner_cuts(CornerType::Butt, false, &c, &straight, &place, &regions, None).unwrap(), (vec![], None));
+    assert_eq!(corner_cuts(CornerType::Butt, false, &c, &straight, &place, &regions, None, &[]).unwrap(), (vec![], None));
 
     let p = (12.5, -0.001);
     let (s, co) = (3f64.to_radians().sin(), 3f64.to_radians().cos());
     let sharp = vec![seg("a", p, (p.0 + 100.0, p.1)), seg("b", p, (p.0 + 100.0 * co, p.1 + 100.0 * s))];
     let c = find_corners(&sharp).into_iter().next().unwrap();
     let place = placer(&sharp, Vec2::ZERO);
-    let err = corner_cuts(CornerType::Mitre, false, &c, &sharp, &place, &regions, None).unwrap_err();
+    let err = corner_cuts(CornerType::Mitre, false, &c, &sharp, &place, &regions, None, &[]).unwrap_err();
     assert_eq!(err.to_string(), "Corner at (12.5, 0, 0) is too sharp to finish");
-    assert!(corner_cuts(CornerType::None, false, &c, &sharp, &place, &regions, None).is_ok());
+    assert!(corner_cuts(CornerType::None, false, &c, &sharp, &place, &regions, None, &[]).is_ok());
 }
 
 #[test]
@@ -179,7 +179,7 @@ fn extension_reaches_every_point_of_each_cut() {
     let built = |segs: &[(String, Vec3, Vec3)], kind| {
         let c = find_corners(segs).into_iter().next().unwrap();
         let place = placer(segs, Vec2::ZERO);
-        let (cuts, _) = corner_cuts(kind, false, &c, segs, &place, &regions, None).unwrap();
+        let (cuts, _) = corner_cuts(kind, false, &c, segs, &place, &regions, None, &[]).unwrap();
         cuts.iter()
             .map(|(m, s, cut)| extension(&place(*m, c.point), &regions, c.point, away(segs, (*m, *s)).unwrap(), cut).unwrap())
             .collect::<Vec<_>>()
@@ -194,4 +194,15 @@ fn extension_reaches_every_point_of_each_cut() {
     let e = built(&wide, CornerType::Butt);
     let t = 20.0 * (1.0 + 30f64.to_radians().cos()) / s + 1.0;
     assert!(e.len() == 2 && (e[0] - t).abs() < 1e-9 && (e[1] - 1.0).abs() < 1e-9, "{e:?} vs {t}");
+}
+
+#[test]
+fn a_member_not_at_a_corner_has_no_end_there() {
+    let segs = ell();
+    let c = find_corners(&segs).into_iter().next().unwrap();
+    for e in c.ends {
+        assert_eq!(end_at(&c, e.0).unwrap(), e);
+    }
+    let e = end_at(&c, 7).unwrap_err().to_string();
+    assert!(e.contains("not at the corner"), "{e}");
 }

@@ -8242,7 +8242,9 @@ fn box_select(app: &mut SolveApp, proj: &Proj, bx: BoxSel, add: bool) {
             let Some(ss) = st.sketch(sid) else { continue };
             if pick_curves {
                 for (i, c) in ss.sketch.curves.iter().enumerate() {
-                    if solidcraft_engine::view::sketch_curve_visible(&ss.sketch, i) && box_takes_curve(app, ss, i, proj, &bx, false) {
+                    // Frame Member's Lines take only the lines a member is laid on.
+                    let takes = !frame || solidcraft_engine::doc::frame::is_member_line(&ss.sketch, i);
+                    if takes && solidcraft_engine::view::sketch_curve_visible(&ss.sketch, i) && box_takes_curve(app, ss, i, proj, &bx, false) {
                         out.push(Sel::ExternalSketchCurve { sketch: sid, id: c.id.clone() });
                     }
                 }

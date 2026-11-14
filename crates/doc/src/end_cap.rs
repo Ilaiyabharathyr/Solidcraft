@@ -65,6 +65,8 @@ fn length(v: f64, what: &str, min: f64) -> Result<f64> {
 
 /// Most edges in an outline an end cap follows.
 const MAX_EDGES: usize = 4096;
+/// How far (mm) a picked end face may lie from the member's end as made.
+const END_TOL: f64 = 1e-3;
 
 /// Where a segment of the outline goes when it moves in: a line through a point along a unit
 /// direction, or a circle.
@@ -426,7 +428,7 @@ pub(crate) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
         let face = doc.resolve_face_anchor(anchor, f.component, st).map_err(|e| invalid(format!("the capped end face: {e}")))?;
         let body = st.body(&anchor.target.body).ok_or_else(|| invalid("the capped member's body no longer exists"))?;
         let source = doc.feature(end.member.feature.0).ok_or_else(|| invalid("the capped member's feature no longer exists"))?;
-        let (section, len, region) = crate::eval::frame_member::member_section(doc, vals, source, st, &end.member.line)?;
+        let (section, len, region, open) = crate::eval::frame_member::member_section(doc, vals, source, st, &end.member.line)?;
         let to_author = anchor.source_to_author(doc, f.component, body)?;
         let section = Plane::new(
             crate::apply_point(&to_author, section.origin),
@@ -438,6 +440,13 @@ pub(crate) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
         let facing = face.normal().dot(along);
         if facing.abs() < 1.0 - 1e-7 {
             return Err(invalid("the picked face is not an end of the member (it is not square to the member's line)"));
+        }
+        // Only at an open end: the face lies on the member's start or end as made, and that end
+        // is not butted against or coped to another member.
+        let at = (face.origin - section.origin).dot(along);
+        let [start, finish] = open;
+        if !((at.abs() < END_TOL && start) || ((at - len).abs() < END_TOL && finish)) {
+            return Err(invalid("the picked face is not an open end of the member (it is butted against or coped to another member)"));
         }
         let plane = Plane::new(section.origin + along * (face.origin - section.origin).dot(along), section.x, section.y)
             .ok_or_else(|| invalid("the end face's plane is degenerate"))?;

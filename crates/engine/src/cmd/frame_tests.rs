@@ -728,6 +728,45 @@ fn flip_runs_the_short_sides_through() {
 }
 
 #[test]
+fn which_member_runs_through_follows_drawing_order_not_pick_order() {
+    // A diamond: every side equally long and at 45° to X, so only drawing order can choose.
+    let build = |reverse: bool| {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "D"}));
+        run(&mut s, "sketch.line", json!({"points": [[0, -200], [200, 0], [0, 200], [-200, 0], [0, -200]]}));
+        run(&mut s, "sketch.finish", json!({}));
+        let mut lines: Vec<String> = sketch_lines(&s, "D").into_iter().map(|l| l.0).collect();
+        assert_eq!(lines.len(), 4);
+        if reverse {
+            lines.reverse();
+        }
+        let names: serde_json::Map<String, Value> = lines.iter().map(|l| (l.clone(), json!(l))).collect();
+        run(&mut s, "frame.member", json!({"sketch": "D", "profile": tube(), "corner": "butt", "lines": lines, "names": names}));
+        let faces: std::collections::BTreeMap<String, Vec<String>> = s
+            .model
+            .state()
+            .bodies
+            .iter()
+            .map(|b| {
+                let mut n = solidcraft_doc::naming::face_names(b).to_vec();
+                n.sort();
+                (b.name.clone(), n)
+            })
+            .collect();
+        let measured: std::collections::BTreeMap<String, (f64, [f64; 3], [f64; 3])> =
+            bodies(&mut s).into_iter().map(|b| (b.0, (b.1, b.2, b.3))).collect();
+        (measured, faces)
+    };
+    let ((drawn, drawn_faces), (picked, picked_faces)) = (build(false), build(true));
+    assert_eq!(drawn.keys().collect::<Vec<_>>(), picked.keys().collect::<Vec<_>>());
+    for (line, (v, lo, hi)) in &drawn {
+        let (pv, plo, phi) = picked[line];
+        assert!(rel(pv, *v) < 1e-9 && near3(plo, *lo) && near3(phi, *hi), "{line}: drawn {drawn:?} picked {picked:?}");
+    }
+    assert_eq!(drawn_faces, picked_faces);
+}
+
+#[test]
 fn a_coped_box_tube_keeps_slivers_in_the_through_member_radii() {
     let mut s = Session::default();
     rectangle_frame(&mut s);
@@ -750,8 +789,8 @@ fn a_coped_round_tube_is_fishmouthed() {
     assert!((bottom.2[0] + 20.0).abs() < 1e-6 && (bottom.3[0] - 620.0).abs() < 1e-6, "{r} {bottom:?}");
     // U's tips reach T's centreline at its sides.
     assert!(left.2[1].abs() < 1e-3 && (left.3[1] - 400.0).abs() < 1e-3, "{left:?}");
-    let area = PI * (20.0 * 20.0 - 17.0 * 17.0);
-    assert!(left.1 > area * 360.0 && left.1 < area * 400.0, "{left:?} vs {}..{}", area * 360.0, area * 400.0);
+    // A·360 + 2∫(20 − √(400 − z²)) dA over the annulus: each tip the depth T's outside leaves.
+    assert!(rel(left.1, 129_458.17) < MEASURED, "{left:?} vs 129458.17");
 }
 
 /// The line of sketch `name` that rises off y = 0.
@@ -1296,10 +1335,32 @@ fn an_inward_end_cap_measures_a_member_as_cut() {
     // The 600 member is built 640 long (20 past each end): 620 fits, though its line is 600.
     let start = face_pick(&s, &bottom.0, [-20.0, -18.5, 0.0], [-1.0, 0.0, 0.0]);
     run(&mut s, "frame.end_cap", json!({"faces": [start], "thickness": 620, "direction": "inward"}));
-    // The 400 member is cut to 360: 370 does not fit, though its line is 400.
-    let end = face_pick(&s, &left.0, [-18.5, 380.0, 0.0], [0.0, 1.0, 0.0]);
-    let e = s.execute("frame.end_cap", &json!({"faces": [end], "thickness": 370, "direction": "inward"})).unwrap_err().to_string();
+    run(&mut s, "edit.undo", json!({}));
+    // 640 does not fit.
+    let e = s.execute("frame.end_cap", &json!({"faces": [start], "thickness": 640, "direction": "inward"})).unwrap_err().to_string();
     assert!(e.contains("needs a longer member"), "{e}");
+    // The 400 member's end is butted against the bottom member: refused at the face, whatever
+    // the thickness.
+    let end = face_pick(&s, &left.0, [-18.5, 380.0, 0.0], [0.0, 1.0, 0.0]);
+    let e = s.execute("frame.end_cap", &json!({"faces": [end], "thickness": 6, "direction": "inward"})).unwrap_err().to_string();
+    assert!(e.contains("not an open end"), "{e}");
+}
+
+#[test]
+fn an_end_cap_on_a_butted_or_coped_end_is_refused() {
+    for (corner, at) in [("butt", 380.0), ("coped_butt", 20.0)] {
+        let mut s = Session::default();
+        rectangle_frame(&mut s);
+        run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": corner}));
+        let (_, left) = bottom_and_left(&mut s);
+        // U's butted end faces up at y = 380; its cope face, flat on T's near face, down at y = 20.
+        let normal = if at > 200.0 { [0.0, 1.0, 0.0] } else { [0.0, -1.0, 0.0] };
+        let face = face_pick(&s, &left.0, [-18.5, at, 0.0], normal);
+        for direction in ["outward", "inward"] {
+            let e = s.execute("frame.end_cap", &json!({"faces": [face], "thickness": 6, "direction": direction})).unwrap_err().to_string();
+            assert!(e.contains("not an open end"), "{corner} {direction}: {e}");
+        }
+    }
 }
 
 #[test]

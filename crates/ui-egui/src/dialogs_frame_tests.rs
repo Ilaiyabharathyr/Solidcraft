@@ -1338,12 +1338,23 @@ fn a_corner_is_picked_in_the_view() {
     assert!(picked.contains(&Sel::ExternalSketchPoint { sketch: frame, id: point_at(&h.app, 600.0, 400.0) }), "{picked:?} from {hits:?}");
 }
 
-/// A marquee over the frame sketch picks its lines into Lines, and its corners into Corner Overrides.
+/// A marquee over the frame sketch picks its straight lines into Lines (not a construction line or
+/// an arc drawn inside it), and its corners into Corner Overrides.
 #[test]
 fn a_box_over_the_frame_sketch_picks_its_lines() {
     let mut h = crate::scenario::Harness::new();
     h.app.home.open = false;
     for (id, p) in frame_commands() {
+        h.app.run(id, p).unwrap();
+    }
+    let mut want = frame_lines(&h.app);
+    want.sort();
+    for (id, p) in [
+        ("sketch.edit", json!({"sketch": "Frame"})),
+        ("sketch.line", json!({"points": [[100, 100], [500, 100]], "construction": true})),
+        ("sketch.arc.three_point", json!({"start": [100, 300], "through": [300, 350], "end": [500, 300]})),
+        ("sketch.finish", json!({})),
+    ] {
         h.app.run(id, p).unwrap();
     }
     h.app.set_origin_shown(false);
@@ -1365,8 +1376,6 @@ fn a_box_over_the_frame_sketch_picks_its_lines() {
         })
         .collect();
     lines.sort();
-    let mut want = frame_lines(&h.app);
-    want.sort();
     assert_eq!(lines, want, "{:?}", h.app.dialog.as_ref().unwrap().inputs[0].items);
     // With Corner Overrides active the same marquee takes the 4 corners.
     h.app.dialog.as_mut().unwrap().active = 2;
