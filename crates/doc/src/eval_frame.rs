@@ -45,7 +45,8 @@ pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
         let origin = p - x * at.x - y * at.y;
         Plane::new(origin, x, y).unwrap_or(Plane { origin, x, y })
     };
-    let mut cut = if is_auto(*corner, corners) {
+    // Only an Auto frame builds by Auto's rules; an Auto override elsewhere is the frame's own type (corner_ends).
+    let mut cut = if *corner == CornerType::Auto {
         auto_members(&segments, &regions, &placed, &planes, corners, (sketch_x, &drawn))?
     } else if corner.is_none() && corners.is_empty() {
         // A frame with no corners to finish is built exactly as it always was.
@@ -129,7 +130,7 @@ fn corner_ends(
         .collect();
     let mut finishes = vec![finish; corners.len()];
     for o in overrides {
-        // Two members: the corner they meet at. Three or more are Auto's alone (`is_auto` frames never come here).
+        // Two members: the corner they meet at. Three or more are an Auto frame's alone (which never comes here).
         let [a, b] = o.members.as_slice() else {
             if o.members.len() < 2 {
                 return Err(DocError::Invalid("A corner override names at least two members".into()));
@@ -138,7 +139,8 @@ fn corner_ends(
         };
         let k = at.get(&pair(a, b)).ok_or_else(|| DocError::Invalid("A corner override is not at a corner of the frame".into()))?;
         if let Some(f) = finishes.get_mut(*k) {
-            *f = (o.corner, o.flip);
+            // An Auto override on a frame that isn't Auto is the frame's own type, with its own Flip.
+            *f = (if o.corner == CornerType::Auto { finish.0 } else { o.corner }, o.flip);
         }
     }
     // Each member's cut ends, and each Coped Butt's (T, U): U loses T's filled shape once every plane cut is made.
@@ -276,11 +278,6 @@ fn cut_members(
     Ok(out)
 }
 
-/// Whether a frame is built by Auto's rules (#4003 stage 2): its corner type is Auto, or one of its overrides is.
-fn is_auto(corner: CornerType, overrides: &[CornerOverride]) -> bool {
-    corner == CornerType::Auto || overrides.iter().any(|o| o.corner == CornerType::Auto)
-}
-
 /// Auto's ends (#4003 spec A4-A6), as [`corner_ends`] gives stage 1's, and the ends cut to fit, in laying order:
 /// [`frame_layout::plan`]'s corners jointed by the table (an angled butt, a mitre, or a butt whose short tube is
 /// fitted to the long one) or by their override; its chained corners as stage 1 finishes them; its fits. A fitted
@@ -307,7 +304,8 @@ fn auto_ends(
     for ac in &plan.corners {
         let c = Corner { point: ac.point, ends: [ac.long, ac.short] };
         let inside = frame_corners::interior(segments, &c);
-        // In line (the table's angled butt at 0°): both left square, whatever the joint.
+        // In line (the table's angled butt at 0°): both left square, whatever the joint. A Free corner is not
+        // jointed here either.
         if inside > PI - frame_corners::IN_LINE_DEG.to_radians() || (ac.kind, ac.joint) == (CornerType::Auto, Joint::Free) {
             continue;
         }
@@ -543,7 +541,7 @@ pub(crate) fn member_section(
     };
     // Each end where the member is cut, when the cut is square to its line (a mitre is not: End
     // Cap refuses it from the face itself).
-    let ends = if is_auto(*corner, corners) {
+    let ends = if *corner == CornerType::Auto {
         auto_ends(&segments, &regions, &placed, &planes, corners, (sketch_x, &drawn))?.0.0
     } else if corner.is_none() && corners.is_empty() {
         Vec::new()

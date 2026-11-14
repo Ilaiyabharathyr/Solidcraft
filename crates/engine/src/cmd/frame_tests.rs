@@ -2645,9 +2645,15 @@ fn a_non_auto_frame_is_unchanged() {
     let mut s = Session::default();
     rectangle_frame(&mut s);
     run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre"}));
-    let (got, faces) = built(&mut s);
-    // As `frame-corner-cuts` builds it (recorded there): each member runs out to the rectangle's outer corners, 20
-    // past its line's ends, and keeps A × its line: A·600 = 252493.80, A·400 = 168329.20.
+    assert_stage_one_mitre_rectangle(&mut s);
+}
+
+/// Stage 1's Mitre rectangle, exactly. Recorded on `frame-auto-joints` at 4afc6a0c2, before Auto was built: there the
+/// non-Auto path was `frame-corner-cuts`' (3681bf74a) unchanged (`git diff 3681bf74a 4afc6a0c2` changes only override
+/// parsing for 3+ members). Each member runs out to the rectangle's outer corners, 20 past its line's ends, and keeps
+/// A × its line: A·600 = 252493.80, A·400 = 168329.20.
+fn assert_stage_one_mitre_rectangle(s: &mut Session) {
+    let (got, faces) = built(s);
     let want = [
         ("Rect Tube 40x40x3", 252_493.801_996_584_55, [-20.0, -20.0, -20.0], [620.0, 20.0, 20.0]),
         ("Rect Tube 40x40x3 (2)", 168_329.201_030_185_65, [580.0, -20.0, -20.0], [620.0, 420.0, 20.0]),
@@ -2664,4 +2670,69 @@ fn a_non_auto_frame_is_unchanged() {
         assert!(rel(gv, v) < 1e-12 && near3(glo, lo) && near3(ghi, hi), "{name}: {:?}", got[name]);
         assert_eq!(faces[name], names, "{name}");
     }
+}
+
+#[test]
+fn an_auto_override_on_a_mitre_frame_builds_as_mitre() {
+    // Only an Auto frame builds by Auto's rules: on a Mitre frame an Auto override is the frame's own Mitre.
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let (bottom, left) = (line_at_y(&s, "Frame", 0.0), line_at_x(&s, "Frame", 0.0));
+    run(
+        &mut s,
+        "frame.member",
+        json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "corners": [{"members": [bottom, left], "corner": "auto"}]}),
+    );
+    assert_stage_one_mitre_rectangle(&mut s);
+}
+
+#[test]
+fn an_auto_override_on_a_butt_frame_keeps_its_flip() {
+    // On a Butt frame, an Auto override with Flip at the origin is a flipped Butt there, built as stage 1 builds a
+    // Butt override with Flip.
+    let build = |kind: &str| {
+        let mut s = Session::default();
+        rectangle_frame(&mut s);
+        let (bottom, left) = (line_at_y(&s, "Frame", 0.0), line_at_x(&s, "Frame", 0.0));
+        run(
+            &mut s,
+            "frame.member",
+            json!({"sketch": "Frame", "profile": tube(), "corner": "butt",
+                   "corners": [{"members": [bottom, left], "corner": kind, "flip": true}]}),
+        );
+        let (b, l) = bottom_and_left(&mut s);
+        (b, l, built(&mut s))
+    };
+    let (bottom, left, auto) = build("auto");
+    // Flipped at the origin: the left runs through to the bottom's outer face (y = −20), the bottom stops on the
+    // left's near face (x = 20). The other corners are the frame's unflipped Butt: the bottom runs out to x = 620,
+    // the left stops on the top's near face, y = 380.
+    assert!((left.2[1] + 20.0).abs() < 1e-6 && (left.3[1] - 380.0).abs() < 1e-6, "{left:?}");
+    assert!((bottom.2[0] - 20.0).abs() < 1e-6 && (bottom.3[0] - 620.0).abs() < 1e-6, "{bottom:?}");
+    // And exactly as stage 1's Butt override with Flip: volumes, boxes and face names.
+    let (_, _, butt) = build("butt");
+    assert_eq!(auto.1, butt.1);
+    for (name, (v, lo, hi)) in &butt.0 {
+        let (av, alo, ahi) = auto.0[name];
+        assert!(rel(av, *v) < 1e-12 && near3(alo, *lo) && near3(ahi, *hi), "{name}: auto {:?} butt {:?}", auto.0, butt.0);
+    }
+}
+
+#[test]
+fn a_three_tube_override_on_a_mitre_frame_still_fails() {
+    // A hand-edited design: a Mitre frame whose two-member Auto override is made three members. An Auto override
+    // doesn't make the frame Auto, so it is not at a corner of the frame (three tubes never meet at one).
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let l = sketch_lines(&s, "Frame");
+    let (a, b, c) = (&l[0].0, &l[1].0, &l[2].0);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "corners": [{"members": [a, b], "corner": "auto"}]}));
+    let member = s.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().id;
+    let json = serde_json::from_str::<Value>(&s.doc.to_json()).unwrap().to_string();
+    let from = format!("\"members\":[\"{a}\",\"{b}\"]");
+    assert!(json.contains(&from), "{json}");
+    let edited = json.replace(&from, &format!("\"members\":[\"{a}\",\"{b}\",\"{c}\"]"));
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&edited).unwrap());
+    let e = reopened.model.result(member).and_then(|r| r.error.clone()).unwrap_or_default();
+    assert!(e.contains("A corner override is not at a corner of the frame"), "{e}");
 }
