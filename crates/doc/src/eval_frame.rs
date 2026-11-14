@@ -335,7 +335,8 @@ pub fn member_segments(doc: &Document, st: &ModelState, f: &Feature) -> Result<V
 }
 
 /// The member of feature `f` on line `line`, as its body was made: the plane square to the line
-/// at its start (x × y along the line), its length, and its profile in that plane.
+/// at its start as cut (x × y along the line; a square corner cut moves the start to the cut), its
+/// length as cut, and its profile in that plane.
 pub(crate) fn member_section(
     doc: &Document,
     vals: &BTreeMap<String, Value>,

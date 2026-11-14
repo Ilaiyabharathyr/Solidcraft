@@ -1288,6 +1288,21 @@ fn an_end_cap_goes_on_a_butted_through_end() {
 }
 
 #[test]
+fn an_inward_end_cap_measures_a_member_as_cut() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": "butt"}));
+    let (bottom, left) = bottom_and_left(&mut s);
+    // The 600 member is built 640 long (20 past each end): 620 fits, though its line is 600.
+    let start = face_pick(&s, &bottom.0, [-20.0, -18.5, 0.0], [-1.0, 0.0, 0.0]);
+    run(&mut s, "frame.end_cap", json!({"faces": [start], "thickness": 620, "direction": "inward"}));
+    // The 400 member is cut to 360: 370 does not fit, though its line is 400.
+    let end = face_pick(&s, &left.0, [-18.5, 380.0, 0.0], [0.0, 1.0, 0.0]);
+    let e = s.execute("frame.end_cap", &json!({"faces": [end], "thickness": 370, "direction": "inward"})).unwrap_err().to_string();
+    assert!(e.contains("needs a longer member"), "{e}");
+}
+
+#[test]
 fn an_end_cap_on_a_mitred_end_is_refused() {
     let mut s = Session::default();
     rectangle_frame(&mut s);
