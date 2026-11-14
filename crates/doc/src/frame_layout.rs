@@ -18,6 +18,7 @@ pub type MemberPlane = Option<(Vec3, Vec3)>;
 /// One member's place in the laying order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rank {
+    /// A line (an index into `segments`) from [`ranks`]; a piece (into [`Plan::pieces`]) in [`Plan::ranks`].
     pub member: usize,
     /// Its group's place in the laying order; the members in no group plane share the one after the last.
     pub group: usize,
@@ -463,8 +464,26 @@ pub struct ChainCorner {
     pub overridden: bool,
 }
 
+/// A stretch of one line between two of its cuts (or its ends): a member of its own (stage 3).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Piece {
+    /// Its line: an index into `segments`.
+    pub parent: usize,
+    /// Its span along the line as drawn: 0 at the line's start, 1 at its end.
+    pub from: f64,
+    pub to: f64,
+    /// `L`, its line's id, for the piece from the line's start; `L>X` for a later one, X the id of the line that
+    /// stays whole at the piece's start cut.
+    pub id: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
+    /// Every member is a piece: a line with no cut is one piece, from 0 to 1, with the line's id. Every member index
+    /// in the plan (ranks, corners, fits, chained) indexes these.
+    pub pieces: Vec<Piece>,
+    /// The points where a line was cut in two.
+    pub crossings: Vec<Vec3>,
     pub ranks: Vec<Rank>,
     pub corners: Vec<AutoCorner>,
     /// In laying order.
@@ -487,15 +506,23 @@ pub fn table(angle_deg: f64) -> Joint {
     }
 }
 
-/// An end at a point: (laying place, member, at_start).
+/// An end at a point: (laying place, piece, at_start). A line's pieces share its place.
 type End = (usize, usize, bool);
 
-/// What happens at each point where members meet, wherever their planes (spec A4). With a group tube passing
-/// through, each group end there fits it and the earlier ends; else the two earliest group ends make a corner and
-/// later ones fit; one end alone is left. Members in no group plane come after: the two earliest of theirs at a
-/// point chain (mitred, or as their override says), and any other fits every tube already there. Crossing tubes are left whole (stage 3 splits them).
-/// An override matches the point whose ending members are exactly its `members` (decision 3); one that matches no
-/// corner fails.
+/// What happens at each point where members meet, wherever their planes (spec A4).
+///
+/// Crossings come first, decided on the whole lines: where two or more of one group's lines pass through a point,
+/// the earliest stays whole (the second-earliest when a crossing override with Flip matches) and every other is cut
+/// there. Each line is then one or more [`Piece`]s, the members of everything after; a piece takes its line's place
+/// in the laying order and counts as long or short by its line's length.
+///
+/// Then at each point: with a group tube passing through, each group end there fits it and the ends laid earlier
+/// (never a sibling piece); else the two earliest group ends make a corner and later ones fit; one end alone is left.
+/// Members in no group plane come after: where no group tube passes through and no group end is, the two earliest of
+/// theirs chain (mitred, or as their override says); any other end fits every tube already there (ruling A17).
+///
+/// An override matches the point whose ending lines, or whose crossing lines, are exactly its `members` (line ids,
+/// never piece ids; decision 3); one that matches nothing fails. `same_section` takes two line indices.
 pub fn plan(
     segments: &[(String, Vec3, Vec3)],
     planes: &[MemberPlane],
@@ -503,46 +530,134 @@ pub fn plan(
     same_section: &dyn Fn(usize, usize) -> bool,
     overrides: &[CornerOverride],
 ) -> Result<Plan> {
-    let (ranks, xs) = laying(segments, planes, drawn);
+    let (laid, xs) = laying(segments, planes, drawn);
     let mut place = vec![usize::MAX; segments.len()];
-    for (i, r) in ranks.iter().enumerate() {
+    for (i, r) in laid.iter().enumerate() {
         if let Some(p) = place.get_mut(r.member) {
             *p = i;
         }
     }
     let pos = |m: usize| place.get(m).copied().unwrap_or(usize::MAX);
-    let grouped = |m: usize| ranks.get(pos(m)).is_some_and(|r| r.group < xs.len());
+    let grouped = |m: usize| laid.get(pos(m)).is_some_and(|r| r.group < xs.len());
     let length = |m: usize| segments.get(m).map_or(0.0, |(_, a, b)| a.dist(*b));
+    let id = |m: usize| segments.get(m).map_or("", |s| s.0.as_str());
     // Every member's line, met in laying order, so the points never depend on the pick order.
-    let valid: Vec<usize> = ranks
+    let valid: Vec<usize> = laid
         .iter()
         .map(|r| r.member)
         .filter(|&m| segments.get(m).is_some_and(|(_, a, b)| a.is_finite() && b.is_finite() && length(m).is_finite() && length(m) > 2.0 * CORNER_TOL))
         .collect();
     let mut points = Points::default();
     let lines = graph(segments, &valid, &mut points);
-    // node → the ends there, and the members passing through it.
-    let mut ends: BTreeMap<usize, Vec<End>> = BTreeMap::new();
-    let mut through: HashMap<usize, Vec<usize>> = HashMap::new();
-    for l in &lines {
-        let (Some(&first), Some(&last)) = (l.nodes.first(), l.nodes.last()) else { continue };
-        if first == last {
-            continue;
+    let wanted: Vec<BTreeSet<&str>> = overrides.iter().map(|o| o.members.iter().map(String::as_str).collect()).collect();
+    let mut used = vec![false; overrides.len()];
+    let mut matched = |ids: &BTreeSet<&str>| {
+        let o = wanted.iter().position(|w| w == ids)?;
+        if let Some(u) = used.get_mut(o) {
+            *u = true;
         }
-        ends.entry(first).or_default().push((pos(l.member), l.member, true));
-        ends.entry(last).or_default().push((pos(l.member), l.member, false));
+        overrides.get(o)
+    };
+
+    // Crossings (A4, A6): each line's cuts, as node → the line staying whole there.
+    let mut through: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for l in &lines {
         for &n in l.nodes.get(1..l.nodes.len().saturating_sub(1)).unwrap_or_default() {
             through.entry(n).or_default().push(l.member);
         }
     }
-    let wanted: Vec<BTreeSet<&str>> = overrides.iter().map(|o| o.members.iter().map(String::as_str).collect()).collect();
-    let mut used = vec![false; overrides.len()];
+    let mut cuts: Vec<HashMap<usize, usize>> = vec![HashMap::new(); segments.len()];
+    let mut crossings = Vec::new();
+    for (&n, ms) in &through {
+        // Only a group's own lines are cut, and only by each other.
+        let mut sets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for &m in ms {
+            if let Some(r) = laid.get(pos(m)).filter(|r| r.group < xs.len()) {
+                sets.entry(r.group).or_default().push(m);
+            }
+        }
+        let mut cut = false;
+        for mut set in sets.into_values() {
+            set.sort_by_key(|&m| pos(m));
+            set.dedup();
+            if set.len() < 2 {
+                continue;
+            }
+            let flip = matched(&set.iter().map(|&m| id(m)).collect()).is_some_and(|o| o.flip);
+            let Some(&whole) = set.get(usize::from(flip)) else { continue };
+            for &m in set.iter().filter(|&&m| m != whole) {
+                if let Some(c) = cuts.get_mut(m) {
+                    c.insert(n, whole);
+                    cut = true;
+                }
+            }
+        }
+        if cut && let Some(&p) = points.at.get(n) {
+            crossings.push(p);
+        }
+    }
+
+    // Each line's pieces from its drawn start; node → the ends there, and the pieces passing through it.
+    let mut line_of = vec![None; segments.len()];
+    for (k, l) in lines.iter().enumerate() {
+        if let Some(s) = line_of.get_mut(l.member) {
+            *s = Some(k);
+        }
+    }
+    let mut pieces = Vec::with_capacity(segments.len());
+    let mut spans = Vec::with_capacity(segments.len());
+    let mut ends: BTreeMap<usize, Vec<End>> = BTreeMap::new();
+    let mut whole_at: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (m, (line_id, a, b)) in segments.iter().enumerate() {
+        let start = pieces.len();
+        let Some(l) = line_of.get(m).copied().flatten().and_then(|k| lines.get(k)) else {
+            pieces.push(Piece { parent: m, from: 0.0, to: 1.0, id: line_id.clone() });
+            spans.push(start..pieces.len());
+            continue;
+        };
+        let cut = cuts.get(m);
+        let last = l.nodes.len().saturating_sub(1);
+        let mut bounds = vec![0];
+        bounds.extend((1..last).filter(|&i| l.nodes.get(i).is_some_and(|n| cut.is_some_and(|c| c.contains_key(n)))));
+        bounds.push(last);
+        // How far along the line node n lies, 0 at its start and 1 at its end.
+        let d = *b - *a;
+        let along = |n: usize| {
+            let t = points.at.get(n).map_or(0.0, |p| (*p - *a).dot(d) / d.dot(d));
+            if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 }
+        };
+        for w in bounds.windows(2) {
+            let (Some(&i), Some(&j)) = (w.first(), w.get(1)) else { continue };
+            let (Some(&na), Some(&nb)) = (l.nodes.get(i), l.nodes.get(j)) else { continue };
+            let k = pieces.len();
+            let piece_id = match cut.and_then(|c| c.get(&na)) {
+                Some(&x) if i > 0 => format!("{line_id}>{}", id(x)),
+                _ => line_id.clone(),
+            };
+            let (from, to) = (if i == 0 { 0.0 } else { along(na) }, if j == last { 1.0 } else { along(nb) });
+            pieces.push(Piece { parent: m, from, to, id: piece_id });
+            if na != nb {
+                ends.entry(na).or_default().push((pos(m), k, true));
+                ends.entry(nb).or_default().push((pos(m), k, false));
+                for &n in l.nodes.get(i + 1..j).unwrap_or_default() {
+                    whole_at.entry(n).or_default().push(k);
+                }
+            }
+        }
+        spans.push(start..pieces.len());
+    }
+    let ranks: Vec<Rank> =
+        laid.iter().flat_map(|r| spans.get(r.member).cloned().unwrap_or_default().map(move |k| Rank { member: k, ..*r })).collect();
+
+    // The ends at each point, of pieces k.
+    let parent = |k: usize| pieces.get(k).map_or(usize::MAX, |p| p.parent);
+    let at = |k: usize| pos(parent(k));
     let key = |m: usize| (drawn.get(m).copied().unwrap_or(m), m);
     let (mut corners, mut fits, mut chained) = (Vec::new(), Vec::new(), Vec::new());
-    // End e fits against these members (not itself), in laying order; against nothing it is left alone.
+    // End e fits against these pieces (not itself), in laying order; against nothing it is left alone.
     let fit = |e: &End, against: Vec<usize>, fits: &mut Vec<Fit>| {
-        let mut against: Vec<usize> = against.into_iter().filter(|&m| m != e.1).collect();
-        against.sort_by_key(|&m| pos(m));
+        let mut against: Vec<usize> = against.into_iter().filter(|&k| k != e.1).collect();
+        against.sort_by_key(|&k| at(k));
         against.dedup();
         if !against.is_empty() {
             fits.push(Fit { member: e.1, at_start: e.2, against });
@@ -550,36 +665,31 @@ pub fn plan(
     };
     for (n, mut here) in ends {
         here.sort_unstable();
-        let whole = through.remove(&n).unwrap_or_default();
-        let ids: BTreeSet<&str> = here.iter().filter_map(|e| segments.get(e.1)).map(|s| s.0.as_str()).collect();
-        let mut matched = || {
-            let o = wanted.iter().position(|w| *w == ids)?;
-            if let Some(u) = used.get_mut(o) {
-                *u = true;
-            }
-            overrides.get(o)
-        };
-        let (group, rest): (Vec<End>, Vec<End>) = here.iter().partition(|e| grouped(e.1));
-        let group_whole: Vec<usize> = whole.iter().copied().filter(|&m| grouped(m)).collect();
+        let whole = whole_at.remove(&n).unwrap_or_default();
+        let ids: BTreeSet<&str> = here.iter().map(|e| id(parent(e.1))).collect();
+        let (group, rest): (Vec<End>, Vec<End>) = here.iter().partition(|e| grouped(parent(e.1)));
+        let group_whole: Vec<usize> = whole.iter().copied().filter(|&k| grouped(parent(k))).collect();
         let mut done = 0;
         if let ([a, b, ..], true) = (group.as_slice(), group_whole.is_empty()) {
             done = 2;
             // Ties as A3: nearer the earlier one's group's sketch X axis, to 0.01°, then drawn first.
-            let x = ranks.get(a.0).and_then(|r| xs.get(r.group)).copied().unwrap_or(Vec3::X);
-            let tie = |m: usize| {
+            let x = laid.get(a.0).and_then(|r| xs.get(r.group)).copied().unwrap_or(Vec3::X);
+            let tie = |k: usize| {
+                let m = parent(k);
                 let off = segments.get(m).and_then(|(_, p, q)| (*q - *p).normalized()).map(|d| d.dot(x).abs().min(1.0).acos().to_degrees());
                 ((off.unwrap_or(90.0) * 100.0).round() as i64, key(m))
             };
-            let a_long = longest_first(vec![a.1, b.1], length, tie).first() == Some(&a.1);
-            let o = matched();
+            let a_long = longest_first(vec![a.1, b.1], |k| length(parent(k)), tie).first() == Some(&a.1);
+            let o = matched(&ids);
             let swap = o.is_some_and(|o| o.flip && o.corner.flips());
             let (long, short) = if a_long != swap { ((a.1, a.2), (b.1, b.2)) } else { ((b.1, b.2), (a.1, a.2)) };
-            let angle_deg = match (away(segments, long), away(segments, short)) {
+            // A piece runs the way its line does.
+            let angle_deg = match (away(segments, (parent(long.0), long.1)), away(segments, (parent(short.0), short.1))) {
                 (Some(l), Some(s)) => (-l).dot(s).clamp(-1.0, 1.0).acos().to_degrees(),
                 _ => 0.0,
             };
             let joint = match table(angle_deg) {
-                Joint::Mitre if !same_section(long.0, short.0) => Joint::Butt,
+                Joint::Mitre if !same_section(parent(long.0), parent(short.0)) => Joint::Butt,
                 j => j,
             };
             let point = points.at.get(n).copied().unwrap_or(Vec3::ZERO);
@@ -588,14 +698,16 @@ pub fn plan(
         } else if group_whole.is_empty() {
             done = group.len(); // one end alone
         }
-        for (i, e) in group.iter().enumerate().skip(done) {
-            fit(e, group_whole.iter().copied().chain(group.iter().take(i).map(|e| e.1)).collect(), &mut fits);
+        // Against the ends laid earlier: a sibling piece shares its line's place, so is never one.
+        for e in group.iter().skip(done) {
+            fit(e, group_whole.iter().copied().chain(group.iter().filter(|o| o.0 < e.0).map(|o| o.1)).collect(), &mut fits);
         }
         let mut done = 0;
-        if let [a, b, ..] = rest.as_slice() {
+        // A17: where a group tube passes through or group ends meet, the others are fitted, never chained.
+        if let ([a, b, ..], true) = (rest.as_slice(), group_whole.is_empty() && group.is_empty()) {
             done = 2;
             // An Auto override at a chain's corner is its own joint, a mitre.
-            let o = matched();
+            let o = matched(&ids);
             let (kind, flip) = o.map_or((CornerType::Mitre, false), |o| (o.corner, o.flip));
             let kind = if kind == CornerType::Auto { CornerType::Mitre } else { kind };
             chained.push(ChainCorner { a: (a.1, a.2), b: (b.1, b.2), kind, flip, overridden: o.is_some() });
@@ -608,8 +720,8 @@ pub fn plan(
     if used.contains(&false) {
         return Err(DocError::Invalid("A corner override is not at a corner of the frame".into()));
     }
-    fits.sort_by_key(|f| pos(f.member));
-    Ok(Plan { ranks, corners, fits, chained })
+    fits.sort_by_key(|f| (at(f.member), f.member));
+    Ok(Plan { pieces, crossings, ranks, corners, fits, chained })
 }
 
 #[cfg(test)]

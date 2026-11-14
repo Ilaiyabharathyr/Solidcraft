@@ -324,10 +324,11 @@ fn an_override_whose_tubes_changed_fails() {
 }
 
 #[test]
-fn crossing_tubes_make_nothing() {
+fn crossing_tubes_make_no_corner_and_the_later_is_cut() {
     let segs = vec![seg("a", (0.0, 0.0), (400.0, 400.0)), seg("b", (0.0, 400.0), (400.0, 0.0))];
     let p = planned(&segs, &[]).unwrap();
-    assert!(p.corners.is_empty() && p.fits.is_empty() && p.chained.is_empty(), "{p:?}");
+    assert!(p.corners.is_empty() && p.chained.is_empty(), "{p:?}");
+    assert_eq!(p.fits, [Fit { member: 1, at_start: false, against: vec![0] }, Fit { member: 2, at_start: true, against: vec![0] }]);
 }
 
 #[test]
@@ -389,4 +390,195 @@ fn groups_sharing_a_point_fit_the_later_group() {
     assert_eq!((origin[0].long, origin[0].short), ((4, true), (7, false)), "the earlier group's r1 and r4");
     assert_eq!(out.corners.len(), 7);
     assert_eq!(out.fits, [Fit { member: 0, at_start: true, against: vec![4, 7] }, Fit { member: 3, at_start: false, against: vec![4, 7, 0] }]);
+}
+
+// --- Crossings (spec A4/A6, stage 3) and A17 ---
+
+/// The 600×400 rectangle with both diagonals: d1 from the origin, d2 from (600, 0).
+fn x_brace() -> Vec<(String, Vec3, Vec3)> {
+    let mut s = rectangle();
+    s.push(seg("d1", (0.0, 0.0), (600.0, 400.0)));
+    s.push(seg("d2", (600.0, 0.0), (0.0, 400.0)));
+    s
+}
+
+fn piece_ids(p: &Plan) -> Vec<&str> {
+    p.pieces.iter().map(|q| q.id.as_str()).collect()
+}
+
+/// The piece index named id.
+fn piece(p: &Plan, id: &str) -> usize {
+    p.pieces.iter().position(|q| q.id == id).unwrap()
+}
+
+#[test]
+fn an_x_brace_cuts_the_later_diagonal() {
+    let segs = x_brace();
+    let p = planned(&segs, &[]).unwrap();
+    assert_eq!(piece_ids(&p), ["bottom", "right", "top", "left", "d1", "d2", "d2>d1"]);
+    let (d1, d2, d2b) = (piece(&p, "d1"), piece(&p, "d2"), piece(&p, "d2>d1"));
+    assert_eq!(p.pieces[d1], Piece { parent: 4, from: 0.0, to: 1.0, id: "d1".into() });
+    assert_eq!((p.pieces[d2].parent, p.pieces[d2].from), (5, 0.0));
+    assert!((p.pieces[d2].to - 0.5).abs() < 1e-9 && (p.pieces[d2b].from - 0.5).abs() < 1e-9, "{:?}", p.pieces);
+    assert_eq!((p.pieces[d2b].parent, p.pieces[d2b].to), (5, 1.0));
+    assert_eq!(p.crossings.len(), 1);
+    assert!(p.crossings[0].dist(Vec3::new(300.0, 200.0, 0.0)) < 1e-9, "{:?}", p.crossings);
+    // Each crossing end fits the whole diagonal, and only it: never its sibling.
+    assert!(p.fits.contains(&Fit { member: d2, at_start: false, against: vec![d1] }), "{:?}", p.fits);
+    assert!(p.fits.contains(&Fit { member: d2b, at_start: true, against: vec![d1] }), "{:?}", p.fits);
+    assert!(!p.fits.iter().any(|f| (f.member == d2 && f.against.contains(&d2b)) || (f.member == d2b && f.against.contains(&d2))), "{:?}", p.fits);
+    // The pieces take their line's place in the laying order, in order along it.
+    let order: Vec<&str> = p.ranks.iter().map(|r| p.pieces[r.member].id.as_str()).collect();
+    assert_eq!(order, ["bottom", "top", "right", "left", "d1", "d2", "d2>d1"]);
+    assert!(p.corners.iter().all(|c| c.point.dist(Vec3::new(300.0, 200.0, 0.0)) > 1.0), "no corner at the crossing");
+}
+
+#[test]
+fn a_crossing_override_with_flip_keeps_the_other_whole() {
+    let segs = x_brace();
+    let p = planned(&segs, &[auto(&["d1", "d2"], true)]).unwrap();
+    assert_eq!(piece_ids(&p), ["bottom", "right", "top", "left", "d1", "d1>d2", "d2"]);
+    let (d1, d1b, d2) = (piece(&p, "d1"), piece(&p, "d1>d2"), piece(&p, "d2"));
+    assert!(p.fits.contains(&Fit { member: d1, at_start: false, against: vec![d2] }), "{:?}", p.fits);
+    assert!(p.fits.contains(&Fit { member: d1b, at_start: true, against: vec![d2] }), "{:?}", p.fits);
+    // Without Flip it matches and changes nothing.
+    assert_eq!(planned(&segs, &[auto(&["d2", "d1"], false)]).unwrap(), planned(&segs, &[]).unwrap());
+}
+
+#[test]
+fn three_lines_through_one_point_and_a_fourth_ending_there() {
+    let segs = vec![
+        seg("d", (300.0, 300.0), (500.0, 100.0)),
+        seg("c", (100.0, 100.0), (450.0, 450.0)),
+        seg("b", (300.0, 0.0), (300.0, 500.0)),
+        seg("a", (0.0, 300.0), (600.0, 300.0)),
+    ];
+    let p = planned(&segs, &[]).unwrap();
+    assert_eq!(piece_ids(&p), ["d", "c", "c>a", "b", "b>a", "a"]);
+    assert_eq!(p.crossings.len(), 1);
+    let [d, c, c2, b, b2, a] = ["d", "c", "c>a", "b", "b>a", "a"].map(|id| piece(&p, id));
+    let fits = [
+        Fit { member: b, at_start: false, against: vec![a] },
+        Fit { member: b2, at_start: true, against: vec![a] },
+        Fit { member: c, at_start: false, against: vec![a, b, b2] },
+        Fit { member: c2, at_start: true, against: vec![a, b, b2] },
+        Fit { member: d, at_start: true, against: vec![a, b, b2, c, c2] },
+    ];
+    assert_eq!(p.fits, fits);
+    assert!(p.corners.is_empty() && p.chained.is_empty(), "{p:?}");
+}
+
+/// A line L drawn first, crossed by two longer lines X1 and X2 (left out without x2).
+fn crossed_twice(x2: bool) -> Vec<(String, Vec3, Vec3)> {
+    let mut s = vec![seg("L", (50.0, 0.0), (350.0, 0.0)), seg("X1", (100.0, -200.0), (100.0, 200.0))];
+    if x2 {
+        s.push(seg("X2", (300.0, -200.0), (300.0, 200.0)));
+    }
+    s
+}
+
+#[test]
+fn a_line_crossed_twice_has_three_pieces() {
+    let p = planned(&crossed_twice(true), &[]).unwrap();
+    assert_eq!(piece_ids(&p), ["L", "L>X1", "L>X2", "X1", "X2"]);
+    let spans: Vec<(i64, i64)> = p.pieces[..3].iter().map(|q| ((q.from * 6.0).round() as i64, (q.to * 6.0).round() as i64)).collect();
+    assert_eq!(spans, [(0, 1), (1, 5), (5, 6)]);
+    assert_eq!(p.crossings.len(), 2);
+}
+
+#[test]
+fn removing_a_crossing_keeps_the_other_piece_ids() {
+    let with = planned(&crossed_twice(true), &[]).unwrap();
+    let without = planned(&crossed_twice(false), &[]).unwrap();
+    assert_eq!(piece_ids(&without), ["L", "L>X1", "X1"]);
+    // L's first piece is unchanged; L>X1 grows over where L>X2 was.
+    assert_eq!(with.pieces[0], without.pieces[0]);
+    assert_eq!(with.pieces[1].from, without.pieces[1].from);
+    assert_eq!(without.pieces[1].to, 1.0);
+}
+
+#[test]
+fn a_far_end_override_survives_a_new_crossing() {
+    // L and M meet at (300, 0); the brace B crosses L at x = 100 and is longer, so it stays whole.
+    let mut segs = vec![seg("L", (0.0, 0.0), (300.0, 0.0)), seg("M", (300.0, 0.0), (300.0, 300.0))];
+    let corner = |segs: &[(String, Vec3, Vec3)]| {
+        let p = planned(segs, &[auto(&["M", "L"], true)]).unwrap();
+        let c = p.corners.iter().find(|c| c.point.dist(Vec3::new(300.0, 0.0, 0.0)) < 1e-9).cloned().unwrap();
+        (c.overridden, c.flip, p.pieces[c.long.0].id.clone(), p.pieces[c.short.0].id.clone())
+    };
+    assert_eq!(corner(&segs), (true, true, "M".to_string(), "L".to_string()));
+    segs.push(seg("B", (100.0, -300.0), (100.0, 300.0)));
+    assert_eq!(corner(&segs), (true, true, "M".to_string(), "L>B".to_string()));
+}
+
+#[test]
+fn pair_ends_on_a_group_tube_are_fitted_not_chained() {
+    let p3 = |x: f64, y: f64, z: f64| Vec3::new(x, y, z);
+    let pairs = |at: Vec3| {
+        let mut segs = rectangle();
+        segs.push(("pair1".to_string(), at, at + p3(0.0, 0.0, 300.0)));
+        segs.push(("pair2".to_string(), at, at + p3(0.0, -300.0, 300.0)));
+        let mut planes = xy(&segs);
+        planes[4] = None;
+        planes[5] = None;
+        plan(&segs, &planes, &in_order(&segs), &|_, _| true, &[]).unwrap()
+    };
+    // On the bottom tube's middle: pair2 (the longer) fits it, then pair1 fits it and pair2.
+    let p = pairs(p3(300.0, 0.0, 0.0));
+    assert!(p.chained.is_empty(), "{p:?}");
+    assert_eq!(p.fits, [Fit { member: 5, at_start: true, against: vec![0] }, Fit { member: 4, at_start: true, against: vec![0, 5] }]);
+    // At the rectangle's corner, where group ends meet.
+    let p = pairs(p3(600.0, 0.0, 0.0));
+    assert!(p.chained.is_empty(), "{p:?}");
+    assert_eq!(p.fits, [Fit { member: 5, at_start: true, against: vec![0, 1] }, Fit { member: 4, at_start: true, against: vec![0, 1, 5] }]);
+}
+
+#[test]
+fn pick_order_never_changes_the_pieces() {
+    let segs = x_brace();
+    let drawn = in_order(&segs);
+    let shape = |perm: &[usize]| {
+        let s: Vec<_> = perm.iter().map(|&i| segs[i].clone()).collect();
+        let d: Vec<_> = perm.iter().map(|&i| drawn[i]).collect();
+        let p = plan(&s, &xy(&s), &d, &|_, _| true, &[]).unwrap();
+        let id = |k: usize| p.pieces[k].id.clone();
+        let mut pieces: Vec<(String, String, i64, i64)> =
+            p.pieces.iter().map(|q| (q.id.clone(), s[q.parent].0.clone(), (q.from * 1e6).round() as i64, (q.to * 1e6).round() as i64)).collect();
+        pieces.sort();
+        let fits: Vec<(String, bool, Vec<String>)> =
+            p.fits.iter().map(|f| (id(f.member), f.at_start, f.against.iter().map(|&k| id(k)).collect())).collect();
+        let order: Vec<String> = p.ranks.iter().map(|r| id(r.member)).collect();
+        (pieces, fits, order, p.crossings.clone())
+    };
+    let expected = shape(&[0, 1, 2, 3, 4, 5]);
+    assert_eq!(expected.0.len(), 7);
+    for perm in [[5, 4, 3, 2, 1, 0], [2, 5, 0, 3, 1, 4], [4, 0, 5, 1, 3, 2]] {
+        assert_eq!(shape(&perm), expected, "{perm:?}");
+    }
+}
+
+#[test]
+fn no_crossings_outside_groups() {
+    let p3 = |x: f64, y: f64, z: f64| Vec3::new(x, y, z);
+    let mut segs = rectangle();
+    // A pair across the bottom tube, and two pairs crossing each other above the rectangle.
+    segs.push(("across".to_string(), p3(300.0, -100.0, 0.0), p3(300.0, 100.0, 0.0)));
+    segs.push(("p1".to_string(), p3(100.0, 100.0, 100.0), p3(300.0, 300.0, 100.0)));
+    segs.push(("p2".to_string(), p3(100.0, 300.0, 100.0), p3(300.0, 100.0, 100.0)));
+    let mut planes = xy(&segs);
+    planes[4..].fill(None);
+    let p = plan(&segs, &planes, &in_order(&segs), &|_, _| true, &[]).unwrap();
+    assert_eq!(piece_ids(&p), segs.iter().map(|s| s.0.as_str()).collect::<Vec<_>>());
+    assert!(p.crossings.is_empty());
+}
+
+#[test]
+fn without_crossings_each_line_is_one_whole_piece() {
+    let segs = crossed();
+    let p = planned(&segs, &[]).unwrap();
+    let whole: Vec<Piece> = segs.iter().enumerate().map(|(m, s)| Piece { parent: m, from: 0.0, to: 1.0, id: s.0.clone() }).collect();
+    assert_eq!(p.pieces, whole);
+    assert!(p.crossings.is_empty());
+    let laid: Vec<usize> = ranks(&segs, &xy(&segs), &in_order(&segs)).iter().map(|r| r.member).collect();
+    assert_eq!(p.ranks.iter().map(|r| r.member).collect::<Vec<_>>(), laid);
 }
