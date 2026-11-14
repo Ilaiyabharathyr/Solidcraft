@@ -340,13 +340,13 @@ fn a_shared_point_picked_twice_joins_two_members() {
 }
 
 #[test]
-fn a_lone_last_point_waits_with_pick_another_point() {
+fn a_lone_last_point_waits_with_pick_the_second_point() {
     let mut app = box_app();
     let mut d = dialog_on(&mut app, &[]);
     pick(&app, &mut d, corner(0., 0., 0.));
-    assert_eq!(d.error.as_deref(), Some("Pick another point"));
+    assert_eq!(d.error.as_deref(), Some("Pick the second point"));
     pick_all(&app, &mut d, &[corner(0., 0., 400.), corner(600., 0., 0.)]);
-    assert_eq!(d.error.as_deref(), Some("Pick another point"));
+    assert_eq!(d.error.as_deref(), Some("Pick the second point"));
     // OK makes the members already paired; the lone point waits.
     let c = apply_commands(&app, &d).unwrap();
     assert_eq!(c[0].1["pairs"], json!([{"a": vertex(0., 0., 0.), "b": vertex(0., 0., 400.)}]));
@@ -384,13 +384,13 @@ fn clicking_the_waiting_point_again_unpicks_it() {
     let mut app = box_app();
     let mut d = dialog_on(&mut app, &[]);
     pick(&app, &mut d, corner(0., 0., 0.));
-    assert_eq!(d.error.as_deref(), Some("Pick another point"));
+    assert_eq!(d.error.as_deref(), Some("Pick the second point"));
     pick(&app, &mut d, corner(0., 0., 0.));
     assert_eq!((path(&d), d.error.as_deref()), (&[][..], None), "the point is unpicked and nothing waits");
     // After a whole pair, its last point clicked again starts the next member from it.
     pick_all(&app, &mut d, &[corner(0., 0., 0.), corner(0., 0., 400.), corner(0., 0., 400.)]);
     assert_eq!(path(&d).len(), 3);
-    assert_eq!(d.error.as_deref(), Some("Pick another point"));
+    assert_eq!(d.error.as_deref(), Some("Pick the second point"));
     // And that waiting point, clicked again, goes; its pair stays.
     pick(&app, &mut d, corner(0., 0., 400.));
     assert_eq!(path(&d), [corner(0., 0., 0.), corner(0., 0., 400.)]);
@@ -406,7 +406,7 @@ fn a_point_can_be_picked_again_and_ctrl_click_takes_out_its_last_occurrence() {
     assert!(take_out(&mut app, &p1));
     let d = app.dialog.clone().unwrap();
     assert_eq!(path(&d), [p0.clone(), p1.clone(), p2.clone()], "the later p1 goes");
-    assert_eq!(d.error.as_deref(), Some("Pick another point"), "p2 now waits");
+    assert_eq!(d.error.as_deref(), Some("Pick the second point"), "p2 now waits");
     assert_eq!(apply_commands(&app, &d).unwrap()[0].1["pairs"], json!([{"a": vertex(0., 0., 0.), "b": vertex(0., 0., 400.)}]));
     // A point not in the path, or a line, is no Ctrl+click take-out: it goes to the input as usual.
     assert!(!take_out(&mut app, &corner(600., 400., 0.)));
@@ -1110,11 +1110,81 @@ fn the_pick_cache_follows_the_previews_centrelines_and_ghosting() {
 // ---------------------------------------------------------------------------------------------
 // The path's picked list (#15705)
 
-/// p0, p1, p1, p2: the path's picked list shows the shared corner once for each pair it is in,
-/// and a row's remove button takes out that occurrence only, so the other pair keeps its point,
-/// its reference and its id.
+/// The box, and the Frame Member dialog open on it in a harness with the given path picks made
+/// as clicks in the view make them.
+fn path_harness(picks: impl FnOnce(&SolveApp) -> Vec<Sel>) -> crate::scenario::Harness {
+    let mut h = tall_harness();
+    for (id, p) in [
+        ("sketch.create", json!({"plane": "XY", "name": "Base"})),
+        ("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]})),
+        ("sketch.finish", json!({})),
+        ("solid.extrude", json!({"distance": 400, "name": "Box", "body_name": "Box"})),
+    ] {
+        h.app.run(id, p).unwrap();
+    }
+    h.app.start("frame.member");
+    let mut d = h.app.dialog.take().unwrap();
+    pick_all(&h.app, &mut d, &picks(&h.app));
+    h.app.dialog = Some(d);
+    h.frames(2);
+    h
+}
+
+/// The Base sketch's first line as the view picks it.
+fn base_line(app: &SolveApp) -> Sel {
+    let base = sketch_id(app, "Base");
+    Sel::ExternalSketchCurve { sketch: base, id: app.session.doc.sketch(base).unwrap().curves[0].id.clone() }
+}
+
+/// The number of rows in the Path list, opened.
+fn path_rows(h: &mut crate::scenario::Harness) -> usize {
+    if h.app.dialog.as_ref().unwrap().listed != Some(0) {
+        h.step(&json!({"click": {"handle": "dialog:list_toggle:Path"}})).unwrap();
+        h.frames(2);
+    }
+    (0..8).take_while(|i| crate::scenario::handle_at(&format!("dialog:list:Path:{i}:remove")).is_some()).count()
+}
+
+fn drawn_texts(h: &crate::scenario::Harness) -> Vec<String> {
+    h.shapes.iter().filter_map(|s| if let egui::Shape::Text(t) = &s.shape { Some(t.galley.text().to_owned()) } else { None }).collect()
+}
+
+/// A line and a pair of points: two rows, the line's and the pair's, which reads as its tube; the
+/// chip counts the two.
 #[test]
-fn the_picked_list_shows_each_occurrence_and_a_rows_remove_takes_out_only_that_one() {
+fn a_point_pair_is_one_path_row() {
+    let mut h = path_harness(|app| vec![base_line(app), corner(0., 0., 0.), corner(0., 0., 400.)]);
+    assert_eq!(path(h.app.dialog.as_ref().unwrap()).len(), 3);
+    assert!(drawn_texts(&h).iter().any(|t| t == "2 selected"), "the line and the tube");
+    assert_eq!(path_rows(&mut h), 2, "the line's row and the pair's");
+    let texts = drawn_texts(&h);
+    let tube = texts.iter().find(|t| t.starts_with("Tube 1: ")).unwrap_or_else(|| panic!("a Tube 1 row: {texts:?}"));
+    assert_eq!(tube.matches(" → ").count(), 1, "{tube}");
+}
+
+/// A lone first point makes no row: the dialog asks for the second, and the view still draws the
+/// point (it stays in the path). The second point makes the pair's row.
+#[test]
+fn a_lone_first_point_is_not_a_row_and_the_prompt_asks_for_the_second() {
+    let mut h = path_harness(|app| vec![base_line(app), corner(0., 0., 0.)]);
+    let d = h.app.dialog.as_ref().unwrap();
+    assert_eq!(d.error.as_deref(), Some("Pick the second point"));
+    assert!(path(d).contains(&corner(0., 0., 0.)), "the waiting point is still picked, so drawn");
+    assert!(drawn_texts(&h).iter().any(|t| t == "1 selected"), "the line alone");
+    assert_eq!(path_rows(&mut h), 1, "the line's row only");
+    assert!(!drawn_texts(&h).iter().any(|t| t.starts_with("Tube")));
+    let mut d = h.app.dialog.take().unwrap();
+    pick(&h.app, &mut d, corner(0., 0., 400.));
+    h.app.dialog = Some(d);
+    h.frames(2);
+    assert_eq!(h.app.dialog.as_ref().unwrap().error, None);
+    assert_eq!(path_rows(&mut h), 2);
+}
+
+/// p0, p1, p1, p2 (two pairs sharing p1): two rows. Removing the second pair's row takes out both
+/// its points, and the first pair keeps its points, references and id.
+#[test]
+fn removing_a_pair_row_removes_both_points() {
     let mut h = crate::scenario::Harness::new();
     let rail = json!({"a": vertex(0., 0., 0.), "b": vertex(0., 0., 400.)});
     let top = json!({"a": vertex(0., 0., 400.), "b": vertex(600., 0., 400.)});
@@ -1135,24 +1205,19 @@ fn the_picked_list_shows_each_occurrence_and_a_rows_remove_takes_out_only_that_o
     h.app.dialog = Some(edit_dialog(&h.app, f, None).unwrap());
     h.frames(2);
     let (p0, p1, p2) = (corner(0., 0., 0.), corner(0., 0., 400.), corner(600., 0., 400.));
-    assert_eq!(path(h.app.dialog.as_ref().unwrap()), [p0.clone(), p1.clone(), p1.clone(), p2.clone()]);
+    assert_eq!(path(h.app.dialog.as_ref().unwrap()), [p0.clone(), p1.clone(), p1.clone(), p2]);
     let m = member(h.app.dialog.as_mut().unwrap());
     let (refs, ids) = (m.refs.clone(), m.pair_ids.clone());
     assert_eq!(ids[1].as_deref(), Some("pair1"));
-
-    h.step(&json!({"click": {"handle": "dialog:list_toggle:Path"}})).unwrap();
-    h.frames(2);
-    let rows = (0..8).take_while(|i| crate::scenario::handle_at(&format!("dialog:list:Path:{i}:remove")).is_some()).count();
-    assert_eq!(rows, 4, "a row for each occurrence");
-    // The second p1 is the second pair's.
-    h.step(&json!({"click": {"handle": "dialog:list:Path:2:remove"}})).unwrap();
+    assert_eq!(path_rows(&mut h), 2, "a row for each pair");
+    h.step(&json!({"click": {"handle": "dialog:list:Path:1:remove"}})).unwrap();
     h.frames(2);
     let d = h.app.dialog.as_mut().unwrap();
-    assert_eq!(path(d), [p0, p1, p2], "only that occurrence goes");
+    assert_eq!(path(d), [p0, p1], "both of the second pair's points go");
+    assert_eq!(d.error, None, "nothing waits");
     let m = member(d);
-    assert_eq!(m.refs, [refs[0].clone(), refs[1].clone(), refs[3].clone()]);
-    assert_eq!(m.pair_ids, [ids[0].clone(), ids[1].clone(), ids[3].clone()]);
-    assert_eq!(d.error.as_deref(), Some("Pick another point"), "p2 now waits");
+    assert_eq!(m.refs, refs[..2]);
+    assert_eq!(m.pair_ids, ids[..2]);
     let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
     assert_eq!(c[0].1["params"]["pairs"], json!([stored[0]]), "the first pair is intact, id and references");
 }
@@ -1740,4 +1805,61 @@ fn hovering_an_overridden_corner_lights_its_row() {
     h.step(&json!({"move": {"world": [600, 400, 0]}})).unwrap();
     h.frames(2);
     assert_eq!(lit(), ["dialog:lit:Corner Overrides"]);
+}
+
+/// Under Auto a sketch point where two of the frame's lines cross (none ending there) is an
+/// override, saved by the lines crossing there. Its row reads Crossing, with Flip and no Type
+/// list, and an edit brings it back. Under Mitre the same pick is refused.
+#[test]
+fn a_crossing_point_override_is_a_crossing_row_with_flip() {
+    let mut h = tall_harness();
+    for (id, p) in [
+        ("sketch.create", json!({"plane": "XY", "name": "Frame"})),
+        ("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]})),
+        ("sketch.line", json!({"points": [[0, 0], [600, 400]], "ids": ["d1"]})),
+        ("sketch.line", json!({"points": [[0, 400], [600, 0]], "ids": ["d2"]})),
+        ("sketch.point", json!({"point": [300, 200], "id": "x"})),
+        ("sketch.finish", json!({})),
+    ] {
+        h.app.run(id, p).unwrap();
+    }
+    let frame = sketch_id(&h.app, "Frame");
+    let lines = frame_lines(&h.app);
+    let x = Sel::ExternalSketchPoint { sketch: frame, id: "x".into() };
+    let mut d = dialog_on(&mut h.app, &lines);
+    d.active = 2;
+    d.pick(&h.app.session, x.clone());
+    assert_eq!(d.inputs[2].items, std::slice::from_ref(&x), "{:?}", d.error);
+    let c = apply_commands(&h.app, &d).unwrap();
+    assert_eq!(c[0].1["corners"], json!([{"members": ["d1", "d2"], "corner": "auto", "flip": false}]), "{}", c[0].1);
+    h.app.dialog = Some(d);
+    h.frames(2);
+    assert!(h.widget_near("Crossing", "Corner 1").is_some(), "the row reads Crossing");
+    let [_, y] = h.widget("Corner 1").unwrap();
+    let tree = h.output.accesskit_update.as_ref().unwrap();
+    let on_row: Vec<_> = tree
+        .nodes
+        .iter()
+        .filter(|(_, n)| n.bounds().is_some_and(|b| b.x1 > b.x0 && (f64::midpoint(b.y0, b.y1) - y).abs() < 2.0))
+        .map(|(_, n)| n.clone())
+        .collect();
+    assert!(on_row.iter().any(|n| n.label() == Some("Flip") && !n.is_disabled()), "an enabled Flip on the row");
+    assert!(!on_row.iter().any(|n| n.label() == Some("Auto") || n.value() == Some("Auto")), "no Type list on the row");
+    member(h.app.dialog.as_mut().unwrap()).overrides[0].2 = true;
+    let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!(c[0].1["corners"], json!([{"members": ["d1", "d2"], "corner": "auto", "flip": true}]), "{}", c[0].1);
+    run_all(&mut h.app, c);
+    let f = h.app.session.doc.features.last().unwrap().id;
+    let mut e = edit_dialog(&h.app, f, None).unwrap();
+    assert_eq!(e.inputs[2].items, std::slice::from_ref(&x), "{:?}", e.extra);
+    assert!(e.extra.get("corners").is_none());
+    assert_eq!(member(&mut e).overrides.iter().map(|o| o.2).collect::<Vec<_>>(), [true]);
+    h.app.dialog = None;
+    let mut d = dialog_on(&mut h.app, &lines);
+    member(&mut d).corner = corner_type("mitre");
+    d.active = 2;
+    d.pick(&h.app.session, x);
+    assert!(d.inputs[2].items.is_empty());
+    let e = d.error.clone().unwrap_or_default();
+    assert!(e.contains("exactly two members end"), "{e}");
 }

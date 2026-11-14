@@ -1252,23 +1252,22 @@ fn pair_lines(
 /// `wire:index` node), among `lines` (none: every line of the sketch, as a feature with no lines
 /// takes them). A Corner Override names its corner by these. Under `auto`, two or more lines end
 /// there and none passes through (spec decision 3); otherwise exactly two, a corner as
-/// [`frame_corners::find_corners`] finds them. Only the sketch's lines are looked at: a corner where
-/// a point-to-point member ends is named through `corners` with the pair's id.
+/// [`frame_corners::find_corners`] finds them. Under `auto` a crossing is one too: a point two or
+/// more lines pass through, none ending there, named by those lines. Only the sketch's lines are
+/// looked at: a corner where a point-to-point member ends is named through `corners` with the pair's id.
 pub fn corner_at_point(st: &ModelState, sketch: u64, lines: &[String], point: &str, auto: bool) -> Result<Vec<String>> {
     let ss = st.sketch(sketch).ok_or_else(|| DocError::Unknown(format!("sketch {sketch}")))?;
     let at =
         crate::construct::sketch_point_position(st, sketch, point).ok_or_else(|| DocError::Unknown(format!("point `{point}` in {}", ss.name)))?;
     let segments = member_lines(ss, lines)?;
-    let tol = frame_corners::CORNER_TOL;
     if auto {
-        let ends = |(_, a, b): &&(String, Vec3, Vec3)| a.dist(at) <= tol || b.dist(at) <= tol;
-        let ending: Vec<String> = segments.iter().filter(ends).map(|s| s.0.clone()).collect();
-        let through = segments.iter().any(|s| !ends(&s) && at.dist_to_segment(s.1, s.2) <= tol);
-        if ending.len() < 2 || through {
-            return Err(DocError::Invalid("Pick a corner of the frame: a point where two or more members end".into()));
-        }
-        return Ok(ending);
+        return match ending_and_through(&segments, at) {
+            (ending, through) if ending.len() >= 2 && through.is_empty() => Ok(ending),
+            (ending, through) if ending.is_empty() && through.len() >= 2 => Ok(through),
+            _ => Err(DocError::Invalid("Pick a corner of the frame: a point where two or more members end, or a crossing".into())),
+        };
     }
+    let tol = frame_corners::CORNER_TOL;
     let not_a_corner = || DocError::Invalid("Pick a corner of the frame: a point where exactly two members end".into());
     let corners = frame_corners::find_corners(&segments);
     let corner = corners.iter().find(|c| c.point.dist(at) <= tol).ok_or_else(not_a_corner)?;
@@ -1277,8 +1276,31 @@ pub fn corner_at_point(st: &ModelState, sketch: u64, lines: &[String], point: &s
     id(a).zip(id(b)).map(|(a, b)| vec![a, b]).ok_or_else(not_a_corner)
 }
 
+/// The lines among `segments` that end at `at`, and those that pass through it.
+fn ending_and_through(segments: &[(String, Vec3, Vec3)], at: Vec3) -> (Vec<String>, Vec<String>) {
+    let tol = frame_corners::CORNER_TOL;
+    let (mut ending, mut through) = (Vec::new(), Vec::new());
+    for (id, a, b) in segments {
+        if a.dist(at) <= tol || b.dist(at) <= tol {
+            ending.push(id.clone());
+        } else if at.dist_to_segment(*a, *b) <= tol {
+            through.push(id.clone());
+        }
+    }
+    (ending, through)
+}
+
+/// Whether the sketch's point `point` is a crossing of `lines` (none: every line of the sketch):
+/// two or more pass through it and none ends there. An Auto override there is a crossing's.
+pub fn is_crossing(st: &ModelState, sketch: u64, lines: &[String], point: &str) -> bool {
+    let (Some(ss), Some(at)) = (st.sketch(sketch), crate::construct::sketch_point_position(st, sketch, point)) else { return false };
+    member_lines(ss, lines)
+        .is_ok_and(|segments| matches!(ending_and_through(&segments, at), (ending, through) if ending.is_empty() && through.len() >= 2))
+}
+
 /// The sketch point where the lines `members` (two or more) all end together (an end point of
-/// one of them, named as a pick names it), or `None` when they no longer meet.
+/// one of them, named as a pick names it), or else a point of the sketch where they all cross
+/// with none ending there; `None` when they no longer meet.
 pub fn corner_point(st: &ModelState, sketch: u64, members: &[String]) -> Option<String> {
     let ss = st.sketch(sketch)?;
     if members.len() < 2 {
@@ -1287,7 +1309,14 @@ pub fn corner_point(st: &ModelState, sketch: u64, members: &[String]) -> Option<
     let lines = member_lines(ss, members).ok()?;
     let tol = frame_corners::CORNER_TOL;
     let (_, a, b) = lines.first()?;
-    let point = [*a, *b].into_iter().find(|&p| lines.iter().all(|(_, a, b)| a.dist(p) <= tol || b.dist(p) <= tol))?;
+    let Some(point) = [*a, *b].into_iter().find(|&p| lines.iter().all(|(_, a, b)| a.dist(p) <= tol || b.dist(p) <= tol)) else {
+        // ponytail: every point of the sketch is tried; find the lines' crossing first if a large sketch makes edits slow.
+        let crossed = |p: &str| {
+            crate::construct::sketch_point_position(st, sketch, p)
+                .is_some_and(|at| matches!(ending_and_through(&lines, at), (ending, through) if ending.is_empty() && through.len() == lines.len()))
+        };
+        return ss.sketch.points.iter().map(|p| p.id.clone()).find(|p| crossed(p));
+    };
     let sk = &ss.sketch;
     let ends = |id: &String| -> Vec<String> {
         if let Some(w) = sk.wire_index(id).and_then(|i| sk.wires.get(i)) {

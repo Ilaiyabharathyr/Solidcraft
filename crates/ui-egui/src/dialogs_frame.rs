@@ -385,12 +385,23 @@ impl Member {
     /// keeps its own reference and pair id (matching by value would give a shared point's
     /// remaining occurrence the wrong pair's).
     pub fn remove_at(&mut self, items: &mut Vec<Sel>, at: usize) {
+        self.remove(items, &std::collections::BTreeSet::from([at]));
+    }
+
+    /// Take the Path list's row `row` ([`path_rows`]) out of the path `items`: a pair's row takes
+    /// both its points.
+    pub fn remove_row(&mut self, items: &mut Vec<Sel>, row: usize) {
+        let gone = path_rows(items).into_iter().nth(row).unwrap_or_default().into_iter().collect();
+        self.remove(items, &gone);
+    }
+
+    /// Take the entries at `gone` out of the path `items`, with what is kept for each.
+    fn remove(&mut self, items: &mut Vec<Sel>, gone: &std::collections::BTreeSet<usize>) {
         self.sync(items);
-        let gone = std::collections::BTreeSet::from([at]);
-        drop_at(items, &gone);
-        drop_at(&mut self.path, &gone);
-        drop_at(&mut self.refs, &gone);
-        drop_at(&mut self.pair_ids, &gone);
+        drop_at(items, gone);
+        drop_at(&mut self.path, gone);
+        drop_at(&mut self.refs, gone);
+        drop_at(&mut self.pair_ids, gone);
         self.picked_tubes.clear();
     }
 
@@ -412,7 +423,7 @@ impl Member {
 /// What the path takes: sketch lines, and the points pairs join.
 const PATH: crate::selection::Accept = SKETCH_LINES | VERTICES | POINTS | CONSTRUCTION_POINTS | SNAP_POINTS | ORIGIN;
 const NEEDS_PARTNER: &str = "A point needs another point after it";
-const PICK_ANOTHER: &str = "Pick another point";
+const PICK_SECOND: &str = "Pick the second point";
 
 /// The dialog for Frame Member.
 pub fn start(_app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
@@ -455,6 +466,37 @@ fn pair_indices(items: &[Sel]) -> Result<(Vec<usize>, Vec<(usize, usize)>, Optio
         }
     }
     Ok((lines, pairs, waiting))
+}
+
+/// The Path list's rows (Goal 6), in path order, each the path entries it stands for: a line one
+/// row, a pair of points one row, and a point waiting for its partner none. A path the pairing
+/// refuses lists each entry alone.
+pub(crate) fn path_rows(items: &[Sel]) -> Vec<Vec<usize>> {
+    let Ok((lines, pairs, _)) = pair_indices(items) else { return (0..items.len()).map(|i| vec![i]).collect() };
+    let mut rows: Vec<Vec<usize>> = lines.into_iter().map(|i| vec![i]).chain(pairs.into_iter().map(|(a, b)| vec![a, b])).collect();
+    rows.sort_by_key(|r| r.first().copied());
+    rows
+}
+
+/// [`path_rows`] when input `i` of `d` is Frame Member's Path: its list's rows, which its chip counts.
+pub(crate) fn listed_rows(d: &Dialog, i: usize) -> Option<Vec<Vec<usize>>> {
+    (matches!(d.kind, Kind::Frame(_)) && i == 0).then(|| path_rows(crate::selection::items(&d.inputs, 0)))
+}
+
+/// What each of [`listed_rows`] reads: a line as it is picked, a pair as its tube ("Tube n: a → b").
+pub(crate) fn row_labels(s: &Session, names: crate::prefs::OriginPlaneNames, d: &Dialog, i: usize) -> Option<Vec<String>> {
+    let rows = listed_rows(d, i)?;
+    let inp = d.inputs.get(i)?;
+    let label = |k: &usize| inp.items.get(*k).map(|x| crate::dialogs::selection_label(s, names, d, inp, x)).unwrap_or_default();
+    let mut n = 0;
+    let labels = rows.iter().map(|r| match r.as_slice() {
+        [a, b] => {
+            n += 1;
+            solidcraft_ui_text::format("frame.path_pair_row", &[("n", &n.to_string()), ("a", &label(a)), ("b", &label(b))])
+        }
+        r => r.first().map(label).unwrap_or_default(),
+    });
+    Some(labels.collect())
 }
 
 /// A pick of `sel` as [`pick_hit`] takes it, from no particular hit.
@@ -632,8 +674,8 @@ pub(crate) fn refused_pick(error: &str) -> bool {
 pub(crate) fn prompt(d: &mut Dialog) {
     let waiting = pairs_of(crate::selection::items(&d.inputs, 0)).is_ok_and(|(_, _, w)| w.is_some());
     if waiting {
-        d.error = Some(PICK_ANOTHER.into());
-    } else if d.error.as_deref() == Some(PICK_ANOTHER) {
+        d.error = Some(PICK_SECOND.into());
+    } else if d.error.as_deref() == Some(PICK_SECOND) {
         d.error = None;
     }
     let items = crate::selection::items(&d.inputs, 0);
@@ -705,7 +747,8 @@ pub fn rows(app: &SolveApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
     lit_rows(ui, "Corner Overrides", lit.is_some() && folded, |ui| {
         input_rows_range(d, ui, &app.session, app.preferences.origin_plane_names, 2..3);
     });
-    corner_rows(ui, d, lit);
+    let crossings: Vec<bool> = crate::selection::items(&d.inputs, 2).iter().map(|p| crossing(&app.session, &d.kind, &d.inputs, p)).collect();
+    corner_rows(ui, d, lit, &crossings);
     enter
 }
 
@@ -757,11 +800,12 @@ fn corner_label(n: usize) -> String {
 }
 
 /// Under Corner Overrides, one row for each picked corner, "Corner n" in pick order: its type (as it
-/// builds on this frame, [`override_type`]), its Flip (greyed for None and Mitre, so the rows line
-/// up) and a bin; then one for each saved override whose lines no longer meet, kept until it is
-/// removed. Folded, none show. `lit`: the picked corner under the pointer in the view, whose row
-/// is lit.
-fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>) {
+/// builds on this frame, [`override_type`]) or for a crossing "Crossing" (its Flip keeps the other
+/// tube whole), its Flip (greyed for None and Mitre, so the rows line up) and a bin; then one for
+/// each saved override whose lines no longer meet, kept until it is removed. Folded, none show.
+/// `lit`: the picked corner under the pointer in the view, whose row is lit. `crossings`: which
+/// picks are crossings ([`crossing`]).
+fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>, crossings: &[bool]) {
     let Kind::Frame(m) = &mut d.kind else { return };
     let picks = crate::selection::items(&d.inputs, 2).to_vec();
     // A corner taken out forgets its own type and flip: picked again, it starts afresh.
@@ -785,6 +829,7 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>) {
     for (n, pick) in picks.iter().enumerate() {
         let Some((_, corner, flip)) = m.overrides.iter_mut().find(|o| o.0 == *pick) else { continue };
         let label = corner_label(n + 1);
+        let crossed = crossings.get(n).copied().unwrap_or(false);
         // A scope of its own keeps each row's ids apart.
         ui.scope_builder(egui::UiBuilder::new().id_salt(("frame_corner", n)), |ui| {
             lit_rows(ui, &label, lit == Some(n), |ui| {
@@ -796,17 +841,25 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>) {
                     // The type takes the width its longest label needs (never what Flip and the bin need).
                     let translated: Vec<&str> = labels.iter().map(|l| solidcraft_ui_text::tr_label(l)).collect();
                     let width = crate::ui_kit::ContentWidth::dropdown(ui, &translated).min(room);
-                    // An Auto override on a frame of another type shows as that type, and stays
-                    // Auto until a type is chosen for it.
-                    let mut shown = override_type(*corner, frame).saturating_sub(skip);
-                    let before = shown;
-                    crate::ui_kit::settings_control_width(ui, width, |ui| {
-                        crate::ui_kit::dropdown(ui, &format!("frame_corner_{n}"), &mut shown, &labels)
-                    });
-                    if shown != before {
-                        *corner = shown + skip;
+                    if crossed {
+                        // A crossing has no type to choose, only which tube stays whole.
+                        crate::ui_kit::settings_control_width(ui, width, |ui| {
+                            ui.label(tr("Crossing"));
+                            ui.add_space(ui.available_width());
+                        });
+                    } else {
+                        // An Auto override on a frame of another type shows as that type, and
+                        // stays Auto until a type is chosen for it.
+                        let mut shown = override_type(*corner, frame).saturating_sub(skip);
+                        let before = shown;
+                        crate::ui_kit::settings_control_width(ui, width, |ui| {
+                            crate::ui_kit::dropdown(ui, &format!("frame_corner_{n}"), &mut shown, &labels)
+                        });
+                        if shown != before {
+                            *corner = shown + skip;
+                        }
                     }
-                    let enabled = override_flips(override_type(*corner, frame));
+                    let enabled = crossed || override_flips(override_type(*corner, frame));
                     ui.add_enabled_ui(enabled, |ui| {
                         let mut on = *flip && enabled;
                         crate::ui_kit::checkbox(ui, tr("Flip"), &mut on);
@@ -863,19 +916,29 @@ pub(crate) fn refused_corner(s: &Session, m: &Member, inputs: &[SelInput], pick:
         return None;
     }
     let Sel::ExternalSketchPoint { sketch, id } = pick else { return None };
-    let lines: Vec<String> = if m.all {
-        Vec::new()
-    } else {
-        crate::selection::items(inputs, 0)
-            .iter()
-            .filter_map(|x| match x {
-                Sel::ExternalSketchCurve { sketch: k, id } | Sel::SketchCurve { id, sketch: Some(k) } => (k == sketch).then(|| id.clone()),
-                Sel::SketchCurve { id, sketch: None } => Some(id.clone()),
-                _ => None,
-            })
-            .collect()
-    };
-    frame::corner_at_point(&s.model.state(), *sketch, &lines, id, m.corner == AUTO).err().map(|e| e.to_string())
+    frame::corner_at_point(&s.model.state(), *sketch, &path_lines(m, inputs, *sketch), id, m.corner == AUTO).err().map(|e| e.to_string())
+}
+
+/// The path's lines of sketch `sketch`, among which a corner is looked for: none (every line) under All Lines.
+fn path_lines(m: &Member, inputs: &[SelInput], sketch: u64) -> Vec<String> {
+    if m.all {
+        return Vec::new();
+    }
+    crate::selection::items(inputs, 0)
+        .iter()
+        .filter_map(|x| match x {
+            Sel::ExternalSketchCurve { sketch: k, id } | Sel::SketchCurve { id, sketch: Some(k) } => (*k == sketch).then(|| id.clone()),
+            Sel::SketchCurve { id, sketch: None } => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether the corner picked as `pick` is a crossing of the frame's lines under Auto: its row reads
+/// Crossing.
+fn crossing(s: &Session, kind: &Kind, inputs: &[SelInput], pick: &Sel) -> bool {
+    let (Kind::Frame(m), Sel::ExternalSketchPoint { sketch, id }) = (kind, pick) else { return false };
+    m.corner == AUTO && frame::is_crossing(&s.model.state(), *sketch, &path_lines(m, inputs, *sketch), id)
 }
 
 /// The Frame Member rows proper: the section, its placement and the name.
@@ -1036,8 +1099,11 @@ pub fn commands(app: &SolveApp, m: &Member, inputs: &[SelInput], extra: &Map<Str
             let Sel::ExternalSketchPoint { sketch: at, id } = pick else { continue };
             let sketch = sketch.filter(|s| s == at).ok_or("the corner overrides must be corners of the frame sketch")?;
             let mut ends = frame::corner_at_point(&st, sketch, members, id, m.corner == AUTO).map_err(|e| e.to_string())?;
+            // A crossing is named by the lines crossing there alone (a pair's tube is never cut).
+            let crossed = m.corner == AUTO && frame::is_crossing(&st, sketch, members, id);
             // Under Auto the build counts every member ending at the corner, the pairs' too (ruling A16).
             if m.corner == AUTO
+                && !crossed
                 && let Some(at) = path_point(&app.session, pick)
             {
                 let here = |p: &Option<&Sel>| p.and_then(|p| path_point(&app.session, p)).is_some_and(|q| q.dist(at) <= CORNER_TOL);
