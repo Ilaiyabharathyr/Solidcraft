@@ -9,6 +9,14 @@ fn lid() -> (Harness, u64) {
     let id = h.app.session.doc.find_feature("Lid").unwrap().id;
     h.call("ui.view", json!({"view":"top"}));
     h.call("ui.view", json!({"view":"fit"}));
+    // Zoomed out from the fit, so the plane's handles lie clear of the panels round the view.
+    let fit = h.at(&json!({"world":[0,0,10]})).unwrap();
+    for _ in 0..4 {
+        h.call("ui.scroll", json!({"x":800,"y":500,"delta":-120}));
+        h.frames(4);
+    }
+    let [x, _] = h.at(&json!({"world":[0,0,10]})).unwrap();
+    assert!(x > fit[0], "zoomed out: the box's corner moved toward the middle ({fit:?} -> {x})");
     h.app.session.selection = vec![Sel::Plane { name: "Lid".into() }];
     h.frames(3);
     (h, id)
