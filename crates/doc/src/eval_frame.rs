@@ -1253,7 +1253,7 @@ fn pair_lines(
 /// takes them). A Corner Override names its corner by these. Under `auto`, two or more lines end
 /// there and none passes through (spec decision 3); otherwise exactly two, a corner as
 /// [`frame_corners::find_corners`] finds them. Under `auto` a crossing is one too: a point two or
-/// more lines pass through, none ending there, named by those lines. Only the sketch's lines are
+/// more lines pass through (others may end there), named by the lines passing through. Only the sketch's lines are
 /// looked at: a corner where a point-to-point member ends is named through `corners` with the pair's id.
 pub fn corner_at_point(st: &ModelState, sketch: u64, lines: &[String], point: &str, auto: bool) -> Result<Vec<String>> {
     let ss = st.sketch(sketch).ok_or_else(|| DocError::Unknown(format!("sketch {sketch}")))?;
@@ -1262,8 +1262,9 @@ pub fn corner_at_point(st: &ModelState, sketch: u64, lines: &[String], point: &s
     let segments = member_lines(ss, lines)?;
     if auto {
         return match ending_and_through(&segments, at) {
+            // A crossing, whether or not other lines end there too: the lines crossing name it.
+            (_, through) if through.len() >= 2 => Ok(through),
             (ending, through) if ending.len() >= 2 && through.is_empty() => Ok(ending),
-            (ending, through) if ending.is_empty() && through.len() >= 2 => Ok(through),
             _ => Err(DocError::Invalid("Pick a corner of the frame: a point where two or more members end, or a crossing".into())),
         };
     }
@@ -1291,11 +1292,10 @@ fn ending_and_through(segments: &[(String, Vec3, Vec3)], at: Vec3) -> (Vec<Strin
 }
 
 /// Whether the sketch's point `point` is a crossing of `lines` (none: every line of the sketch):
-/// two or more pass through it and none ends there. An Auto override there is a crossing's.
+/// two or more pass through it, whether or not others end there. An Auto override there is a crossing's.
 pub fn is_crossing(st: &ModelState, sketch: u64, lines: &[String], point: &str) -> bool {
     let (Some(ss), Some(at)) = (st.sketch(sketch), crate::construct::sketch_point_position(st, sketch, point)) else { return false };
-    member_lines(ss, lines)
-        .is_ok_and(|segments| matches!(ending_and_through(&segments, at), (ending, through) if ending.is_empty() && through.len() >= 2))
+    member_lines(ss, lines).is_ok_and(|segments| matches!(ending_and_through(&segments, at), (_, through) if through.len() >= 2))
 }
 
 /// The sketch point where the lines `members` (two or more) all end together (an end point of

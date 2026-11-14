@@ -1863,3 +1863,51 @@ fn a_crossing_point_override_is_a_crossing_row_with_flip() {
     let e = d.error.clone().unwrap_or_default();
     assert!(e.contains("exactly two members end"), "{e}");
 }
+
+/// A crossing where another tube also ends (the two diagonals, and a post from the bottom ending
+/// where they cross) is a crossing too: the pick is taken and saved by the two diagonals alone, its
+/// row reads Crossing with Flip, and Flip changes which diagonal stays whole.
+#[test]
+fn a_crossing_where_a_tube_also_ends_is_a_crossing_override() {
+    let mut h = tall_harness();
+    for (id, p) in [
+        ("sketch.create", json!({"plane": "XY", "name": "Frame"})),
+        ("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]})),
+        ("sketch.line", json!({"points": [[0, 0], [600, 400]], "ids": ["d1"]})),
+        ("sketch.line", json!({"points": [[0, 400], [600, 0]], "ids": ["d2"]})),
+        ("sketch.line", json!({"points": [[300, 0], [300, 200]], "ids": ["post"]})),
+        ("sketch.finish", json!({})),
+    ] {
+        h.app.run(id, p).unwrap();
+    }
+    let frame = sketch_id(&h.app, "Frame");
+    let lines = frame_lines(&h.app);
+    let x = Sel::ExternalSketchPoint { sketch: frame, id: point_at(&h.app, 300.0, 200.0) };
+    let mut d = dialog_on(&mut h.app, &lines);
+    d.active = 2;
+    d.pick(&h.app.session, x.clone());
+    assert_eq!(d.inputs[2].items, std::slice::from_ref(&x), "{:?}", d.error);
+    let c = apply_commands(&h.app, &d).unwrap();
+    assert_eq!(c[0].1["corners"], json!([{"members": ["d1", "d2"], "corner": "auto", "flip": false}]), "{}", c[0].1);
+    h.app.dialog = Some(d);
+    h.frames(2);
+    assert!(h.widget_near("Crossing", "Corner 1").is_some(), "the row reads Crossing");
+    // Which diagonal is cut: its later piece is `<it>>‹the whole one›`.
+    let cut = |app: &SolveApp| {
+        let f = app.session.doc.features.last().unwrap();
+        let ids = frame::member_line_ids(&app.session.model.state(), &f.kind).unwrap();
+        ["d1>d2", "d2>d1"].into_iter().filter(|p| ids.iter().any(|i| i == p)).collect::<Vec<_>>()
+    };
+    let mut flipped = h.app.dialog.clone().unwrap();
+    run_all(&mut h.app, c);
+    let plain = cut(&h.app);
+    assert_eq!(plain.len(), 1, "one diagonal is cut: {plain:?}");
+    member(&mut flipped).overrides[0].2 = true;
+    let c = apply_commands(&h.app, &flipped).unwrap();
+    assert_eq!(c[0].1["corners"][0]["flip"], json!(true), "{}", c[0].1);
+    h.app.run("edit.undo", json!({})).unwrap();
+    run_all(&mut h.app, c);
+    let other = cut(&h.app);
+    assert_eq!(other.len(), 1, "{other:?}");
+    assert_ne!(plain, other, "Flip keeps the other diagonal whole");
+}
