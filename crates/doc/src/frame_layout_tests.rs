@@ -342,11 +342,29 @@ fn tubes_in_no_plane_chain_and_mitre() {
     planes[5] = None;
     let p = plan(&segs, &planes, &in_order(&segs), &|_, _| true, &[]).unwrap();
     assert_eq!(p.corners.len(), 4, "the rectangle's corners only");
-    assert_eq!(p.chained, [(4, false, 5, true)]);
+    assert_eq!(p.chained, [ChainCorner { a: (4, false), b: (5, true), kind: CornerType::Mitre, flip: false }]);
     assert_eq!(p.fits, [Fit { member: 4, at_start: true, against: vec![0] }]);
     // An override at the chained corner is at a corner of the frame.
     let o = CornerOverride { members: vec!["pair1".into(), "pair2".into()], corner: CornerType::Butt, flip: false };
     assert!(plan(&segs, &planes, &in_order(&segs), &|_, _| true, &[o]).is_ok());
+}
+
+#[test]
+fn an_override_on_a_chained_corner_reaches_the_plan() {
+    let p3 = |x: f64, y: f64, z: f64| Vec3::new(x, y, z);
+    let segs =
+        vec![("pair1".to_string(), p3(0.0, 0.0, 0.0), p3(0.0, 0.0, 300.0)), ("pair2".to_string(), p3(0.0, 0.0, 300.0), p3(300.0, 300.0, 300.0))];
+    let planes = vec![None; segs.len()];
+    let chained = |corner: CornerType, flip: bool| {
+        let o = CornerOverride { members: vec!["pair1".into(), "pair2".into()], corner, flip };
+        plan(&segs, &planes, &in_order(&segs), &|_, _| true, &[o]).unwrap().chained
+    };
+    let butt = chained(CornerType::Butt, true);
+    assert_eq!(butt.len(), 1);
+    assert_eq!((butt[0].kind, butt[0].flip), (CornerType::Butt, true));
+    // An Auto override is the chain's own joint, a mitre.
+    let auto = chained(CornerType::Auto, false);
+    assert_eq!((auto[0].kind, auto[0].flip), (CornerType::Mitre, false));
 }
 
 #[test]

@@ -446,14 +446,26 @@ pub struct Fit {
     pub against: Vec<usize>,
 }
 
+/// A corner between two members in no group plane, chained and mitred unless an override says otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChainCorner {
+    /// (member, at_start) of the earlier member's end in laying order, and the later one's.
+    pub a: (usize, bool),
+    pub b: (usize, bool),
+    /// Its override's type, an Auto override meaning the chain's own joint; Mitre without one.
+    pub kind: CornerType,
+    /// Its override's Flip.
+    pub flip: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
     pub ranks: Vec<Rank>,
     pub corners: Vec<AutoCorner>,
     /// In laying order.
     pub fits: Vec<Fit>,
-    /// The corners between members in no group plane, earlier member first: chained and mitred.
-    pub chained: Vec<(usize, bool, usize, bool)>,
+    /// The corners between members in no group plane.
+    pub chained: Vec<ChainCorner>,
 }
 
 /// The joint for an angle in degrees from in line (spec A5), compared rounded to 0.01° so a boundary never flips.
@@ -476,7 +488,7 @@ type End = (usize, usize, bool);
 /// What happens at each point where members meet, wherever their planes (spec A4). With a group tube passing
 /// through, each group end there fits it and the earlier ends; else the two earliest group ends make a corner and
 /// later ones fit; one end alone is left. Members in no group plane come after: the two earliest of theirs at a
-/// point chain, and any other fits every tube already there. Crossing tubes are left whole (stage 3 splits them).
+/// point chain (mitred, or as their override says), and any other fits every tube already there. Crossing tubes are left whole (stage 3 splits them).
 /// An override matches the point whose ending members are exactly its `members` (decision 3); one that matches no
 /// corner fails.
 pub fn plan(
@@ -577,8 +589,10 @@ pub fn plan(
         let mut done = 0;
         if let [a, b, ..] = rest.as_slice() {
             done = 2;
-            matched();
-            chained.push((a.1, a.2, b.1, b.2));
+            // An Auto override at a chain's corner is its own joint, a mitre.
+            let (kind, flip) = matched().map_or((CornerType::Mitre, false), |o| (o.corner, o.flip));
+            let kind = if kind == CornerType::Auto { CornerType::Mitre } else { kind };
+            chained.push(ChainCorner { a: (a.1, a.2), b: (b.1, b.2), kind, flip });
         }
         for (j, e) in rest.iter().enumerate().skip(done) {
             let earlier = rest.iter().take(j).map(|e| e.1);
