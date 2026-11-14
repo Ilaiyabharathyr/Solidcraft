@@ -48,6 +48,7 @@ fn schemas_and_the_key_check_agree() {
             "corner",
             "corners",
             "exact_regions",
+            "fit_ends",
             "flip",
             "lines",
             "locate",
