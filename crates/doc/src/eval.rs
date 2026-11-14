@@ -7557,7 +7557,7 @@ fn feature_tools_with_constructor(
                     lo = hs.iter().cloned().fold(lo, f64::min) - margin;
                 }
             }
-            let is_symmetric_offset = extent.direction == crate::Direction::Symmetric && extent.symmetric_offset && off.abs() > 1e-9;
+            let is_symmetric_offset = direction == crate::Direction::Symmetric && extent.symmetric_offset && off.abs() > 1e-9;
             let untrimmed = extent.to.is_none() && extent.from.is_none() && !extent.through_all;
             let mut tools = Vec::new();
             if is_symmetric_offset {
