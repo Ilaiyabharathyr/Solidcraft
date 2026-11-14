@@ -3576,7 +3576,7 @@ pub(crate) fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, n
                     // own remove button (#3683). Drawn straight into the row, which is this field's
                     // own: a scope around it would take room and widen the dialog.
                     if inp.multi {
-                        let open = d.listed == Some(i);
+                        let open = crate::dialogs_frame::folds_own_rows(&d.kind, i).unwrap_or(d.listed == Some(i));
                         let at = rect.translate(vec2(-t.space_24, 0.0));
                         let label = solidcraft_ui_text::tr_label(if open { "Hide the picked items" } else { "Show the picked items" });
                         let arrow = crate::ui_kit::disclosure_button_at(ui, at, open, label);
@@ -3612,7 +3612,9 @@ pub(crate) fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, n
         }
         d.list_hover = hovered;
     }
-    if let Some(i) = toggle_list {
+    if let Some(i) = toggle_list
+        && !crate::dialogs_frame::toggle_own_rows(&mut d.kind, i)
+    {
         d.listed = if d.listed == Some(i) { None } else { Some(i) };
     }
     if let Some((input, row, item)) = remove {
@@ -4231,13 +4233,17 @@ pub(crate) fn sync_feature_edit(app: &mut SolveApp) {
     app.session.feature_edit_sketch = edited.or(started_from);
 }
 
-/// The width a dialog's card asks for: the managers' wider form, a study's table, or a card.
+/// The width a dialog's card asks for: the managers' wider form, a study's table, Frame Member's
+/// corner rows, or a card.
 pub(crate) fn card_width(d: &Dialog) -> f32 {
     let t = Tokens::get();
     if matches!(d.kind, Kind::Appearance(_) | Kind::Material { .. }) {
         t.form_card_width + t.form_label_width + t.space_6
     } else if matches!(&d.kind, Kind::Motion(k) if k.wide()) {
         t.form_card_width * 3.0
+    } else if matches!(d.kind, Kind::Frame(_)) {
+        // Room for a corner override's type, Flip and bin on one row.
+        t.form_card_width + 2.0 * t.space_24
     } else {
         t.form_card_width
     }

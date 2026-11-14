@@ -48,7 +48,8 @@ the selected body (or the last body of the active component).
 ## Corners
 
 **Corner Type** (`corner`) cuts the members where two of them meet: `none` (the default, members
-overlap as before), `mitre`, `butt` or `coped_butt`.
+overlap as before), `mitre`, `butt` or `coped_butt` (shown as **None**, **Mitre**, **Butt** and
+**Coped**).
 
 A **corner** is a point where exactly two of the feature's members end, within 0.001 mm. Where three
 or more members end, where a member ends on the middle of another, and where lines cross, nothing is
@@ -62,10 +63,10 @@ A corner sharper than 5 degrees inside is refused: "Corner at (x, y, z) is too s
   through member ends flush with the outside of the other, and the other is cut flat on the near
   face of the through member. A butt whose through member would run past the far end of the other
   member is refused: "Corner at (x, y, z) is too flat to butt".
-- **Coped Butt**: the through member is as for Butt. The butting member is cut to the through
-  member's full outer shape, so it fits exactly (a fishmouth on round tube). It keeps its largest
-  piece on its own side of the through member, and a member that lies wholly inside the through
-  member is refused.
+- **Coped** (`coped_butt`): the through member is as for Butt. The butting member is cut to the
+  through member's full outer shape, so it fits exactly (a fishmouth on round tube). It keeps its
+  largest piece on its own side of the through member, and a member that lies wholly inside the
+  through member is refused.
 
 **Corner Overrides** (`corners`) give single corners their own type and flip. Each is saved by the
 two lines that meet there, not by the point, so it survives a dimension change while the lines still
@@ -76,12 +77,16 @@ feature's Corner Type leaves existing overrides alone; a new override starts as 
 A member cut away completely fails with "the member on line `id` was cut away completely", and one
 its corners cut into pieces with "the member on line `id` is cut into pieces by its corners".
 
-An **End Cap** goes on an uncut end, or on the through member's end of a Butt or Coped Butt corner,
-which is cut square to its own line. It refuses every other end: a mitre, the butting member's end of
-a Butt (it lies against the through member), and the cope face of a Coped Butt corner.
+An **End Cap** goes on an uncut end, or on the through member's end of a Butt or Coped corner, which
+is cut square to its own line. It refuses every other end: a mitre, the butting member's end of a
+Butt (it lies against the through member), and the cope face of a Coped corner.
 
 In the dialog, a box drag in the view picks the frame sketch's straight lines (not construction,
-projected lines or arcs), and the corner points when Corner Overrides is active (Shift adds).
+projected lines or arcs), and the corner points when Corner Overrides is active (Shift adds). Each
+override is one row, **Corner 1**, **Corner 2**… in pick order: its type, its **Flip** (greyed for
+None and Mitre) and a bin that removes it. The arrow on the Corner Overrides line folds the rows
+away; picking another corner opens them again. Pointing at an overridden corner in the view lights
+its row (or the Corner Overrides line while the rows are folded).
 
 ```json
 {"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "round_tube", "diameter": 40, "wall": 3}, "corner": "coped_butt"}}
@@ -139,8 +144,8 @@ vendor's aluminium extrusion for example, comes from a sketch: draw it or insert
 **End Cap** (WELDMENTS › CREATE, `frame.end_cap`) closes open ends of members with plates, one
 separate body per end, named after the member (`Post End Cap`). Pick the end faces in the view:
 each must be a flat open end of a frame member, square to its line: an uncut end, or the through
-member's end of a Butt or Coped Butt corner. The butting member's end and a cope face are refused
-("not an open end of the member"), as is a mitre ("not square to the member's line").
+member's end of a Butt or Coped corner. The butting member's end and a cope face are refused ("not
+an open end of the member"), as is a mitre ("not square to the member's line").
 
 - The plate covers the outside of the profile: on a closed section (a square or rectangular
   tube, a pipe, a bar) it is the profile's outer outline; on an open section (an angle, a

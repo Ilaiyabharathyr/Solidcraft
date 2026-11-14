@@ -34,7 +34,7 @@ const ANCHORS: &[(&str, &str)] = &[
 ];
 
 /// The corner types as `frame.member` names them, and their labels.
-pub(crate) const CORNER_TYPES: [(&str, &str); 4] = [("none", "None"), ("mitre", "Mitre"), ("butt", "Butt"), ("coped_butt", "Coped Butt")];
+pub(crate) const CORNER_TYPES: [(&str, &str); 4] = [("none", "None"), ("mitre", "Mitre"), ("butt", "Butt"), ("coped_butt", "Coped")];
 
 /// Whether Flip means anything for the corner type `index`: which member runs through.
 fn flips(index: usize) -> bool {
@@ -84,12 +84,15 @@ pub struct Member {
     pub ghost: bool,
     /// The tubes clicked in the view (their centrelines' ids, [`Centreline::id`]), for Remove Tube.
     pub picked_tubes: Vec<String>,
-    /// How the corners are finished (an index into [`CORNER_TYPES`]), and for Butt and Coped Butt
+    /// How the corners are finished (an index into [`CORNER_TYPES`]), and for Butt and Coped
     /// whether the other member runs through.
     pub corner: usize,
     pub flip: bool,
     /// Each corner picked in Corner Overrides with its own type and flip.
     pub overrides: Vec<(Sel, usize, bool)>,
+    /// Whether the Corner Overrides rows show (the arrow on its line folds them; a new pick
+    /// opens them). For this dialog only: not saved.
+    pub overrides_open: bool,
 }
 
 /// A member of the Frame Member the dialog previews, as its live preview made it: its id (a
@@ -332,6 +335,7 @@ impl Member {
             corner: 0,
             flip: false,
             overrides: Vec::new(),
+            overrides_open: true,
         }
     }
 
@@ -645,7 +649,7 @@ fn tr(text: &str) -> &str {
 }
 
 /// The dialog's own rows (after the Lines and Section inputs), then under a separator the corner
-/// settings with Corner Overrides and a block for each overridden corner; true when Enter was
+/// settings with Corner Overrides and a row for each overridden corner; true when Enter was
 /// pressed in a value.
 pub fn rows(app: &SolveApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
     let Kind::Frame(m) = &mut d.kind else { return false };
@@ -656,39 +660,106 @@ pub fn rows(app: &SolveApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
     if flips(m.corner) {
         form_row(ui, "Flip", |ui| check(ui, &mut m.flip));
     }
-    input_rows_range(d, ui, &app.session, app.preferences.origin_plane_names, 2..3);
-    corner_rows(ui, d);
+    // The overridden corner under the pointer in the view lights its row, or the Corner Overrides
+    // line while the rows are folded.
+    let hovered = match &app.viewport.hover {
+        Some(crate::viewport::Hit::SketchPoint { sketch, id, .. }) => Some(Sel::ExternalSketchPoint { sketch: *sketch, id: id.clone() }),
+        _ => None,
+    };
+    let lit = hovered.and_then(|h| crate::selection::items(&d.inputs, 2).iter().position(|p| *p == h));
+    let folded = matches!(&d.kind, Kind::Frame(m) if !m.overrides_open);
+    lit_rows(ui, "Corner Overrides", lit.is_some() && folded, |ui| {
+        input_rows_range(d, ui, &app.session, app.preferences.origin_plane_names, 2..3);
+    });
+    corner_rows(ui, d, lit);
     enter
 }
 
-/// A corner's text in the list: its type, flipped or not.
-fn corner_text(corner: usize, flip: bool) -> String {
-    let name = tr(CORNER_TYPES.get(corner).map_or("None", |c| c.1));
-    if flip && flips(corner) { solidcraft_ui_text::format("ui.frame_corner_flipped", &[("corner", name)]) } else { name.to_string() }
+/// `add`'s rows, lit as a hovered row is when `lit` (rect `dialog:lit:{name}`).
+fn lit_rows(ui: &mut egui::Ui, name: &str, lit: bool, add: impl FnOnce(&mut egui::Ui)) {
+    let behind = ui.painter().add(egui::Shape::Noop);
+    let top = ui.cursor().top();
+    add(ui);
+    if lit {
+        let t = solidcraft_theme::Tokens::get();
+        let rect = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
+        ui.painter().set(behind, egui::Shape::rect_filled(rect, t.radius_sm, t.hover));
+        crate::scenario::publish_rect(&format!("dialog:lit:{name}"), rect);
+    }
 }
 
-/// Under Corner Overrides, a block for each picked corner (its type, its Flip and a bin), as Sheet
-/// Metal Flange has for each edge; then a row for each saved override whose two lines no longer
-/// meet, kept until it is removed.
-fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog) {
+/// Whether input `input` of the dialog folds rows of its own (Frame Member's Corner Overrides)
+/// rather than listing its picks: `Some(open)`.
+pub(crate) fn folds_own_rows(kind: &Kind, input: usize) -> Option<bool> {
+    match kind {
+        Kind::Frame(m) if input == 2 => Some(m.overrides_open),
+        _ => None,
+    }
+}
+
+/// Fold or open input `input`'s own rows; false when it has none.
+pub(crate) fn toggle_own_rows(kind: &mut Kind, input: usize) -> bool {
+    match kind {
+        Kind::Frame(m) if input == 2 => {
+            m.overrides_open = !m.overrides_open;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// "Corner n", the label of the n-th override row (from 1).
+fn corner_label(n: usize) -> String {
+    solidcraft_ui_text::format("ui.frame_corner_number", &[("n", &n.to_string())])
+}
+
+/// Under Corner Overrides, one row for each picked corner, "Corner n" in pick order: its type, its
+/// Flip (greyed for None and Mitre, so the rows line up) and a bin; then one for each saved
+/// override whose two lines no longer meet, kept until it is removed. Folded, none show. `lit`:
+/// the picked corner under the pointer in the view, whose row is lit.
+fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>) {
     let Kind::Frame(m) = &mut d.kind else { return };
     let picks = crate::selection::items(&d.inputs, 2).to_vec();
+    // A corner taken out forgets its own type and flip: picked again, it starts afresh.
+    m.overrides.retain(|o| picks.contains(&o.0));
+    for pick in &picks {
+        if !m.overrides.iter().any(|o| o.0 == *pick) {
+            // A new pick starts as the feature's type, unflipped, and shows its row.
+            m.overrides.push((pick.clone(), m.corner, false));
+            m.overrides_open = true;
+        }
+    }
+    let missing = d.extra.get("corners").and_then(Value::as_array).map_or(0, Vec::len);
+    if !m.overrides_open && !picks.is_empty() {
+        return;
+    }
     let labels = CORNER_TYPES.map(|c| c.1);
     let mut drop = None;
     for (n, pick) in picks.iter().enumerate() {
-        let slot = override_slot(&mut m.overrides, pick, m.corner);
-        let Some((_, corner, flip)) = m.overrides.get_mut(slot) else { continue };
-        // Each block's rows share their labels: a scope of its own keeps their ids apart.
+        let Some((_, corner, flip)) = m.overrides.iter_mut().find(|o| o.0 == *pick) else { continue };
+        let label = corner_label(n + 1);
+        // A scope of its own keeps each row's ids apart.
         ui.scope_builder(egui::UiBuilder::new().id_salt(("frame_corner", n)), |ui| {
-            form_row(ui, &corner_text(*corner, *flip), |ui| {
-                if crate::ui_kit::bin_button(ui, tr("Remove this corner")).clicked() {
-                    drop = Some(pick.clone());
-                }
+            lit_rows(ui, &label, lit == Some(n), |ui| {
+                form_row(ui, &label, |ui| {
+                    // What is left beside Flip (box, gap, label) and the bin.
+                    let t = solidcraft_theme::Tokens::get();
+                    let beside = t.space_14 + t.space_6 + crate::ui_kit::ContentWidth::label(ui, tr("Flip")) + t.control_height;
+                    let width = ui.available_width() - beside - 2.0 * ui.spacing().item_spacing.x;
+                    crate::ui_kit::settings_control_width(ui, width, |ui| crate::ui_kit::dropdown(ui, &format!("frame_corner_{n}"), corner, &labels));
+                    let enabled = flips(*corner);
+                    ui.add_enabled_ui(enabled, |ui| {
+                        let mut on = *flip && enabled;
+                        crate::ui_kit::checkbox(ui, tr("Flip"), &mut on);
+                        if enabled {
+                            *flip = on;
+                        }
+                    });
+                    if crate::ui_kit::bin_button(ui, tr("Remove this corner")).clicked() {
+                        drop = Some(pick.clone());
+                    }
+                });
             });
-            choice_row(ui, "Type", &format!("frame_corner_{n}"), corner, &labels);
-            if flips(*corner) {
-                form_row(ui, "Flip", |ui| check(ui, flip));
-            }
         });
     }
     if let Some(pick) = drop
@@ -696,11 +767,12 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog) {
     {
         input.items.retain(|x| *x != pick);
     }
-    let missing = d.extra.get("corners").and_then(Value::as_array).map_or(0, Vec::len);
     let mut gone = None;
     for k in 0..missing {
+        let label = corner_label(picks.len() + k + 1);
         ui.scope_builder(egui::UiBuilder::new().id_salt(("frame_missing_corner", k)), |ui| {
-            form_row(ui, "Missing corner", |ui| {
+            form_row(ui, &label, |ui| {
+                ui.label(tr("Missing corner"));
                 if crate::ui_kit::bin_button(ui, tr("Remove this corner")).clicked() {
                     gone = Some(k);
                 }
@@ -719,15 +791,6 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog) {
             d.extra.remove("corners");
         }
     }
-}
-
-/// Where the own type and flip of the corner picked as `pick` are kept: a new pick starts as the
-/// feature's type, unflipped.
-fn override_slot(overrides: &mut Vec<(Sel, usize, bool)>, pick: &Sel, corner: usize) -> usize {
-    overrides.iter().position(|o| o.0 == *pick).unwrap_or_else(|| {
-        overrides.push((pick.clone(), corner, false));
-        overrides.len().saturating_sub(1)
-    })
 }
 
 /// Why a point picked into Corner Overrides is not taken: no two members end there alone. `None`

@@ -1288,7 +1288,7 @@ fn an_edit_opens_with_an_override_whose_corner_has_gone() {
     assert_eq!(apply_commands(&h.app, &e).unwrap()[0].1["params"]["corners"], gone);
     h.app.dialog = Some(e);
     h.frames(2);
-    let bin = "dialog:button:Missing corner:×";
+    let bin = "dialog:button:Corner 1:×";
     assert!(crate::scenario::rect_of(bin).is_some(), "the missing corner has a row with a bin");
     h.step(&json!({"click": {"handle": bin}})).unwrap();
     h.frames(1);
@@ -1384,4 +1384,121 @@ fn a_box_over_the_frame_sketch_picks_its_lines() {
     let corners = &h.app.dialog.as_ref().unwrap().inputs[2].items;
     assert_eq!(corners.len(), 4, "{corners:?}");
     assert!(corners.contains(&Sel::ExternalSketchPoint { sketch: frame, id: point_at(&h.app, 600.0, 400.0) }), "{corners:?}");
+}
+
+/// The frame dialog in a harness, the frame's lines picked, the feature's type `corner`, and the
+/// rectangle's corners at (0, 0) and (600, 400) picked into Corner Overrides.
+fn overrides_dialog(corner: &str) -> (crate::scenario::Harness, [Sel; 2]) {
+    let mut h = crate::scenario::Harness::new();
+    h.app.home.open = false;
+    for (id, p) in frame_commands() {
+        h.app.run(id, p).unwrap();
+    }
+    let lines = frame_lines(&h.app);
+    h.app.session.selection = lines.iter().map(|id| Sel::SketchCurve { id: id.clone(), sketch: None }).collect();
+    h.app.start("frame.member");
+    let frame = sketch_id(&h.app, "Frame");
+    let picks = [(0.0, 0.0), (600.0, 400.0)].map(|(x, y)| Sel::ExternalSketchPoint { sketch: frame, id: point_at(&h.app, x, y) });
+    let d = h.app.dialog.as_mut().unwrap();
+    member(d).corner = corner_type(corner);
+    d.active = 2;
+    for p in &picks {
+        h.app.dialog.as_mut().unwrap().pick(&h.app.session, p.clone());
+    }
+    h.frames(2);
+    (h, picks)
+}
+
+/// A corner taken out of Corner Overrides forgets its own type and flip: picked again, it starts
+/// as the feature's type, unflipped.
+#[test]
+fn a_corner_picked_again_starts_as_the_features_type() {
+    let (mut h, [corner, _]) = overrides_dialog("mitre");
+    let d = h.app.dialog.as_mut().unwrap();
+    let o = member(d).overrides.iter_mut().find(|o| o.0 == corner).unwrap();
+    (o.1, o.2) = (corner_type("butt"), true);
+    d.inputs[2].items.retain(|x| *x != corner);
+    h.frames(1);
+    h.app.dialog.as_mut().unwrap().pick(&h.app.session, corner.clone());
+    h.frames(1);
+    let m = member(h.app.dialog.as_mut().unwrap());
+    let o = m.overrides.iter().find(|o| o.0 == corner).unwrap();
+    assert_eq!((CORNER_TYPES[o.1].0, o.2), ("mitre", false), "{:?}", m.overrides);
+}
+
+/// Each override is one row: "Corner n" (in pick order), its type, its Flip (greyed for None and
+/// Mitre so the rows line up) and its bin, which removes that corner alone.
+#[test]
+fn each_corner_override_is_one_row() {
+    let (mut h, picks) = overrides_dialog("butt");
+    let d = h.app.dialog.as_mut().unwrap();
+    member(d).overrides[0].1 = corner_type("mitre");
+    h.frames(2);
+    let flips = h.widgets("Flip");
+    for n in [1, 2] {
+        let bin = crate::scenario::rect_of(&format!("dialog:button:Corner {n}:×")).unwrap_or_else(|| panic!("Corner {n} has a bin"));
+        let [_, y] = h.widget(&format!("Corner {n}")).unwrap_or_else(|| panic!("a row labelled Corner {n}"));
+        assert!((y - f64::from(bin.center().y)).abs() < 2.0, "Corner {n}: label at {y}, bin at {bin:?}");
+        assert!(flips.iter().any(|f| (f[1] - y).abs() < 2.0), "Corner {n}: a Flip on its row: {flips:?} vs {y}");
+    }
+    assert!(h.widgets("Type").is_empty(), "no separate Type row");
+    // Corner 2's type reads as its own: the feature's Butt.
+    assert!(h.widget_near("Butt", "Corner 2").is_some());
+    let bin = "dialog:button:Corner 2:×";
+    h.step(&json!({"click": {"handle": bin}})).unwrap();
+    h.frames(1);
+    assert_eq!(h.app.dialog.as_ref().unwrap().inputs[2].items, std::slice::from_ref(&picks[0]));
+}
+
+/// Coped Butt reads as "Coped" wherever a person sees it; its value stays `coped_butt`.
+#[test]
+fn coped_butt_reads_as_coped() {
+    assert_eq!(CORNER_TYPES[corner_type("coped_butt")].1, "Coped");
+    let (mut h, _) = overrides_dialog("coped_butt");
+    h.frames(1);
+    assert!(h.widget_near("Coped", "Corner 1").is_some() && h.widget("Coped Butt").is_none());
+}
+
+/// The Corner Overrides line's arrow folds the corner rows away and back; a new pick opens them.
+#[test]
+fn the_corner_override_rows_fold() {
+    let (mut h, _) = overrides_dialog("butt");
+    let rows = || [1, 2].map(|n| crate::scenario::rect_of(&format!("dialog:button:Corner {n}:×")).is_some());
+    assert_eq!(rows(), [true, true], "open at the start");
+    let toggle = "dialog:list_toggle:Corner Overrides";
+    h.step(&json!({"click": {"handle": toggle}})).unwrap();
+    h.frames(1);
+    assert_eq!(rows(), [false, false], "folded");
+    assert!(crate::scenario::handle_at(toggle).is_some(), "the arrow stays to open them again");
+    h.step(&json!({"click": {"handle": toggle}})).unwrap();
+    h.frames(1);
+    assert_eq!(rows(), [true, true], "open again");
+    h.step(&json!({"click": {"handle": toggle}})).unwrap();
+    h.frames(1);
+    let corner = Sel::ExternalSketchPoint { sketch: sketch_id(&h.app, "Frame"), id: point_at(&h.app, 600.0, 0.0) };
+    h.app.dialog.as_mut().unwrap().pick(&h.app.session, corner);
+    h.frames(2);
+    assert!(crate::scenario::rect_of("dialog:button:Corner 3:×").is_some(), "a new pick opens the rows");
+}
+
+/// The pointer over an overridden corner in the view lights that corner's row (the Corner
+/// Overrides line while the rows are folded); over a corner with no override, nothing.
+#[test]
+fn hovering_an_overridden_corner_lights_its_row() {
+    let (mut h, _) = overrides_dialog("butt");
+    h.app.set_origin_shown(false);
+    h.call("ui.view", json!({"view": "top"}));
+    h.call("ui.view", json!({"view": "fit"}));
+    h.frames(2);
+    let lit = || crate::scenario::rects("dialog:lit:").into_iter().map(|r| r.0).collect::<Vec<_>>();
+    h.step(&json!({"move": {"world": [600, 400, 0]}})).unwrap();
+    h.frames(2);
+    assert_eq!(lit(), ["dialog:lit:Corner 2"]);
+    h.step(&json!({"move": {"world": [600, 0, 0]}})).unwrap();
+    h.frames(2);
+    assert!(lit().is_empty(), "{:?}", lit());
+    h.step(&json!({"click": {"handle": "dialog:list_toggle:Corner Overrides"}})).unwrap();
+    h.step(&json!({"move": {"world": [600, 400, 0]}})).unwrap();
+    h.frames(2);
+    assert_eq!(lit(), ["dialog:lit:Corner Overrides"]);
 }
