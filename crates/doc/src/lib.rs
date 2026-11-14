@@ -40,6 +40,7 @@ pub mod format;
 mod format_offsets;
 pub mod frame;
 pub mod frame_corners;
+mod frame_fit;
 pub mod frame_layout;
 pub mod gpu_plan;
 mod history_names;
