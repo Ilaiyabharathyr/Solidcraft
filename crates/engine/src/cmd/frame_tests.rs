@@ -2802,8 +2802,9 @@ fn a_mitre_frame_keeps_its_crossings_overlapping() {
     // Only Auto cuts crossings: on a Mitre frame the diagonals stay whole and pass through each other, built exactly
     // as before crossings were cut. Each diagonal meets two sides at its corners, three tubes at a point, which a
     // Mitre frame leaves square: A × L = 420.82 × 721.110 = 303459.78 each, its box its line ± (11.094, 16.641)
-    // across it (20 × (2, 3)/√13). The volumes, to the last bit, and the face names were recorded on
-    // `frame-crossings` at 27b384111, before the build changed (its non-Auto path is stage 2's).
+    // across it (20 × (2, 3)/√13). The volumes (to 1e-12, as the last bits may differ from platform to platform)
+    // and the face names were recorded on `frame-crossings` at 27b384111, before the build changed (its non-Auto path
+    // is stage 2's).
     let mut s = Session::default();
     x_brace_frame(&mut s);
     run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "names": {"d1": "D1", "d2": "D2"}}));
@@ -2820,7 +2821,7 @@ fn a_mitre_frame_keeps_its_crossings_overlapping() {
             "{name}: {:?}",
             got[name]
         );
-        assert!(v == recorded, "{name}: {v:?}");
+        assert!(rel(v, recorded) < 1e-12, "{name}: {v:?}");
         assert_eq!(faces[name], names, "{name}");
     }
     let names: Vec<String> = ["D1", "D2"].map(String::from).to_vec();
@@ -2848,6 +2849,62 @@ fn a17_pairs_on_a_group_tube_are_fitted_with_fit_ends_off() {
     }
     let o = overlap(&mut s, "B");
     assert!(o < 1e-3, "the frame's tubes overlap by {o} mm³: {bs:?}");
+}
+
+#[test]
+fn a_dense_auto_grid_is_refused_not_built() {
+    // Hostile input: 40 lines along X (0…410) and 40 along Y (0…400), 10 mm apart, cross 1600 times. Under Auto each
+    // crossing cuts one of its two lines: 80 + 1600 = 1680 pieces, past the 1000 members a feature may have. Refused
+    // at once, saying why, whether the frame is made on the grid or its sketch is edited into one.
+    let grid = |s: &mut Session| {
+        for k in 0..40 {
+            let at = 5 + 10 * k;
+            run(s, "sketch.line", json!({"points": [[0, at], [410, at]]}));
+            run(s, "sketch.line", json!({"points": [[at, 0], [at, 400]]}));
+        }
+    };
+    let why = "counting the pieces crossings make";
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Grid"}));
+    grid(&mut s);
+    run(&mut s, "sketch.finish", json!({}));
+    let e = s.execute("frame.member", &json!({"sketch": "Grid", "profile": tube(), "corner": "auto"})).unwrap_err().to_string();
+    assert!(e.contains(why), "{e}");
+    // Made on two lines, then the grid drawn into its sketch: the feature fails.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Grid"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, -100], [400, -100]]}));
+    run(&mut s, "sketch.line", json!({"points": [[0, -200], [400, -200]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let fid = run(&mut s, "frame.member", json!({"sketch": "Grid", "profile": tube(), "corner": "auto"}))["feature"].as_u64().unwrap();
+    run(&mut s, "sketch.edit", json!({"sketch": "Grid"}));
+    grid(&mut s);
+    let finished = s.execute("sketch.finish", &json!({})).map_err(|e| e.to_string());
+    let e = finished.err().or_else(|| s.model.result(fid).and_then(|r| r.error.clone())).unwrap_or_default();
+    assert!(e.contains(why), "{e}");
+}
+
+#[test]
+fn a_line_id_with_a_greater_than_sign_is_a_line_of_its_own() {
+    // Ruling C3: a sketch id may hold `>`, and only Auto's crossings make pieces. An open U of a (0, 0)…(600, 0),
+    // b (600, 0)…(600, 400) and `a>b` (600, 400)…(0, 400) has no crossing: three tubes, numbered in drawing order as
+    // any lines are, Mitre or Auto. Remove Tube of b keeps `a>b`, still a tube of its own with its own name.
+    for corner in ["mitre", "auto"] {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "U"}));
+        for (id, points) in [("a", [[0, 0], [600, 0]]), ("b", [[600, 0], [600, 400]]), ("a>b", [[600, 400], [0, 400]])] {
+            run(&mut s, "sketch.line", json!({"points": points, "ids": [id]}));
+        }
+        run(&mut s, "sketch.finish", json!({}));
+        let fid = run(&mut s, "frame.member", json!({"sketch": "U", "profile": tube(), "corner": corner}))["feature"].clone();
+        let names: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+        assert_eq!(names, ["Rect Tube 40x40x3", "Rect Tube 40x40x3 (2)", "Rect Tube 40x40x3 (3)"], "{corner}");
+        remove(&mut s, json!([{"feature": fid, "line": "b"}]));
+        let solidcraft_doc::FeatureKind::FrameMember { lines, .. } = member_kind(&s, &fid) else { panic!() };
+        assert_eq!(lines, ["a", "a>b"], "{corner}");
+        let names: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+        assert_eq!(names, ["Rect Tube 40x40x3", "Rect Tube 40x40x3 (3)"], "{corner}");
+    }
 }
 
 #[test]

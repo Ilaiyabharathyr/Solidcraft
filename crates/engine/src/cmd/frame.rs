@@ -482,7 +482,7 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
     // Each member's name is pinned to its line as the feature is made, so deleting or adding a
     // line later leaves the other members' names alone.
     let st = s.model.state();
-    let ids = frame::member_line_ids(&st, &kind).map_err(|e| bad(cmd, e.to_string()))?;
+    let (ids, later) = frame::member_parts(&st, &kind).map_err(|e| bad(cmd, e.to_string()))?;
     if let FeatureKind::FrameMember { corners, .. } = &kind {
         let mut pairs = std::collections::HashSet::new();
         for c in corners {
@@ -508,7 +508,7 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     }
-    let pinned: BTreeMap<String, String> = ids.iter().cloned().zip(frame::member_names(&st, &ids, &kept, &base)).collect();
+    let pinned: BTreeMap<String, String> = ids.iter().cloned().zip(frame::member_names(&st, &ids, &later, &kept, &base)).collect();
     if let FeatureKind::FrameMember { names, .. } = &mut kind {
         *names = pinned;
     }
@@ -550,10 +550,9 @@ fn remove_member(s: &mut Session, p: &Value) -> Result<Value> {
     // No `lines` means every line of the sketch: they are listed as they are now before one goes,
     // with the rule evaluation uses.
     if lines.is_empty() && path_sketch.is_some() && gone.iter().any(|line| !is_pair(line, pairs)) {
-        let mut every = frame::member_line_ids(&s.model.state_before(f.id), &f.kind).map_err(|e| bad(cmd, e.to_string()))?;
-        // Under Auto the ids are pieces too: a later piece (`L>X`) is no line of its own.
-        every.retain(|l| !is_pair(l, pairs) && !l.contains('>'));
-        *lines = every;
+        let (every, later) = frame::member_parts(&s.model.state_before(f.id), &f.kind).map_err(|e| bad(cmd, e.to_string()))?;
+        // Under Auto the ids are pieces too: a later piece is no line of its own.
+        *lines = every.into_iter().zip(later).filter(|(l, piece)| piece.is_none() && !is_pair(l, pairs)).map(|(l, _)| l).collect();
     }
     if let Some(line) = gone.iter().find(|line| !is_pair(line, pairs) && !lines.iter().any(|l| l == *line)) {
         return Err(bad(cmd, format!("`{line}` is not a tube of {}", f.name)));
