@@ -663,6 +663,33 @@ fn a_design_without_fit_ends_saves_without_it() {
     assert!(!s.doc.to_json().contains("fit_ends"));
 }
 
+#[test]
+fn a_three_tube_override_on_a_mitre_frame_is_refused() {
+    let mut s = Session::default();
+    let ids = three_at_a_point(&mut s);
+    let p = json!({"sketch": "Y", "profile": tube(), "corner": "mitre", "corners": [{"members": ids, "corner": "butt"}]});
+    let e = s.execute("frame.member", &p).unwrap_err().to_string();
+    assert!(e.contains("`corners`"), "{e}");
+    run(&mut s, "frame.member", json!({"sketch": "Y", "profile": tube(), "corner": "auto", "corners": [{"members": ids, "corner": "butt"}]}));
+}
+
+#[test]
+fn a_hand_edited_three_tube_override_on_a_mitre_frame_fails() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let l = sketch_lines(&s, "Frame");
+    let (a, b, c) = (&l[0].0, &l[1].0, &l[2].0);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "corners": [{"members": [a, b], "corner": "butt"}]}));
+    let member = s.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().id;
+    let json = serde_json::from_str::<Value>(&s.doc.to_json()).unwrap().to_string();
+    let from = format!("\"members\":[\"{a}\",\"{b}\"]");
+    assert!(json.contains(&from), "{json}");
+    let edited = json.replace(&from, &format!("\"members\":[\"{a}\",\"{b}\",\"{c}\"]"));
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&edited).unwrap());
+    let e = reopened.model.result(member).and_then(|r| r.error.clone()).unwrap_or_default();
+    assert!(e.contains("A corner override is not at a corner of the frame"), "{e}");
+}
+
 /// A frame sketch `V` of the lines through `points` (one line per pair of neighbours), with tube
 /// members finished `corner`.
 fn polyline_frame(points: Value, corner: &str) -> (Session, Result<Value, String>) {

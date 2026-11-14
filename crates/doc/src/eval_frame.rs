@@ -129,7 +129,11 @@ fn corner_ends(
             if o.members.len() < 2 {
                 return Err(DocError::Invalid("A corner override names at least two members".into()));
             }
-            continue;
+            // Three or more are Auto's alone; Auto builds as None until its rule is built.
+            if finish.0 == CornerType::Auto {
+                continue;
+            }
+            return Err(DocError::Invalid("A corner override is not at a corner of the frame".into()));
         };
         let k = at.get(&pair(a, b)).ok_or_else(|| DocError::Invalid("A corner override is not at a corner of the frame".into()))?;
         if let Some(f) = finishes.get_mut(*k) {

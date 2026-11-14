@@ -490,6 +490,9 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
             sorted.sort();
             sorted.dedup();
             let n = c.members.len();
+            if n > 2 && corner != CornerType::Auto {
+                return Err(bad(cmd, "`corners`: an override of three or more members needs `corner` auto"));
+            }
             if !(2..=frame::MAX_MEMBERS).contains(&n) || sorted.len() != n || !sorted.iter().all(|m| ids.contains(*m)) {
                 return Err(bad(
                     cmd,
