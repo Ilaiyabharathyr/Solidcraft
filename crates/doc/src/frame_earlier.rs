@@ -39,7 +39,7 @@ use solidcraft_geom::prelude::*;
 use solidcraft_kernel::{self as kernel, PointClass};
 
 use super::super::{ModelState, mirror_matrix, pattern_transforms, point, val};
-use super::{Axes, CutEnd, Layout, auto_plan, frame_ends, layout, member_line_ids, member_of_body, member_tool, placer, section_axes};
+use super::{Axes, CutEnd, Layout, auto_plan, frame_ends, layout, member_line_ids, member_of_body, member_tool, pieced, placer, section_axes};
 use crate::expr::{Kind, Value};
 use crate::frame::MAX_MEMBERS;
 use crate::lineage::Traced;
@@ -211,6 +211,8 @@ impl Members {
         // (finding it would build the tools of the frames before that one too); the tool then reaches on inside the
         // tube that corner lies in, which the fitted end is cut by anyway.
         let plan = auto_plan(*corner, &segments, &planes, corners, &drawn)?;
+        // Under Auto its members are its pieces, as `member_line_ids` lists them.
+        let (segments, planes, drawn) = pieced(segments, planes, drawn, plan.as_ref())?;
         let (axes, _) = section_axes(&segments, &planes, plan.as_ref(), turn)?;
         let inside = regions.first().map(|r| r.interior_point()).ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;
         let (ends, points) = {

@@ -31,14 +31,16 @@ const MIN_LENGTH: f64 = 1e-6;
 /// How far (mm) a 3D sketch curve may stray from the line between its ends and still be a line.
 const STRAIGHT_TOL: f64 = 1e-3;
 
-/// Evaluate a `FrameMember` feature: one new body per line, each named
-/// ([`member_names`], or by position for a copy whose `body_names` were set).
+/// Evaluate a `FrameMember` feature: one new body per member (a line, a pair, or under Auto each piece of a line cut
+/// where tubes cross, [`pieced`]), each named ([`member_names`], or by position for a copy whose `body_names` were
+/// set).
 pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut ModelState) -> Result<()> {
     let FeatureKind::FrameMember { body_name, names, corner, flip, corners, fit_ends, .. } = &f.kind else {
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
     let Layout { segments, regions, description, at, turn, sketch_x, drawn, planes } = layout(doc, vals, f, st)?;
     let mut plan = auto_plan(*corner, &segments, &planes, corners, &drawn)?;
+    let (segments, planes, drawn) = pieced(segments, planes, drawn, plan.as_ref())?;
     let (axes, plain) = section_axes(&segments, &planes, plan.as_ref(), turn)?;
     let (placed, unreversed) = (placer(&axes, at), unreversed_placer(&plain, at));
     // Fit Ends to Earlier Frames (None never fits): the earlier Frame Members' tubes and their copies, as cutting
@@ -351,6 +353,37 @@ fn auto_plan(
     frame_layout::plan(segments, planes, drawn, &|_, _| true, overrides).map(Some)
 }
 
+/// The members a frame builds from its lines (`segments`, with each line's plane and place in the drawing order). Under
+/// Auto (`plan`) they are the plan's pieces ([`frame_layout::Piece`], #4003 stage 3), which every member index of the
+/// plan indexes: each piece is its line's stretch [from, to], keeping its line's plane and drawing place, so it is
+/// placed as its line is ([`section_axes`]) and builds, cuts and fits as a member of its own. Any other frame's
+/// members are its lines, as they are.
+fn pieced(segments: Vec<(String, Vec3, Vec3)>, planes: Vec<MemberPlane>, drawn: Vec<usize>, plan: Option<&Plan>) -> Result<Pieced> {
+    let Some(plan) = plan else { return Ok((segments, planes, drawn)) };
+    let n = plan.pieces.len();
+    let mut out: Pieced = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n.min(drawn.len())));
+    for p in &plan.pieces {
+        let (_, a, b) = segments.get(p.parent).ok_or_else(|| DocError::Invalid(format!("no member {}", p.parent)))?;
+        // A line's own ends exactly, so a line left whole is built exactly as it was.
+        let at = |t: f64| {
+            if t <= 0.0 {
+                *a
+            } else if t >= 1.0 {
+                *b
+            } else {
+                *a + (*b - *a) * t
+            }
+        };
+        out.0.push((p.id.clone(), at(p.from), at(p.to)));
+        out.1.push(planes.get(p.parent).copied().flatten());
+        out.2.extend(drawn.get(p.parent));
+    }
+    Ok(out)
+}
+
+/// A frame's members as [`pieced`] gives them: (id, start, end), each one's plane and its place in the drawing order.
+type Pieced = (Vec<(String, Vec3, Vec3)>, Vec<MemberPlane>, Vec<usize>);
+
 /// Each member's section axes (x, y), decided here alone so that its build, its corner cuts, its fit tool and End Cap
 /// ([`member_section`]) all place it alike. Under Auto (`plan`) sections line up (#4003 Goal 7): a member in a sketch
 /// plane takes the sketch's normal as up and runs the way its group lays it, an outer member round the outline
@@ -603,9 +636,10 @@ fn auto_ends(
 
 /// An Auto frame's members (#4003 stage 2): cut at their corners ([`auto_ends`], [`cut_members`]), then each end to
 /// fit cut, in laying order, to the members it meets as their plane cuts build them (each member's cutting tool,
-/// [`frame_fit::fit_tool`], made once). A fitted face is named for the end it finishes and the line of the member it
-/// fits, `corner_start:<line>:face:<k>` (`corner_end:…`), so a member's fitted faces keep names of their own whatever
-/// the laying or pick order. `plan`: the frame's [`frame_layout::plan`].
+/// [`frame_fit::fit_tool`], made once). A fitted face is named for the end it finishes and the id of the member it
+/// fits (a piece's own id, [`pieced`]), `corner_start:<member>:face:<k>` (`corner_end:…`), so a member's fitted faces
+/// keep names of their own whatever the laying or pick order, and where three tubes cross. `plan`: the frame's
+/// [`frame_layout::plan`], over `segments` [`pieced`] by it.
 pub(crate) fn auto_members(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
@@ -967,11 +1001,12 @@ pub fn member_segments(doc: &Document, st: &ModelState, f: &Feature) -> Result<V
     Ok(segments(doc, &doc.evaluation_values(), f, st)?.0.into_iter().map(|(id, a, b)| (id, place(a), place(b))).collect())
 }
 
-/// The member of feature `f` on line `line`, as its body was made: the plane square to the line
-/// at its start as cut (x × y along the line; a square corner cut moves the start to the cut), its
-/// length as cut, its profile in that plane, and whether an End Cap may go on its [start, end]:
-/// an uncut end, or a through member's end of a Butt or Coped corner, Auto's included (not the
-/// butting member's end, which lies against the through member, a cope, a fit or a mitre).
+/// The member of feature `f` with id `line` (a line, a pair, or under Auto a piece, [`pieced`]), as its body was
+/// made: the plane square to its line at its start as cut (x × y along the line; a square corner cut moves the start
+/// to the cut), its length as cut, its profile in that plane, and whether an End Cap may go on its [start, end]: an
+/// uncut end, or a through member's end of a Butt or Coped corner, Auto's included (not the butting member's end,
+/// which lies against the through member, a cope, a fit or a mitre, nor a piece's end where it is cut, fitted to the
+/// tube that crosses there).
 pub(crate) fn member_section(
     doc: &Document,
     vals: &BTreeMap<String, Value>,
@@ -983,8 +1018,9 @@ pub(crate) fn member_section(
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
     let Layout { segments, regions, at, turn, sketch_x, drawn, planes, .. } = layout(doc, vals, f, st)?;
-    let m = segments.iter().position(|(id, _, _)| id == line).ok_or_else(|| DocError::Unknown(format!("line `{line}` of the member feature")))?;
     let plan = auto_plan(*corner, &segments, &planes, corners, &drawn)?;
+    let (segments, planes, drawn) = pieced(segments, planes, drawn, plan.as_ref())?;
+    let m = segments.iter().position(|(id, _, _)| id == line).ok_or_else(|| DocError::Unknown(format!("line `{line}` of the member feature")))?;
     let (axes, _) = section_axes(&segments, &planes, plan.as_ref(), turn)?;
     let (x, y) = axes.get(m).copied().ok_or_else(|| DocError::Invalid(format!("line `{line}` has no length")))?;
     let (a, b) = segments.get(m).map(|s| (s.1, s.2)).ok_or_else(|| DocError::Unknown(format!("line `{line}` of the member feature")))?;
@@ -1009,9 +1045,11 @@ pub(crate) fn member_section(
     Ok((plane, a.dist(b) + hi - lo, region, [open(start), open(end)]))
 }
 
-/// The body name of the member on each of `lines`: its own name from `pinned` (by line id) when no
-/// other body has it, else the first free one of `base`, `base (2)`, `base (3)`… that no line has
-/// pinned. A member therefore keeps its name when other lines are added, deleted or reordered.
+/// The body name of the member on each of `lines` (member ids): its own name from `pinned` (by
+/// member id) when no other body has it, else the first free one of `base`, `base (2)`, `base (3)`…
+/// that no member has pinned. A later piece of a cut line, `L>X` ([`frame_layout::Piece`]), is
+/// named after its line and the tube it starts at, `<L's name> · <X's name>`, when that is free. A
+/// member therefore keeps its name when other lines are added, deleted or reordered, or cut.
 pub fn member_names(st: &ModelState, lines: &[String], pinned: &BTreeMap<String, String>, base: &str) -> Vec<String> {
     let reserved: HashSet<&str> = pinned.values().map(String::as_str).collect();
     let mut used: HashSet<String> = HashSet::new();
@@ -1023,34 +1061,63 @@ pub fn member_names(st: &ModelState, lines: &[String], pinned: &BTreeMap<String,
         })
         .collect();
     let base = if base.trim().is_empty() { "Member" } else { base.trim() };
+    let free = |n: &str, used: &HashSet<String>| st.body(n).is_none() && !used.contains(n) && !reserved.contains(n);
     // Each candidate is refused at most once per body, used or reserved name: past that many,
     // a free one has been found for every member.
     let limit = st.bodies.len() + reserved.len() + lines.len() + 2;
     let mut next = 1usize;
-    for slot in out.iter_mut().filter(|n| n.is_none()) {
+    let mut number = |used: &mut HashSet<String>| {
         while next <= limit {
             let candidate = if next == 1 { base.to_string() } else { format!("{base} ({next})") };
             next += 1;
-            if st.body(&candidate).is_none() && !used.contains(&candidate) && !reserved.contains(candidate.as_str()) {
+            if free(&candidate, used) {
                 used.insert(candidate.clone());
-                *slot = Some(candidate);
-                break;
+                return Some(candidate);
             }
+        }
+        None
+    };
+    // Every line and pair first, so a piece never takes a number from one.
+    for (slot, _) in out.iter_mut().zip(lines).filter(|(n, id)| n.is_none() && !id.contains('>')) {
+        *slot = number(&mut used);
+    }
+    for (k, id) in lines.iter().enumerate() {
+        let Some((l, x)) = id.split_once('>').filter(|_| out.get(k).is_some_and(Option::is_none)) else { continue };
+        let name_of = |id: &str| lines.iter().position(|i| i == id).and_then(|i| out.get(i)).cloned().flatten();
+        let joined = name_of(l).zip(name_of(x)).map(|(l, x)| format!("{l} · {x}")).filter(|n| free(n, &used));
+        let name = match joined {
+            Some(n) => {
+                used.insert(n.clone());
+                Some(n)
+            }
+            None => number(&mut used),
+        };
+        if let Some(slot) = out.get_mut(k) {
+            *slot = name;
         }
     }
     out.into_iter().map(|n| n.unwrap_or_else(|| base.to_string())).collect()
 }
 
-/// The ids of a `FrameMember` feature's lines in `st`, then its pairs', in the order its members
-/// are made.
+/// The ids of a `FrameMember` feature's members in `st`, in the order they are made: its lines',
+/// under Auto each line's pieces' ([`frame_layout::Piece`]), then its pairs'.
 pub fn member_line_ids(st: &ModelState, kind: &FeatureKind) -> Result<Vec<String>> {
-    let FeatureKind::FrameMember { path_sketch, lines, pairs, .. } = kind else {
+    let FeatureKind::FrameMember { path_sketch, lines, pairs, corner, corners, .. } = kind else {
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
     let mut ids: Vec<String> = match path_sketch {
         Some(path_sketch) => {
             let ps = st.sketch(path_sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {path_sketch}")))?;
-            member_lines(ps, lines)?.into_iter().map(|(id, _, _)| id).collect()
+            let segments = member_lines(ps, lines)?;
+            if *corner == CornerType::Auto {
+                // Only the sketch's own lines cut each other, so they give every piece. Laid out where the sketch
+                // is, not in the feature's frame: moved as one, the lines cross where they did.
+                let planes = vec![ps.sketch.wires.is_empty().then(|| (ps.plane.normal(), ps.plane.x)); segments.len()];
+                let drawn = drawn_order(&ps.sketch, &segments);
+                frame_layout::pieces(&segments, &planes, &drawn, corners).into_iter().map(|p| p.id).collect()
+            } else {
+                segments.into_iter().map(|(id, _, _)| id).collect()
+            }
         }
         None => Vec::new(),
     };
@@ -1058,13 +1125,19 @@ pub fn member_line_ids(st: &ModelState, kind: &FeatureKind) -> Result<Vec<String
     Ok(ids)
 }
 
-/// The member (line or pair id) of Frame Member `f` whose body is `body`, if one is: by position
-/// when the feature names its bodies itself, else by its `names` entry.
+/// The member (line, pair or piece id) of Frame Member `f` whose body is `body`, if one is: by
+/// position when the feature names its bodies itself, else by its `names` entry, or for a later
+/// piece with none, by the name [`member_names`] gives it from its line's and its crossing tube's.
 pub fn member_of_body(st: &ModelState, f: &Feature, body: &str) -> Result<Option<String>> {
     let FeatureKind::FrameMember { names, .. } = &f.kind else { return Ok(None) };
     let ids = member_line_ids(st, &f.kind)?;
     Ok(if f.body_names.is_empty() {
-        ids.into_iter().find(|line| names.get(line).is_some_and(|name| name == body))
+        let joined = |id: &&String| {
+            let (l, x) = id.split_once('>').filter(|_| !names.contains_key(*id))?;
+            Some(format!("{} · {}", names.get(l)?, names.get(x)?))
+        };
+        let pinned = ids.iter().find(|id| names.get(*id).is_some_and(|name| name == body));
+        pinned.or_else(|| ids.iter().find(|id| joined(id).is_some_and(|n| n == body))).cloned()
     } else {
         f.body_names.iter().position(|name| name == body).and_then(|i| ids.into_iter().nth(i))
     })

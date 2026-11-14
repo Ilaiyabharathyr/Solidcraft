@@ -530,6 +530,27 @@ pub fn plan(
     same_section: &dyn Fn(usize, usize) -> bool,
     overrides: &[CornerOverride],
 ) -> Result<Plan> {
+    let (plan, matched) = planned(segments, planes, drawn, same_section, overrides);
+    if !matched {
+        return Err(DocError::Invalid("A corner override is not at a corner of the frame".into()));
+    }
+    Ok(plan)
+}
+
+/// The [`Piece`]s [`plan`] cuts the lines into, whether or not every override matches: for naming the members where
+/// only some of them are known (a sketch's lines, without the pairs).
+pub fn pieces(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: &[usize], overrides: &[CornerOverride]) -> Vec<Piece> {
+    planned(segments, planes, drawn, &|_, _| true, overrides).0.pieces
+}
+
+/// [`plan`], and whether every override matched.
+fn planned(
+    segments: &[(String, Vec3, Vec3)],
+    planes: &[MemberPlane],
+    drawn: &[usize],
+    same_section: &dyn Fn(usize, usize) -> bool,
+    overrides: &[CornerOverride],
+) -> (Plan, bool) {
     let (laid, xs) = laying(segments, planes, drawn);
     let mut place = vec![usize::MAX; segments.len()];
     for (i, r) in laid.iter().enumerate() {
@@ -717,11 +738,8 @@ pub fn plan(
             fit(e, whole.iter().copied().chain(group.iter().map(|e| e.1)).chain(earlier).collect(), &mut fits);
         }
     }
-    if used.contains(&false) {
-        return Err(DocError::Invalid("A corner override is not at a corner of the frame".into()));
-    }
     fits.sort_by_key(|f| (at(f.member), f.member));
-    Ok(Plan { pieces, crossings, ranks, corners, fits, chained })
+    (Plan { pieces, crossings, ranks, corners, fits, chained }, !used.contains(&false))
 }
 
 #[cfg(test)]

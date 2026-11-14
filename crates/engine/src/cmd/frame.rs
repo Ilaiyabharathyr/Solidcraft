@@ -551,7 +551,8 @@ fn remove_member(s: &mut Session, p: &Value) -> Result<Value> {
     // with the rule evaluation uses.
     if lines.is_empty() && path_sketch.is_some() && gone.iter().any(|line| !is_pair(line, pairs)) {
         let mut every = frame::member_line_ids(&s.model.state_before(f.id), &f.kind).map_err(|e| bad(cmd, e.to_string()))?;
-        every.retain(|l| !is_pair(l, pairs));
+        // Under Auto the ids are pieces too: a later piece (`L>X`) is no line of its own.
+        every.retain(|l| !is_pair(l, pairs) && !l.contains('>'));
         *lines = every;
     }
     if let Some(line) = gone.iter().find(|line| !is_pair(line, pairs) && !lines.iter().any(|l| l == *line)) {

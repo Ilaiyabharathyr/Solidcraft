@@ -1119,9 +1119,9 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
     let st = app.session.model.state();
     let mut m = Member::new();
     m.all = lines.is_empty() && path_sketch.is_some();
-    // The sketch's lines (without the pairs' ids, which come after them).
+    // The sketch's lines (without the pairs' ids, which come after them, or an Auto frame's later pieces, `L>X`).
     let ids = if m.all { frame::member_line_ids(&st, kind).unwrap_or_default() } else { lines.clone() };
-    let ids = ids.into_iter().filter(|id| !pairs.iter().any(|p| p.id == *id));
+    let ids = ids.into_iter().filter(|id| !pairs.iter().any(|p| p.id == *id) && !id.contains('>'));
     let mut items: Vec<Sel> = path_sketch.map(|ps| ids.map(|id| Sel::ExternalSketchCurve { sketch: ps.0, id }).collect()).unwrap_or_default();
     m.refs = vec![None; items.len()];
     m.pair_ids = vec![None; items.len()];

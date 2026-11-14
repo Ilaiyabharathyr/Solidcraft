@@ -2629,23 +2629,250 @@ fn auto_fits_a_t_junction() {
     assert!(rel(cross.1, tube_area() * 360.0) < MEASURED, "{cross:?} vs {}", tube_area() * 360.0);
 }
 
+/// The 600 × 400 rectangle `Frame` with both diagonals: `d1` (0, 0)…(600, 400) drawn first, then `d2` (0, 400)…(600, 0).
+fn x_brace_frame(s: &mut Session) {
+    run(s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
+    run(s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]}));
+    run(s, "sketch.line", json!({"points": [[0, 0], [600, 400]], "ids": ["d1"]}));
+    run(s, "sketch.line", json!({"points": [[0, 400], [600, 0]], "ids": ["d2"]}));
+    run(s, "sketch.finish", json!({}));
+}
+
+/// The overlap (mm³) between every two bodies.
+fn overlap_all(s: &mut Session) -> f64 {
+    let names: Vec<String> = bodies(s).into_iter().map(|b| b.0).collect();
+    let i = run(s, "inspect.interference", json!({"bodies": names}));
+    i["interferences"].as_array().map_or(0.0, |all| all.iter().map(|x| f(&x["volume_mm3"])).sum())
+}
+
 #[test]
-fn auto_with_crossing_tubes_overlaps_without_error() {
+fn an_auto_x_brace_keeps_one_diagonal_whole() {
     let mut s = Session::default();
-    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
-    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]}));
-    run(&mut s, "sketch.line", json!({"points": [[0, 0], [600, 400]]}));
-    run(&mut s, "sketch.line", json!({"points": [[0, 400], [600, 0]]}));
+    x_brace_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": "auto", "names": {"d1": "D1", "d2": "D2"}}));
+    // The four sides, d1 whole, d2 in two pieces.
+    assert_eq!(bodies(&mut s).len(), 7, "{:?}", bodies(&mut s));
+    // The diagonals tie (same length, same angle off X): d1, drawn first, is laid first and stays whole; d2 is cut at
+    // (300, 200), its first piece keeping its name, the later one named after it and the whole tube.
+    let (d1, d2, d2_d1) = (measured(&mut s, "D1"), measured(&mut s, "D2"), measured(&mut s, "D2 · D1"));
+    // Worked by hand. s along d1 (direction (3, 2)/√13), u across it (n = (−2, 3)/√13); L = √(600² + 400²) = 721.110.
+    // Square tube, A = 40² − 34² = 444: material of height 40 at 17 < |u| ≤ 20, 6 (two walls) at |u| ≤ 17.
+    // At (0, 0) d1 is fitted to the bottom tube (y ≤ 20 goes) and the left one (x ≤ 20): at u it starts at the larger
+    // of s_x(u) = (20 + 0.5547u)/0.83205 and s_y(u) = (20 − 0.83205u)/0.5547, which cross at u = 5.547. That end
+    // takes C = ∫ height(u)·max(s_x, s_y) du = 40·191.417 + 6·1006.616 + 6·361.380 + 40·109.111 = 20229.04 (each
+    // piece of the integrand linear, so exact by the trapezium rule). The far corner is the same turned half round.
+    // d1 = A·L − 2C = 320172.95 − 40458.08 = 279714.87; its box x 20…580, y 20…380.
+    assert!(rel(d1.1, 279_714.873_823) < 1e-6, "{d1:?}");
+    assert!(near3(d1.2, [20.0, 20.0, -20.0]) && near3(d1.3, [580.0, 380.0, 20.0]), "{d1:?}");
+    // Each piece of d2 runs half of it, L/2 = 360.555, from its corner (fitted the same way: C) to d1's near face.
+    // The diagonals cross at sin θ = 12/13, so that face is 20/(12/13) = 21.667 back along d2's centre line, and the
+    // one plane cut takes A × 21.667 off: A·(360.555 − 21.667) − C = 130237.44. The first piece's corners on that
+    // face are at x = 300 (u = 20 across d2) and y = 200 (u = −20): its box is x 20…300, y 200…380; the second
+    // piece, turned half round about (300, 200), x 300…580, y 20…200.
+    for (piece, lo, hi) in [(&d2, [20.0, 200.0, -20.0], [300.0, 380.0, 20.0]), (&d2_d1, [300.0, 20.0, -20.0], [580.0, 200.0, 20.0])] {
+        assert!(rel(piece.1, 130_237.436_911) < 1e-6, "{piece:?}");
+        assert!(near3(piece.2, lo) && near3(piece.3, hi), "{piece:?}");
+    }
+    // Nothing overlaps: each piece stops at d1, each end at a corner at the tubes laid there before it.
+    let o = overlap_all(&mut s);
+    assert!(o < 1e-3, "the frame overlaps by {o} mm³");
+    // The whole diagonal is exactly as it is without the other one.
+    let mut alone = Session::default();
+    run(&mut alone, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
+    run(&mut alone, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]}));
+    run(&mut alone, "sketch.line", json!({"points": [[0, 0], [600, 400]], "ids": ["d1"]}));
+    run(&mut alone, "sketch.finish", json!({}));
+    run(&mut alone, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": "auto", "names": {"d1": "D1"}}));
+    let lone = measured(&mut alone, "D1");
+    assert!(rel(lone.1, d1.1) < 1e-9 && near3(lone.2, d1.2) && near3(lone.3, d1.3), "{lone:?} {d1:?}");
+}
+
+#[test]
+fn adding_and_removing_a_crossing_keeps_other_names() {
+    let mut s = Session::default();
+    x_brace_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "names": {"d1": "D1", "d2": "D2"}}));
+    let before = built(&mut s);
+    assert_eq!(before.0.len(), 7, "{before:?}");
+    // A brace up x = 150 between the rails: square to them, it is laid before the diagonals (33.7° off square), stays
+    // whole and cuts d1 at (150, 100) and d2 at (150, 300). d1 is two pieces, d2 three: 4 + 1 + 2 + 3 bodies.
+    run(&mut s, "sketch.edit", json!({"sketch": "Frame"}));
+    run(&mut s, "sketch.line", json!({"points": [[150, 0], [150, 400]], "ids": ["brace"]}));
     run(&mut s, "sketch.finish", json!({}));
-    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto"}));
-    let bs = bodies(&mut s);
+    let during = built(&mut s);
+    assert_eq!(during.0.len(), 10, "{:?}", during.0.keys());
+    // Every body keeps its name: a cut line's first piece keeps the line's, a new piece is named after its line and
+    // the brace. The sides, untouched, keep their faces' names too.
+    for name in before.0.keys() {
+        assert!(during.0.contains_key(name), "{name} is gone: {:?}", during.0.keys());
+    }
+    for name in before.0.keys().filter(|n| !n.starts_with('D')) {
+        assert_eq!(before.1[name], during.1[name], "{name}");
+    }
+    let brace = during.0.keys().find(|n| !before.0.contains_key(*n) && !n.contains('·')).unwrap().clone();
+    for piece in [format!("D1 · {brace}"), format!("D2 · {brace}")] {
+        assert!(during.0.contains_key(&piece), "no {piece}: {:?}", during.0.keys());
+    }
+    // Taking the brace out again brings back the same bodies, names and face names.
+    delete_line(&mut s, "Frame", "brace");
+    let after = built(&mut s);
+    assert_eq!(before.0.keys().collect::<Vec<_>>(), after.0.keys().collect::<Vec<_>>());
+    for (name, (v, lo, hi)) in &before.0 {
+        let (av, alo, ahi) = after.0[name];
+        assert!(rel(av, *v) < 1e-9 && near3(alo, *lo) && near3(ahi, *hi), "{name}: {:?} vs {:?}", before.0[name], after.0[name]);
+    }
+    assert_eq!(before.1, after.1);
+}
+
+#[test]
+fn end_cap_goes_on_a_pieces_line_end_and_not_its_cut_end() {
+    // A plus: h (0, 0)…(400, 0), the longer, laid first and whole; v (200, −100)…(200, 100) cut at (200, 0). Its
+    // later piece `V · H` runs from h's near face y = 20 (fitted) to its line's end y = 100 (square, open).
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Plus"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [400, 0]], "ids": ["h"]}));
+    run(&mut s, "sketch.line", json!({"points": [[200, -100], [200, 100]], "ids": ["v"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Plus", "profile": square_tube(), "corner": "auto", "names": {"h": "H", "v": "V"}}));
+    let piece = measured(&mut s, "V · H");
+    assert!(near3(piece.2, [180.0, 20.0, -20.0]) && near3(piece.3, [220.0, 100.0, 20.0]), "{piece:?}");
+    // On its line's end: the profile's outside, 40 × 40, 6 thick, beyond y = 100.
+    let top = face_pick(&s, "V · H", [218.5, 100.0, 0.0], [0.0, 1.0, 0.0]);
+    run(&mut s, "frame.end_cap", json!({"faces": [top], "thickness": 6}));
+    let cap = measured(&mut s, "V · H End Cap");
+    assert!(near3(cap.2, [180.0, 100.0, -20.0]) && near3(cap.3, [220.0, 106.0, 20.0]), "{cap:?}");
+    // Its cut end at the crossing is fitted to h: not an open end.
+    let cut = face_pick(&s, "V · H", [218.5, 20.0, 0.0], [0.0, -1.0, 0.0]);
+    let e = s.execute("frame.end_cap", &json!({"faces": [cut], "thickness": 6})).unwrap_err().to_string();
+    assert!(e.contains("not an open end"), "{e}");
+}
+
+#[test]
+fn a_crossing_tubes_far_end_override_still_applies() {
+    // Review Focus 2: a (0, 0)…(600, 0) and b (600, 0)…(600, 400) meet at (600, 0), where an override may run b through
+    // (Flip). A brace c (300, −400)…(300, 400), longer than a, is laid first and cuts a at (300, 0): a's far end is
+    // now its piece `a>c`'s, and the override, naming the lines a and b, still finds it.
+    let build = |flip: bool| {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "L"}));
+        run(&mut s, "sketch.line", json!({"points": [[0, 0], [600, 0]], "ids": ["a"]}));
+        run(&mut s, "sketch.line", json!({"points": [[600, 0], [600, 400]], "ids": ["b"]}));
+        run(&mut s, "sketch.line", json!({"points": [[300, -400], [300, 400]], "ids": ["c"]}));
+        run(&mut s, "sketch.finish", json!({}));
+        let corners = json!([{"members": ["a", "b"], "corner": "auto", "flip": flip}]);
+        let names = json!({"a": "a", "b": "b", "c": "c"});
+        run(&mut s, "frame.member", json!({"sketch": "L", "profile": tube(), "corner": "auto", "names": names, "corners": corners}));
+        boxes(&mut s)
+    };
+    // Unflipped, the longer a (by its whole line) runs through: its piece out to b's outer face x = 620, b fitted
+    // to its near face y = 20.
+    let bs = build(false);
+    assert!(near3(bs["a · c"].0, [320.0, -20.0, -20.0]) && near3(bs["a · c"].1, [620.0, 20.0, 20.0]), "{bs:?}");
+    assert!(near3(bs["b"].0, [580.0, 20.0, -20.0]) && near3(bs["b"].1, [620.0, 400.0, 20.0]), "{bs:?}");
+    // Flipped, b runs through to a's outer face y = −20, and a's piece is fitted to b's near face x = 580.
+    let bs = build(true);
+    assert!(near3(bs["a · c"].0, [320.0, -20.0, -20.0]) && near3(bs["a · c"].1, [580.0, 20.0, 20.0]), "{bs:?}");
+    assert!(near3(bs["b"].0, [580.0, -20.0, -20.0]) && near3(bs["b"].1, [620.0, 400.0, 20.0]), "{bs:?}");
+    // a's first piece runs from its free start to c's near face x = 280, either way.
+    assert!(near3(bs["a"].0, [0.0, -20.0, -20.0]) && near3(bs["a"].1, [280.0, 20.0, 20.0]), "{bs:?}");
+}
+
+#[test]
+fn three_tubes_through_a_point_and_one_ending_there_never_overlap() {
+    // Review Focus 4: d (0, 0)…(600, 400), h (0, 200)…(600, 200) and v (300, 0)…(300, 400) all pass through
+    // (300, 200), where e (300, 200)…(450, −100) ends. No closed shape: laid longest first, d (721), h, v, e. d stays
+    // whole, h and v are cut there; every piece end and e's end is fitted to d and the ends laid before it, never to a
+    // sibling: 1 + 2 + 2 + 1 bodies, none overlapping.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Star"}));
+    for (id, points) in [("d", [[0, 0], [600, 400]]), ("h", [[0, 200], [600, 200]]), ("v", [[300, 0], [300, 400]]), ("e", [[300, 200], [450, -100]])]
+    {
+        run(&mut s, "sketch.line", json!({"points": points, "ids": [id]}));
+    }
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Star", "profile": tube(), "corner": "auto", "names": {"d": "d", "h": "h", "v": "v", "e": "e"}}));
+    let names: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+    assert_eq!(names, ["d", "h", "h · d", "v", "v · d", "e"]);
+    let o = overlap_all(&mut s);
+    assert!(o < 1e-3, "the tubes overlap by {o} mm³");
+}
+
+#[test]
+fn a_mitre_frame_keeps_its_crossings_overlapping() {
+    // Only Auto cuts crossings: on a Mitre frame the diagonals stay whole and pass through each other, built exactly
+    // as before crossings were cut. Each diagonal meets two sides at its corners, three tubes at a point, which a
+    // Mitre frame leaves square: A × L = 420.82 × 721.110 = 303459.78 each, its box its line ± (11.094, 16.641)
+    // across it (20 × (2, 3)/√13). The volumes, to the last bit, and the face names were recorded on
+    // `frame-crossings` at 27b384111, before the build changed (its non-Auto path is stage 2's).
+    let mut s = Session::default();
+    x_brace_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "names": {"d1": "D1", "d2": "D2"}}));
+    let (got, faces) = built(&mut s);
+    assert_eq!(got.len(), 6, "{got:?}");
+    let (h, w) = (11.094_003_924_504_584, 16.641_005_886_756_876);
+    let l = 721.110_255_092_797_8;
+    let mut names: Vec<String> = (0..18).map(|k| format!("F2:face:{k}")).collect();
+    names.sort();
+    for (name, recorded) in [("D1", 303_459.783_093_945_24), ("D2", 303_459.783_093_863)] {
+        let (v, lo, hi) = got[name];
+        assert!(
+            rel(v, tube_area() * l) < MEASURED && near3(lo, [-h, -w, -20.0]) && near3(hi, [600.0 + h, 400.0 + w, 20.0]),
+            "{name}: {:?}",
+            got[name]
+        );
+        assert!(v == recorded, "{name}: {v:?}");
+        assert_eq!(faces[name], names, "{name}");
+    }
+    let names: Vec<String> = ["D1", "D2"].map(String::from).to_vec();
+    let i = run(&mut s, "inspect.interference", json!({"bodies": names}));
+    let o: f64 = i["interferences"].as_array().map_or(0.0, |all| all.iter().map(|x| f(&x["volume_mm3"])).sum());
+    assert!(o > 1000.0, "the diagonals overlap by {o} mm³");
+}
+
+#[test]
+fn a17_pairs_on_a_group_tube_are_fitted_with_fit_ends_off() {
+    // Ruling A17 holds whatever the Fit Ends setting: `pairs_ending_on_their_own_frames_tube_are_fitted_to_it_not_chained`
+    // with Fit Ends off. The pairs' node (300, 0, 0) is on the bottom tube's middle: each brace is fitted to it
+    // (y ≥ 20) and the later one to the earlier, never mitred inside it. No tube of the frame overlaps another.
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    points(&mut s, &[("N", [300.0, 0.0, 0.0]), ("U", [300.0, 300.0, 0.0]), ("D", [500.0, 200.0, 0.0])]);
+    let pairs = json!([pair("N", "U"), pair("N", "D")]);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "pairs": pairs, "profile": tube(), "corner": "auto", "fit_ends": false, "body_name": "B"}));
+    let bs = named(&mut s, "B");
     assert_eq!(bs.len(), 6, "{bs:?}");
-    // Each diagonal ends at two rectangle corners, where its end is fitted to the two sides' tubes (x ≤ 20 and
-    // y ≤ 20 go). Its edge 20 above its line meets x = 20 at y = 37.4, the one below meets y = 20 at x = 66.0,
-    // so it starts at x = 20 and y = 20, and ends likewise at the far corner: [20, 20, −20]…[580, 380, 20]. It
-    // runs on across the other diagonal whole: one body each, the crossing left overlapping.
-    let diagonals = bs.iter().filter(|b| near3(b.2, [20.0, 20.0, -20.0]) && near3(b.3, [580.0, 380.0, 20.0])).count();
-    assert_eq!(diagonals, 2, "{bs:?}");
+    let braces: Vec<&Measured> = bs.iter().filter(|b| b.3[1] < 350.0 && b.2[0] > 250.0 && b.3[0] < 560.0).collect();
+    assert_eq!(braces.len(), 2, "{bs:?}");
+    for b in braces {
+        assert!(b.2[1] >= 20.0 - 1e-6, "{b:?}");
+    }
+    let o = overlap(&mut s, "B");
+    assert!(o < 1e-3, "the frame's tubes overlap by {o} mm³: {bs:?}");
+}
+
+#[test]
+fn auto_crossings_are_the_same_whatever_the_pick_order() {
+    let build = |reverse: bool| {
+        let mut s = Session::default();
+        x_brace_frame(&mut s);
+        let mut lines: Vec<String> = sketch_lines(&s, "Frame").into_iter().map(|l| l.0).collect();
+        assert_eq!(lines.len(), 6);
+        if reverse {
+            lines.reverse();
+        }
+        let names: serde_json::Map<String, Value> = lines.iter().map(|l| (l.clone(), json!(l))).collect();
+        run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "lines": lines, "names": names}));
+        built(&mut s)
+    };
+    let ((drawn, drawn_faces), (picked, picked_faces)) = (build(false), build(true));
+    // d1 stays whole and d2 is cut in two whichever way the lines are picked.
+    assert!(drawn.len() == 7 && drawn.contains_key("d1") && drawn.contains_key("d2 · d1"), "{drawn:?}");
+    assert_eq!(drawn.keys().collect::<Vec<_>>(), picked.keys().collect::<Vec<_>>());
+    for (line, (v, lo, hi)) in &drawn {
+        let (pv, plo, phi) = picked[line];
+        assert!(rel(pv, *v) < 1e-9 && near3(plo, *lo) && near3(phi, *hi), "{line}: drawn {drawn:?} picked {picked:?}");
+    }
+    assert_eq!(drawn_faces, picked_faces);
 }
 
 #[test]
