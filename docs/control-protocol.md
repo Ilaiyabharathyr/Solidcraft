@@ -979,6 +979,7 @@ One setting per line, sorted by name. A change that adds a setting adds its own 
 - `ground_shadow_follows_model` (Graphics, default false): raised models cast their ground shadow on the origin ground plane; true restores the shadow below the lowest visible body. Both modes keep the shadow below bodies extending beneath the origin, and follow the selected up axis.
 - `hidden_toolbar_tabs` (default `[]`: all existing tabs, including Sheet Metal and Weldments, stay visible; lists tabs to hide, each once, e.g. `["SURFACE", "SHEET METAL"]`; hidden tabs stay hidden regardless of the design's features; [ribbon layout](ribbon-layout.md))
 - `history_in_browser` (default false): list each component’s features in the Browser and hide the separate History panel.
+- `history_play_rewinds` (default true: Play History with the marker at the end of a History that has features rolls the marker to the start, then plays every feature, and the History controls name it "Play from the start", #10798; false: Play does nothing there until the marker moves back, as before)
 - `history_sketches` (`in_order` (default), `under_feature`: vertical History lists a sketch under the first feature built from it, #6489. The bottom strip keeps creation order.)
 - `hole_group` (default false: the holes one Hole command makes, two or more, go into a feature folder in History, closed at first)
 - `hole_moves` (default false: a placed Single hole has a drag handle (`hole:<n>`), and a pick on a face that has a hole moves it there)
