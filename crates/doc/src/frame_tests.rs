@@ -723,19 +723,26 @@ fn corner_at_point_finds_the_two_lines() {
     let (st, sketch) = corner_sketch();
     let s = |v: [&str; 2]| v.map(str::to_string);
     let all: &[String] = &[];
-    assert_eq!(corner_at_point(&st, sketch, all, "p0").unwrap(), s(["a", "d"]));
-    assert_eq!(corner_at_point(&st, sketch, all, "p2").unwrap(), s(["b", "c"]));
+    assert_eq!(corner_at_point(&st, sketch, all, "p0", false).unwrap(), s(["a", "d"]));
+    assert_eq!(corner_at_point(&st, sketch, all, "p2", false).unwrap(), s(["b", "c"]));
     // A line's end on another's middle (a T) and a point on a line's middle are no corners.
     for point in ["t0", "t1", "m"] {
-        let e = corner_at_point(&st, sketch, all, point).unwrap_err().to_string();
+        let e = corner_at_point(&st, sketch, all, point, false).unwrap_err().to_string();
         assert!(e.contains("corner"), "{point}: {e}");
     }
     // Only the lines that are members count: without `d`, `a` ends alone at p0.
     let ab = ["a".to_string(), "b".to_string()];
-    assert!(corner_at_point(&st, sketch, &ab, "p0").is_err());
-    assert_eq!(corner_at_point(&st, sketch, &ab, "p1").unwrap(), s(["a", "b"]));
-    assert!(corner_at_point(&st, sketch, all, "nowhere").is_err());
-    assert!(corner_at_point(&st, sketch + 1000, all, "p0").is_err());
+    assert!(corner_at_point(&st, sketch, &ab, "p0", false).is_err());
+    assert_eq!(corner_at_point(&st, sketch, &ab, "p1", false).unwrap(), s(["a", "b"]));
+    assert!(corner_at_point(&st, sketch, all, "nowhere", false).is_err());
+    assert!(corner_at_point(&st, sketch + 1000, all, "p0", false).is_err());
+    // Auto takes every line ending there, and still no T, no line's middle and no lone end.
+    assert_eq!(corner_at_point(&st, sketch, all, "p0", true).unwrap(), s(["a", "d"]));
+    for point in ["t0", "t1", "m"] {
+        let e = corner_at_point(&st, sketch, all, point, true).unwrap_err().to_string();
+        assert!(e.contains("two or more members end"), "{point}: {e}");
+    }
+    assert!(corner_at_point(&st, sketch, &ab, "p0", true).is_err());
 }
 
 #[test]

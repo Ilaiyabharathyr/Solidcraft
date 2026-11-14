@@ -113,6 +113,8 @@ fn a_picked_section_and_the_placement() {
     m.angle = "15 deg".into();
     m.mirror = true;
     m.name = " Rail ".into();
+    // The section and its placement, not the corners: as stage 1 built it, with None.
+    m.corner = corner_type("none");
     let c = apply_commands(&app, &d).unwrap();
     let p = &c[0].1;
     assert_eq!(p["sketch"], json!(sketch_id(&app, "Frame")));
@@ -1171,13 +1173,14 @@ fn lines_at(app: &SolveApp, x: f64, y: f64) -> Vec<String> {
     sk.curves.iter().filter(|c| c.kind.ends().is_some_and(|(a, b)| at(a) || at(b))).map(|c| c.id.clone()).collect()
 }
 
-/// Corner Type and Flip reach the command; None (the start) writes neither, and a Mitre, which
-/// has no Flip, no flip.
+/// Corner Type and Flip reach the command; None writes neither, and a Mitre, which has no Flip,
+/// no flip.
 #[test]
 fn corner_type_and_flip_go_into_the_command() {
     let mut app = frame_app();
     let lines = frame_lines(&app);
     let mut d = dialog_on(&mut app, &lines);
+    member(&mut d).corner = corner_type("none");
     let p = &apply_commands(&app, &d).unwrap()[0].1;
     assert!(p.get("corner").is_none() && p.get("flip").is_none() && p.get("corners").is_none(), "{p}");
     let m = member(&mut d);
@@ -1235,7 +1238,7 @@ fn a_point_that_is_no_corner_is_refused_at_the_pick() {
         d.pick(&app.session, Sel::ExternalSketchPoint { sketch: frame, id: id.clone() });
         assert!(d.inputs[2].items.is_empty(), "{id}");
         let e = d.error.clone().unwrap_or_default();
-        assert!(e.contains("two members end"), "{id}: {e}");
+        assert!(e.contains("members end"), "{id}: {e}");
     }
     let corner = Sel::ExternalSketchPoint { sketch: frame, id: point_at(&app, 600.0, 400.0) };
     d.pick(&app.session, corner.clone());
@@ -1329,21 +1332,160 @@ fn an_edit_keeps_an_override_of_a_pair_members_corner() {
     assert_eq!(apply_commands(&app, &e).unwrap()[0].1["params"]["corners"], over);
 }
 
-/// A new Frame Member starts on None, unflipped, with no overrides, even after one made with Butt.
+/// A new Frame Member starts on Auto with Fit Ends to Earlier Frames ticked, unflipped, with no
+/// overrides, even after one made with Butt; its command says so.
 #[test]
-fn a_new_frame_member_starts_on_none() {
+fn a_new_frame_member_starts_on_auto_with_fit_ends() {
     let mut app = frame_app();
     let lines = frame_lines(&app);
     let mut d = dialog_on(&mut app, &lines);
     assert_eq!(d.inputs[2].label, "Corner Overrides");
     let m = member(&mut d);
-    assert_eq!((CORNER_TYPES[m.corner].0, m.flip, m.overrides.len()), ("none", false, 0));
-    m.corner = corner_type("butt");
+    assert_eq!((CORNER_TYPES[m.corner].0, m.flip, m.fit_ends, m.overrides.len()), ("auto", false, true, 0));
+    let p = &apply_commands(&app, &d).unwrap()[0].1;
+    assert_eq!((&p["corner"], &p["fit_ends"]), (&json!("auto"), &json!(true)), "{p}");
+    assert!(p.get("flip").is_none() && p.get("corners").is_none(), "{p}");
+    member(&mut d).corner = corner_type("butt");
     let c = apply_commands(&app, &d).unwrap();
     run_all(&mut app, c);
     app.dialog = None;
     let mut d = dialog_on(&mut app, &lines);
-    assert_eq!(CORNER_TYPES[member(&mut d).corner].0, "none");
+    assert_eq!(CORNER_TYPES[member(&mut d).corner].0, "auto");
+}
+
+/// Fit Ends to Earlier Frames unticked writes nothing, and under None, ticked or not, neither.
+#[test]
+fn fit_ends_unticked_writes_nothing() {
+    let mut app = frame_app();
+    let lines = frame_lines(&app);
+    let mut d = dialog_on(&mut app, &lines);
+    member(&mut d).fit_ends = false;
+    let p = &apply_commands(&app, &d).unwrap()[0].1;
+    assert!(p["corner"] == "auto" && p.get("fit_ends").is_none(), "{p}");
+    let m = member(&mut d);
+    (m.fit_ends, m.corner) = (true, corner_type("none"));
+    let p = &apply_commands(&app, &d).unwrap()[0].1;
+    assert!(p.get("corner").is_none() && p.get("fit_ends").is_none(), "{p}");
+    member(&mut d).corner = corner_type("mitre");
+    assert_eq!(apply_commands(&app, &d).unwrap()[0].1["fit_ends"], json!(true));
+}
+
+/// Flip is hidden under Auto (it has no one corner to act on) and shows under Butt; Fit Ends to
+/// Earlier Frames shows under every type but None.
+#[test]
+fn flip_is_hidden_under_auto() {
+    let mut h = tall_harness();
+    for (id, p) in frame_commands() {
+        h.app.run(id, p).unwrap();
+    }
+    let lines = frame_lines(&h.app);
+    h.app.session.selection = lines.iter().map(|id| Sel::SketchCurve { id: id.clone(), sketch: None }).collect();
+    h.app.start("frame.member");
+    h.frames(2);
+    assert!(h.widgets("Flip").is_empty(), "no Flip under Auto");
+    assert!(h.widget("Fit Ends to Earlier Frames").is_some());
+    member(h.app.dialog.as_mut().unwrap()).corner = corner_type("butt");
+    h.frames(2);
+    assert!(!h.widgets("Flip").is_empty(), "Flip under Butt");
+    member(h.app.dialog.as_mut().unwrap()).corner = corner_type("none");
+    h.frames(2);
+    assert!(h.widget("Fit Ends to Earlier Frames").is_none(), "nothing to fit under None");
+}
+
+/// Under an Auto frame an override row's Type lists Auto (a new pick starts on it), and its Flip
+/// is enabled and saved. On a frame of another type, Auto isn't offered, and an Auto override
+/// reads and saves as the frame's type (it builds as that type, spec A6).
+#[test]
+fn override_rows_offer_auto_and_flip_it() {
+    let names = |c: &[(&str, &str)]| c.iter().map(|c| c.0.to_string()).collect::<Vec<_>>();
+    assert_eq!(names(override_choices(corner_type("auto"))), names(&CORNER_TYPES));
+    assert_eq!(names(override_choices(corner_type("mitre"))), ["none", "mitre", "butt", "coped_butt"]);
+    let (mut h, _) = overrides_dialog("auto");
+    assert!(h.widget_near("Auto", "Corner 1").is_some());
+    let [_, y] = h.widget("Corner 1").unwrap();
+    let tree = h.output.accesskit_update.as_ref().unwrap();
+    let on_row = |n: &egui::accesskit::Node| n.bounds().is_some_and(|b| (f64::midpoint(b.y0, b.y1) - y).abs() < 2.0);
+    let flip = tree.nodes.iter().find(|(_, n)| n.label() == Some("Flip") && on_row(n));
+    assert!(flip.is_some_and(|(_, n)| !n.is_disabled()), "Corner 1's Flip is enabled under Auto");
+    member(h.app.dialog.as_mut().unwrap()).overrides[0].2 = true;
+    let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!((&c[0].1["corners"][0]["corner"], &c[0].1["corners"][0]["flip"]), (&json!("auto"), &json!(true)), "{}", c[0].1);
+    member(h.app.dialog.as_mut().unwrap()).corner = corner_type("mitre");
+    h.frames(2);
+    assert!(h.widget_near("Mitre", "Corner 1").is_some());
+    let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!((&c[0].1["corners"][0]["corner"], &c[0].1["corners"][0]["flip"]), (&json!("mitre"), &json!(false)), "{}", c[0].1);
+    // Back on Auto, the row is Auto again.
+    member(h.app.dialog.as_mut().unwrap()).corner = corner_type("auto");
+    let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!(c[0].1["corners"][0]["corner"], json!("auto"));
+}
+
+/// The 600 × 400 rectangle with a brace `brace` from corner to corner: three lines end at (0, 0)
+/// and at (600, 400).
+fn braced_app() -> SolveApp {
+    app_with(&[
+        ("sketch.create", json!({"plane": "XY", "name": "Frame"})),
+        ("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]})),
+        ("sketch.line", json!({"points": [[0, 0], [600, 400]], "ids": ["brace"]})),
+        ("sketch.finish", json!({})),
+    ])
+}
+
+/// Under Auto, a point where three lines end is a corner to override, saved by all three; under
+/// Mitre the same pick is refused, as stage 1 refuses it.
+#[test]
+fn under_auto_a_three_tube_point_is_an_override() {
+    let mut app = braced_app();
+    let frame = sketch_id(&app, "Frame");
+    let lines = frame_lines(&app);
+    let corner = Sel::ExternalSketchPoint { sketch: frame, id: point_at(&app, 0.0, 0.0) };
+    let members = lines_at(&app, 0.0, 0.0);
+    assert_eq!(members.len(), 3, "{members:?}");
+    let mut d = dialog_on(&mut app, &lines);
+    d.active = 2;
+    d.pick(&app.session, corner.clone());
+    assert_eq!(d.inputs[2].items, std::slice::from_ref(&corner), "{:?}", d.error);
+    let c = apply_commands(&app, &d).unwrap();
+    assert_eq!(c[0].1["corners"], json!([{"members": members, "corner": "auto", "flip": false}]), "{}", c[0].1);
+    let mut d = dialog_on(&mut app, &lines);
+    member(&mut d).corner = corner_type("mitre");
+    d.active = 2;
+    d.pick(&app.session, corner);
+    assert!(d.inputs[2].items.is_empty());
+    let e = d.error.clone().unwrap_or_default();
+    assert!(e.contains("exactly two members end"), "{e}");
+}
+
+/// Edit Feature brings back Auto, Fit Ends to Earlier Frames and a three-tube override as the point
+/// of its corner, and OK sends them back as they were. An override that names only two of the
+/// three is no longer that corner: it is kept as a Missing corner.
+#[test]
+fn an_edit_shows_a_three_tube_override() {
+    let mut app = braced_app();
+    let members = lines_at(&app, 0.0, 0.0);
+    let corners = json!([{"members": members, "corner": "auto", "flip": true}]);
+    app.run("frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "fit_ends": true, "corners": corners})).unwrap();
+    let f = app.session.doc.features.last().unwrap().id;
+    let mut e = edit_dialog(&app, f, None).unwrap();
+    let frame = sketch_id(&app, "Frame");
+    let [Sel::ExternalSketchPoint { sketch, id }] = e.inputs[2].items.as_slice() else { panic!("{:?} {:?}", e.inputs[2].items, e.extra) };
+    let sk = app.session.doc.sketch(frame).unwrap();
+    assert_eq!((*sketch, sk.points[sk.point_index(id).unwrap()].pos), (frame, solidcore_record::Vec2::new(0.0, 0.0)));
+    assert!(e.extra.get("corners").is_none());
+    let m = member(&mut e);
+    assert_eq!((CORNER_TYPES[m.corner].0, m.fit_ends), ("auto", true));
+    assert_eq!(m.overrides.iter().map(|o| (CORNER_TYPES[o.1].0, o.2)).collect::<Vec<_>>(), [("auto", true)]);
+    let p = &apply_commands(&app, &e).unwrap()[0].1["params"];
+    assert_eq!((&p["corner"], &p["fit_ends"], &p["corners"]), (&json!("auto"), &json!(true), &corners), "{p}");
+    // Two of the three: the set of tubes there changed, so it no longer matches.
+    let two = json!([{"members": members[..2], "corner": "auto", "flip": false}]);
+    let doc = std::sync::Arc::make_mut(&mut app.session.doc);
+    let FeatureKind::FrameMember { corners, .. } = &mut doc.feature_mut(f).unwrap().kind else { panic!() };
+    *corners = serde_json::from_value(two.clone()).unwrap();
+    let e = edit_dialog(&app, f, None).unwrap();
+    assert!(e.inputs[2].items.is_empty(), "{:?}", e.inputs[2].items);
+    assert_eq!(e.extra.get("corners"), Some(&two));
 }
 
 /// With Corner Overrides active, a corner of the frame sketch (not being edited) is picked in the

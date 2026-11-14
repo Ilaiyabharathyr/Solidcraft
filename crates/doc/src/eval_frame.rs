@@ -1019,29 +1019,46 @@ fn pair_lines(
         .collect()
 }
 
-/// The two member lines that end at the sketch's point `point` (a point id, or a 3D sketch's
-/// `wire:index` node): a corner as [`frame_corners::find_corners`] finds them among `lines` (none:
-/// every line of the sketch, as a feature with no lines takes them). A Corner Override names its
-/// corner by these. Only the sketch's lines are looked at: a corner where a point-to-point member
-/// ends is named through `corners` with the pair's id.
-pub fn corner_at_point(st: &ModelState, sketch: u64, lines: &[String], point: &str) -> Result<[String; 2]> {
+/// The member lines that end at the sketch's point `point` (a point id, or a 3D sketch's
+/// `wire:index` node), among `lines` (none: every line of the sketch, as a feature with no lines
+/// takes them). A Corner Override names its corner by these. Under `auto`, two or more lines end
+/// there and none passes through (spec decision 3); otherwise exactly two, a corner as
+/// [`frame_corners::find_corners`] finds them. Only the sketch's lines are looked at: a corner where
+/// a point-to-point member ends is named through `corners` with the pair's id.
+pub fn corner_at_point(st: &ModelState, sketch: u64, lines: &[String], point: &str, auto: bool) -> Result<Vec<String>> {
     let ss = st.sketch(sketch).ok_or_else(|| DocError::Unknown(format!("sketch {sketch}")))?;
     let at =
         crate::construct::sketch_point_position(st, sketch, point).ok_or_else(|| DocError::Unknown(format!("point `{point}` in {}", ss.name)))?;
     let segments = member_lines(ss, lines)?;
+    let tol = frame_corners::CORNER_TOL;
+    if auto {
+        let ends = |(_, a, b): &&(String, Vec3, Vec3)| a.dist(at) <= tol || b.dist(at) <= tol;
+        let ending: Vec<String> = segments.iter().filter(ends).map(|s| s.0.clone()).collect();
+        let through = segments.iter().any(|s| !ends(&s) && at.dist_to_segment(s.1, s.2) <= tol);
+        if ending.len() < 2 || through {
+            return Err(DocError::Invalid("Pick a corner of the frame: a point where two or more members end".into()));
+        }
+        return Ok(ending);
+    }
     let not_a_corner = || DocError::Invalid("Pick a corner of the frame: a point where exactly two members end".into());
     let corners = frame_corners::find_corners(&segments);
-    let corner = corners.iter().find(|c| c.point.dist(at) <= frame_corners::CORNER_TOL).ok_or_else(not_a_corner)?;
+    let corner = corners.iter().find(|c| c.point.dist(at) <= tol).ok_or_else(not_a_corner)?;
     let [(a, _), (b, _)] = corner.ends;
     let id = |m: usize| segments.get(m).map(|s| s.0.clone());
-    id(a).zip(id(b)).map(|(a, b)| [a, b]).ok_or_else(not_a_corner)
+    id(a).zip(id(b)).map(|(a, b)| vec![a, b]).ok_or_else(not_a_corner)
 }
 
-/// The sketch point at the corner where the lines `pair` end together (an end point of either
-/// line, named as a pick names it), or `None` when they no longer meet.
-pub fn corner_point(st: &ModelState, sketch: u64, pair: &[String]) -> Option<String> {
+/// The sketch point where the lines `members` (two or more) all end together (an end point of
+/// one of them, named as a pick names it), or `None` when they no longer meet.
+pub fn corner_point(st: &ModelState, sketch: u64, members: &[String]) -> Option<String> {
     let ss = st.sketch(sketch)?;
-    let corner = frame_corners::find_corners(&member_lines(ss, pair).ok()?).into_iter().next()?;
+    if members.len() < 2 {
+        return None;
+    }
+    let lines = member_lines(ss, members).ok()?;
+    let tol = frame_corners::CORNER_TOL;
+    let (_, a, b) = lines.first()?;
+    let point = [*a, *b].into_iter().find(|&p| lines.iter().all(|(_, a, b)| a.dist(p) <= tol || b.dist(p) <= tol))?;
     let sk = &ss.sketch;
     let ends = |id: &String| -> Vec<String> {
         if let Some(w) = sk.wire_index(id).and_then(|i| sk.wires.get(i)) {
@@ -1050,9 +1067,7 @@ pub fn corner_point(st: &ModelState, sketch: u64, pair: &[String]) -> Option<Str
         let ends = sk.curve_index(id).and_then(|i| sk.curves.get(i)).and_then(|c| c.kind.ends());
         ends.map(|(a, b)| [a, b].iter().filter_map(|&i| sk.points.get(i).map(|p| p.id.clone())).collect()).unwrap_or_default()
     };
-    pair.iter()
-        .flat_map(ends)
-        .find(|p| crate::construct::sketch_point_position(st, sketch, p).is_some_and(|at| at.dist(corner.point) <= frame_corners::CORNER_TOL))
+    members.iter().flat_map(ends).find(|p| crate::construct::sketch_point_position(st, sketch, p).is_some_and(|at| at.dist(point) <= tol))
 }
 
 /// Whether curve `ci` of `sk` is one a frame member is laid on unless lines are picked: a straight

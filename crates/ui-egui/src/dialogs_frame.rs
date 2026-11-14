@@ -34,11 +34,33 @@ const ANCHORS: &[(&str, &str)] = &[
 ];
 
 /// The corner types as `frame.member` names them, and their labels.
-pub(crate) const CORNER_TYPES: [(&str, &str); 4] = [("none", "None"), ("mitre", "Mitre"), ("butt", "Butt"), ("coped_butt", "Coped")];
+pub(crate) const CORNER_TYPES: [(&str, &str); 5] =
+    [("auto", "Auto"), ("none", "None"), ("mitre", "Mitre"), ("butt", "Butt"), ("coped_butt", "Coped")];
+/// [`CORNER_TYPES`]' Auto and None.
+const AUTO: usize = 0;
+const NONE: usize = 1;
 
-/// Whether Flip means anything for the corner type `index`: which member runs through.
+/// Whether the frame's Flip means anything for the corner type `index`: which member runs through.
+/// Not under Auto, which has no one corner to act on.
 fn flips(index: usize) -> bool {
     matches!(CORNER_TYPES.get(index), Some(("butt" | "coped_butt", _)))
+}
+
+/// Whether an override row's Flip means anything for its type `index`: Auto's flip swaps the two
+/// tubes' roles at its corner.
+fn override_flips(index: usize) -> bool {
+    index == AUTO || flips(index)
+}
+
+/// The types an override row offers on a frame of type `frame`: Auto only on an Auto frame (on any
+/// other an Auto override builds as the frame's type, spec A6).
+pub(crate) fn override_choices(frame: usize) -> &'static [(&'static str, &'static str)] {
+    if frame == AUTO { &CORNER_TYPES } else { CORNER_TYPES.get(NONE..).unwrap_or_default() }
+}
+
+/// What an override of type `corner` builds as on a frame of type `frame` (spec A6).
+fn override_type(corner: usize, frame: usize) -> usize {
+    if corner == AUTO && frame != AUTO { frame } else { corner }
 }
 
 fn corner_name(index: usize) -> &'static str {
@@ -47,7 +69,7 @@ fn corner_name(index: usize) -> &'static str {
 
 fn corner_index(corner: &CornerType) -> usize {
     let name = serde_json::to_value(corner).ok();
-    CORNER_TYPES.iter().position(|c| name.as_ref().and_then(Value::as_str) == Some(c.0)).unwrap_or(0)
+    CORNER_TYPES.iter().position(|c| name.as_ref().and_then(Value::as_str) == Some(c.0)).unwrap_or(NONE)
 }
 
 /// The Frame Member dialog's values (the picks are its selection inputs).
@@ -88,6 +110,9 @@ pub struct Member {
     /// whether the other member runs through.
     pub corner: usize,
     pub flip: bool,
+    /// Fit Ends to Earlier Frames: fit this Frame Member's free ends to earlier Frame Members' tubes
+    /// (under every corner type but None).
+    pub fit_ends: bool,
     /// Each corner picked in Corner Overrides with its own type and flip.
     pub overrides: Vec<(Sel, usize, bool)>,
     /// Whether the Corner Overrides rows show (the arrow on its line folds them; a new pick
@@ -332,8 +357,9 @@ impl Member {
             pair_ids: Vec::new(),
             ghost: false,
             picked_tubes: Vec::new(),
-            corner: 0,
+            corner: AUTO,
             flip: false,
+            fit_ends: true,
             overrides: Vec::new(),
             overrides_open: true,
         }
@@ -660,6 +686,9 @@ pub fn rows(app: &SolveApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
     if flips(m.corner) {
         form_row(ui, "Flip", |ui| check(ui, &mut m.flip));
     }
+    if m.corner != NONE {
+        form_row(ui, "Fit Ends to Earlier Frames", |ui| check(ui, &mut m.fit_ends));
+    }
     // The overridden corner under the pointer in the view lights its row, or the Corner Overrides
     // line while the rows are folded.
     let hovered = match &app.viewport.hover {
@@ -722,10 +751,11 @@ fn corner_label(n: usize) -> String {
     solidcraft_ui_text::format("ui.frame_corner_number", &[("n", &n.to_string())])
 }
 
-/// Under Corner Overrides, one row for each picked corner, "Corner n" in pick order: its type, its
-/// Flip (greyed for None and Mitre, so the rows line up) and a bin; then one for each saved
-/// override whose two lines no longer meet, kept until it is removed. Folded, none show. `lit`:
-/// the picked corner under the pointer in the view, whose row is lit.
+/// Under Corner Overrides, one row for each picked corner, "Corner n" in pick order: its type (as it
+/// builds on this frame, [`override_type`]), its Flip (greyed for None and Mitre, so the rows line
+/// up) and a bin; then one for each saved override whose lines no longer meet, kept until it is
+/// removed. Folded, none show. `lit`: the picked corner under the pointer in the view, whose row
+/// is lit.
 fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>) {
     let Kind::Frame(m) = &mut d.kind else { return };
     let picks = crate::selection::items(&d.inputs, 2).to_vec();
@@ -742,7 +772,10 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>) {
     if !m.overrides_open && !picks.is_empty() {
         return;
     }
-    let labels = CORNER_TYPES.map(|c| c.1);
+    let frame = m.corner;
+    let choices = override_choices(frame);
+    let skip = CORNER_TYPES.len() - choices.len();
+    let labels: Vec<&str> = choices.iter().map(|c| c.1).collect();
     let mut drop = None;
     for (n, pick) in picks.iter().enumerate() {
         let Some((_, corner, flip)) = m.overrides.iter_mut().find(|o| o.0 == *pick) else { continue };
@@ -756,10 +789,19 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>) {
                     let beside = t.space_14 + t.space_6 + crate::ui_kit::ContentWidth::label(ui, tr("Flip")) + t.control_height;
                     let room = ui.available_width() - beside - 2.0 * ui.spacing().item_spacing.x;
                     // The type takes the width its longest label needs (never what Flip and the bin need).
-                    let translated = labels.map(solidcraft_ui_text::tr_label);
+                    let translated: Vec<&str> = labels.iter().map(|l| solidcraft_ui_text::tr_label(l)).collect();
                     let width = crate::ui_kit::ContentWidth::dropdown(ui, &translated).min(room);
-                    crate::ui_kit::settings_control_width(ui, width, |ui| crate::ui_kit::dropdown(ui, &format!("frame_corner_{n}"), corner, &labels));
-                    let enabled = flips(*corner);
+                    // An Auto override on a frame of another type shows as that type, and stays
+                    // Auto until a type is chosen for it.
+                    let mut shown = override_type(*corner, frame).saturating_sub(skip);
+                    let before = shown;
+                    crate::ui_kit::settings_control_width(ui, width, |ui| {
+                        crate::ui_kit::dropdown(ui, &format!("frame_corner_{n}"), &mut shown, &labels)
+                    });
+                    if shown != before {
+                        *corner = shown + skip;
+                    }
+                    let enabled = override_flips(override_type(*corner, frame));
                     ui.add_enabled_ui(enabled, |ui| {
                         let mut on = *flip && enabled;
                         crate::ui_kit::checkbox(ui, tr("Flip"), &mut on);
@@ -828,7 +870,7 @@ pub(crate) fn refused_corner(s: &Session, m: &Member, inputs: &[SelInput], pick:
             })
             .collect()
     };
-    frame::corner_at_point(&s.model.state(), *sketch, &lines, id).err().map(|e| e.to_string())
+    frame::corner_at_point(&s.model.state(), *sketch, &lines, id, m.corner == AUTO).err().map(|e| e.to_string())
 }
 
 /// The Frame Member rows proper: the section, its placement and the name.
@@ -950,13 +992,17 @@ pub fn commands(app: &SolveApp, m: &Member, inputs: &[SelInput], extra: &Map<Str
     if m.mirror {
         p["mirror"] = json!(true);
     }
-    if m.corner != 0 {
+    if m.corner != NONE {
         p["corner"] = json!(corner_name(m.corner));
+        // Fit Ends to Earlier Frames applies under every type but None (ruling A10).
+        if m.fit_ends {
+            p["fit_ends"] = json!(true);
+        }
     }
     if m.flip && flips(m.corner) {
         p["flip"] = json!(true);
     }
-    // Each picked corner, saved by the two lines that end there.
+    // Each picked corner, saved by the lines that end there (two, or under Auto two or more).
     let mut corners = Vec::new();
     let picks = crate::selection::items(inputs, 2);
     if !picks.is_empty() {
@@ -965,9 +1011,10 @@ pub fn commands(app: &SolveApp, m: &Member, inputs: &[SelInput], extra: &Map<Str
         for pick in picks {
             let Sel::ExternalSketchPoint { sketch: at, id } = pick else { continue };
             let sketch = sketch.filter(|s| s == at).ok_or("the corner overrides must be corners of the frame sketch")?;
-            let pair = frame::corner_at_point(&st, sketch, members, id).map_err(|e| e.to_string())?;
+            let ends = frame::corner_at_point(&st, sketch, members, id, m.corner == AUTO).map_err(|e| e.to_string())?;
             let (corner, flip) = m.overrides.iter().find(|o| o.0 == *pick).map_or((m.corner, false), |o| (o.1, o.2));
-            corners.push(json!({"members": pair, "corner": corner_name(corner), "flip": flip && flips(corner)}));
+            let corner = override_type(corner, m.corner);
+            corners.push(json!({"members": ends, "corner": corner_name(corner), "flip": flip && override_flips(corner)}));
         }
     }
     // Overrides whose corner has gone stay until removed (the feature then says so).
@@ -1000,7 +1047,22 @@ fn point_ref(app: &SolveApp, sel: &Sel) -> Result<Value, String> {
 /// The dialog editing a frame member feature, filled from it: the path holds its lines, then each
 /// pair's two points, each point keeping the reference it was saved as.
 pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelInput>, Map<String, Value>)> {
-    let FeatureKind::FrameMember { path_sketch, lines, pairs, profile, anchor, locate, angle, mirror, body_name, corner, flip, corners, .. } = kind
+    let FeatureKind::FrameMember {
+        path_sketch,
+        lines,
+        pairs,
+        profile,
+        anchor,
+        locate,
+        angle,
+        mirror,
+        body_name,
+        corner,
+        flip,
+        corners,
+        fit_ends,
+        ..
+    } = kind
     else {
         return None;
     };
@@ -1058,12 +1120,21 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
     }
     m.corner = corner_index(corner);
     m.flip = *flip;
-    // Each override shows as the point of its corner; one whose lines no longer meet, or one of a
-    // corner where a point-to-point member ends (not a sketch point the input can show), is kept
-    // as it is, listed with a bin so that it can be removed ([`kept_corner_text`]).
+    m.fit_ends = *fit_ends;
+    // Each override shows as the point of its corner; one whose lines no longer end there alone
+    // (one has gone, or another now ends there too), or one of a corner where a point-to-point
+    // member ends (not a sketch point the input can show), is kept as it is, listed with a bin so
+    // that it can be removed ([`kept_corner_text`]).
+    let path_lines: Vec<String> = if m.all { Vec::new() } else { lines.iter().filter(|id| !pairs.iter().any(|p| p.id == **id)).cloned().collect() };
+    let auto = m.corner == AUTO;
+    let matched = |ps: u64, members: &[String]| {
+        let id = frame::corner_point(&st, ps, members)?;
+        let ends = frame::corner_at_point(&st, ps, &path_lines, &id, auto).ok()?;
+        (ends.len() == members.len() && ends.iter().all(|e| members.contains(e))).then_some((ps, id))
+    };
     let mut missing = Vec::new();
     for o in corners {
-        match path_sketch.and_then(|ps| Some((ps.0, frame::corner_point(&st, ps.0, &o.members)?))) {
+        match path_sketch.and_then(|ps| matched(ps.0, &o.members)) {
             Some((sketch, id)) => {
                 let pick = Sel::ExternalSketchPoint { sketch, id };
                 if let Some(i) = inputs.get_mut(2) {
