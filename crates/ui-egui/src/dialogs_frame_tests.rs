@@ -1181,6 +1181,19 @@ fn a_lone_first_point_is_not_a_row_and_the_prompt_asks_for_the_second() {
     assert_eq!(path_rows(&mut h), 2);
 }
 
+/// A lone first point is no row yet: the Path chip stays the plain "Select" it is with nothing
+/// picked, never a filled "0 selected" (the prompt asks for the second point).
+#[test]
+fn a_lone_first_point_leaves_the_path_chip_unfilled() {
+    let empty = drawn_texts(&path_harness(|_| Vec::new()));
+    let h = path_harness(|_| vec![corner(0., 0., 0.)]);
+    assert_eq!(h.app.dialog.as_ref().unwrap().error.as_deref(), Some("Pick the second point"));
+    let texts = drawn_texts(&h);
+    assert!(!texts.iter().any(|t| t.ends_with("selected")), "{texts:?}");
+    let selects = |t: &[String]| t.iter().filter(|t| *t == "Select").count();
+    assert_eq!(selects(&texts), selects(&empty), "{texts:?} vs {empty:?}");
+}
+
 /// p0, p1, p1, p2 (two pairs sharing p1): two rows. Removing the second pair's row takes out both
 /// its points, and the first pair keeps its points, references and id.
 #[test]

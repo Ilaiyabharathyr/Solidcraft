@@ -3512,7 +3512,9 @@ pub(crate) fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, n
                 let active = i == d.active && !text_focus;
                 // A chip: "↖ Select" (outlined) while empty, "N selected" (filled) once picked.
                 let custom_axis = i == 1 && inp.items.is_empty() && stored_revolve_axis(&d.kind).is_some();
-                let filled = !inp.items.is_empty() || custom_axis || stored_reference.is_some();
+                // Frame's Path counts its rows: a lone first point of a pair is none yet.
+                let frame_rows = crate::dialogs_frame::listed_rows(d, i).map(|rows| rows.len());
+                let filled = frame_rows.map_or(!inp.items.is_empty(), |n| n > 0) || custom_axis || stored_reference.is_some();
                 let text = if filled {
                     RichText::new(if stored_reference.is_some() && matches!(d.kind, Kind::Section { .. }) {
                         solidcraft_ui_text::tr("ui.viewport_status_section_plane").into()
@@ -3523,7 +3525,6 @@ pub(crate) fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, n
                     } else if !inp.multi {
                         inp.items.first().map(|item| selection_label(s, names, d, inp, item)).unwrap_or_default()
                     } else {
-                        let frame_rows = crate::dialogs_frame::listed_rows(d, i).map(|rows| rows.len());
                         let count = if i == 0 { shell_count.or(frame_rows).unwrap_or(inp.items.len()) } else { inp.items.len() };
                         solidcraft_ui_text::format("dialog.selected_count", &[("count", &count.to_string())])
                     })
