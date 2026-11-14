@@ -3088,6 +3088,22 @@ fn a_corners_entry_with_a_piece_id_is_refused() {
 }
 
 #[test]
+fn a_corners_entry_naming_a_line_whose_id_holds_a_gt_is_taken() {
+    // Ruling C3: a sketch id may hold `>`. The line `a>b` is a line of the sketch, not a piece: an override naming it is
+    // taken, and applies. Mitred, c reaches the corner's outer side, y = −20 (Auto alone would butt it on a>b at y = 20).
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "L"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [600, 0]], "ids": ["a>b"]}));
+    run(&mut s, "sketch.line", json!({"points": [[600, 0], [600, 400]], "ids": ["c"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let corners = json!([{"members": ["a>b", "c"], "corner": "mitre"}]);
+    run(&mut s, "frame.member", json!({"sketch": "L", "profile": tube(), "corner": "auto", "corners": corners, "names": {"a>b": "A", "c": "C"}}));
+    let bs = boxes(&mut s);
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    assert!(near3(bs["C"].0, [580.0, -20.0, -20.0]) && near3(bs["A"].1, [620.0, 20.0, 20.0]), "{bs:?}");
+}
+
+#[test]
 fn a_stale_piece_name_is_ignored() {
     let mut s = Session::default();
     x_brace_frame(&mut s);

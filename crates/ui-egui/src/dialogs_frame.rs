@@ -586,14 +586,25 @@ pub(crate) fn member_ends(app: &SolveApp) -> Vec<Hit> {
         if !s.model.result(f.id).is_some_and(|r| !r.skipped && r.error.is_none()) {
             continue;
         }
-        let Ok(segments) = frame::member_segments(&s.doc, &s.model.state_before(f.id), f) else { continue };
+        let before = s.model.state_before(f.id);
+        let Ok(segments) = frame::member_segments(&s.doc, &before, f) else { continue };
         let FeatureKind::FrameMember { names, .. } = &f.kind else { continue };
-        for (k, (line, a, b)) in segments.into_iter().enumerate() {
+        // A copy names its bodies by position among its members (under Auto, each line's pieces), as
+        // `end_cap::member` finds them. When they don't pair up (a piece left with no body), they
+        // aren't looked up: every end is offered.
+        let made = s.model.result(f.id).map_or(0, |r| r.state.bodies.iter().filter(|b| b.feature == f.id).count());
+        let members = frame::member_line_ids(&before, &f.kind).ok().filter(|ids| ids.len() == made);
+        for (line, a, b) in segments {
             // A hidden member (its body, component or occurrence) offers no end to pick: the
             // markers are drawn over everything and would take a click meant for what is shown.
-            // Its body: by position for a copy, else by its member id, as `end_cap::member` finds it.
-            let body = if f.body_names.is_empty() { names.get(&line) } else { f.body_names.get(k) };
-            if !body.is_some_and(|b| app.body_visible(b)) {
+            // Its body: by its member id, or a copy's by position.
+            let visible = |body: Option<&String>| body.is_some_and(|b| app.body_visible(b));
+            let shown = if f.body_names.is_empty() {
+                visible(names.get(&line))
+            } else {
+                members.as_ref().is_none_or(|ids| visible(ids.iter().position(|id| *id == line).and_then(|k| f.body_names.get(k))))
+            };
+            if !shown {
                 continue;
             }
             out.push(Hit::MemberEnd { feature: f.id, line: line.clone(), end: 0, point: a });
@@ -747,7 +758,8 @@ pub fn rows(app: &SolveApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
     lit_rows(ui, "Corner Overrides", lit.is_some() && folded, |ui| {
         input_rows_range(d, ui, &app.session, app.preferences.origin_plane_names, 2..3);
     });
-    let crossings: Vec<bool> = crate::selection::items(&d.inputs, 2).iter().map(|p| crossing(&app.session, &d.kind, &d.inputs, p)).collect();
+    let mut crossings: Vec<bool> = crate::selection::items(&d.inputs, 2).iter().map(|p| crossing(&app.session, &d.kind, &d.inputs, p)).collect();
+    crossings.extend(kept_crossings(&app.session, d));
     corner_rows(ui, d, lit, &crossings);
     enter
 }
@@ -787,8 +799,13 @@ pub(crate) fn toggle_own_rows(kind: &mut Kind, input: usize) -> bool {
 
 /// "Corner n", the label of the n-th override row (from 1).
 /// What a kept override's row says: the type of one where a point-to-point member ends (Corner
-/// Overrides can't pick that corner, but it is no less there), else Missing corner.
-fn kept_corner_text(o: &Value) -> &str {
+/// Overrides can't pick that corner, but it is no less there), Crossing for one of lines crossing
+/// where no sketch point is (`crossing`, [`frame::members_cross`]: it still applies), else Missing
+/// corner.
+fn kept_corner_text(o: &Value, crossing: bool) -> &str {
+    if crossing {
+        return tr("Crossing");
+    }
     let mut ids = o.get("members").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
     let names_pair = ids.any(|id| frame::parse_pair_id(id).is_some());
     let corner = CORNER_TYPES.iter().find(|c| o.get("corner").and_then(Value::as_str) == Some(c.0));
@@ -804,7 +821,7 @@ fn corner_label(n: usize) -> String {
 /// tube whole), its Flip (greyed for None and Mitre, so the rows line up) and a bin; then one for
 /// each saved override whose lines no longer meet, kept until it is removed. Folded, none show.
 /// `lit`: the picked corner under the pointer in the view, whose row is lit. `crossings`: which
-/// picks are crossings ([`crossing`]).
+/// picks are crossings ([`crossing`]), then which kept overrides are ([`kept_crossings`]).
 fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>, crossings: &[bool]) {
     let Kind::Frame(m) = &mut d.kind else { return };
     let picks = crate::selection::items(&d.inputs, 2).to_vec();
@@ -886,7 +903,7 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>, crossings:
         let label = corner_label(picks.len() + k + 1);
         ui.scope_builder(egui::UiBuilder::new().id_salt(("frame_missing_corner", k)), |ui| {
             form_row(ui, &label, |ui| {
-                ui.label(kept_corner_text(o));
+                ui.label(kept_corner_text(o, crossings.get(picks.len() + k).copied().unwrap_or(false)));
                 let t = solidcraft_theme::Tokens::get();
                 ui.add_space((ui.available_width() - t.control_height).max(0.0));
                 if crate::ui_kit::bin_button(ui, tr("Remove this corner")).clicked() {
@@ -939,6 +956,25 @@ fn path_lines(m: &Member, inputs: &[SelInput], sketch: u64) -> Vec<String> {
 fn crossing(s: &Session, kind: &Kind, inputs: &[SelInput], pick: &Sel) -> bool {
     let (Kind::Frame(m), Sel::ExternalSketchPoint { sketch, id }) = (kind, pick) else { return false };
     m.corner == AUTO && frame::is_crossing(&s.model.state(), *sketch, &path_lines(m, inputs, *sketch), id)
+}
+
+/// For each override an edit keeps ([`kept_corner_text`]), whether it is an Auto frame's override
+/// of lines of its path crossing where no sketch point is.
+fn kept_crossings(s: &Session, d: &Dialog) -> Vec<bool> {
+    let Some(Value::Array(kept)) = d.extra.get("corners") else { return Vec::new() };
+    let auto = matches!(&d.kind, Kind::Frame(m) if m.corner == AUTO);
+    let path = d.editing.and_then(|(id, _)| s.doc.feature(id)).and_then(|f| match &f.kind {
+        FeatureKind::FrameMember { path_sketch, .. } => *path_sketch,
+        _ => None,
+    });
+    let st = s.model.state();
+    kept.iter()
+        .map(|o| {
+            let members: Vec<String> =
+                o.get("members").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+            auto && path.is_some_and(|ps| frame::members_cross(&st, ps.0, &members))
+        })
+        .collect()
 }
 
 /// The Frame Member rows proper: the section, its placement and the name.

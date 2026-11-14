@@ -1355,6 +1355,17 @@ pub fn is_crossing(st: &ModelState, sketch: u64, lines: &[String], point: &str) 
     member_lines(ss, lines).is_ok_and(|segments| matches!(ending_and_through(&segments, at), (_, through) if through.len() >= 2))
 }
 
+/// Whether the sketch's lines `members` (two or more) all pass through one point, which none of them ends at: the
+/// crossing an Auto override of those lines names, whether or not a sketch point marks it (typically none does
+/// where an X brace's diagonals cross).
+pub fn members_cross(st: &ModelState, sketch: u64, members: &[String]) -> bool {
+    let Some(lines) = st.sketch(sketch).and_then(|ss| member_lines(ss, members).ok()) else { return false };
+    let [(_, a, b), (_, c, d), ..] = lines.as_slice() else { return false };
+    let (p, q) = solidcraft_geom::mesh_distance::closest_on_segments(*a, *b, *c, *d);
+    p.dist(q) <= frame_corners::CORNER_TOL
+        && matches!(ending_and_through(&lines, (p + q) * 0.5), (ending, through) if ending.is_empty() && through.len() == lines.len())
+}
+
 /// The sketch point where the lines `members` (two or more) all end together (an end point of
 /// one of them, named as a pick names it), or else a point of the sketch where they all cross
 /// with none ending there; `None` when they no longer meet.

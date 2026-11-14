@@ -684,6 +684,35 @@ fn a_ghosted_members_vertex_and_centreline_end_can_be_picked() {
 }
 
 #[test]
+fn a_copys_hidden_crossing_tube_offers_no_end() {
+    // An Auto plus, v (200, −100)…(200, 100) drawn before h (0, 0)…(400, 0): its members are v's two pieces, then h.
+    // Named by position as a copy is, h's body is the third, not the second (a piece of v).
+    let mut app = box_app();
+    for (id, p) in [
+        ("sketch.create", json!({"plane": "XY", "name": "Plus"})),
+        ("sketch.line", json!({"points": [[200, -100], [200, 100]], "ids": ["v"]})),
+        ("sketch.line", json!({"points": [[0, 0], [400, 0]], "ids": ["h"]})),
+        ("sketch.finish", json!({})),
+        ("frame.member", json!({"sketch": "Plus", "profile": tube(), "corner": "auto", "names": {"h": "H", "v": "V"}})),
+    ] {
+        app.run(id, p).unwrap();
+    }
+    let f = app.session.doc.features.last().unwrap().id;
+    app.session.doc_mut().feature_mut(f).unwrap().body_names = ["V", "V · H", "H"].map(String::from).to_vec();
+    app.session.refresh();
+    ghosted_frame_dialog(&mut app);
+    app.session.visibility.hidden_bodies.push("H".into());
+    let lines: Vec<String> = super::member_ends(&app)
+        .into_iter()
+        .filter_map(|h| match h {
+            crate::viewport::Hit::MemberEnd { feature, line, .. } if feature == f => Some(line),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, ["v", "v"], "h's body is hidden, v's shown");
+}
+
+#[test]
 fn picking_a_centreline_end_stores_the_point_it_is_built_on() {
     let mut app = box_app();
     let base = sketch_id(&app, "Base");
@@ -1383,6 +1412,32 @@ fn an_edit_opens_with_an_override_whose_corner_has_gone() {
     assert!(apply_commands(&h.app, d).unwrap()[0].1["params"].get("corners").is_none());
 }
 
+/// An X brace's diagonals cross where no sketch point is, so the edit can't show their override as
+/// a picked point: it is kept, and its row reads Crossing (it still applies), not Missing corner.
+#[test]
+fn an_edit_shows_a_kept_crossing_override_as_a_crossing() {
+    let mut h = tall_harness();
+    for (id, p) in [
+        ("sketch.create", json!({"plane": "XY", "name": "Frame"})),
+        ("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]})),
+        ("sketch.line", json!({"points": [[0, 0], [600, 400]], "ids": ["d1"]})),
+        ("sketch.line", json!({"points": [[0, 400], [600, 0]], "ids": ["d2"]})),
+        ("sketch.finish", json!({})),
+    ] {
+        h.app.run(id, p).unwrap();
+    }
+    let over = json!([{"members": ["d1", "d2"], "corner": "auto", "flip": true}]);
+    h.app.run("frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "corners": over})).unwrap();
+    let f = h.app.session.doc.features.last().unwrap().id;
+    let e = edit_dialog(&h.app, f, None).unwrap();
+    assert!(e.inputs[2].items.is_empty());
+    assert_eq!(e.extra.get("corners").and_then(|c| c[0].get("members")), Some(&json!(["d1", "d2"])));
+    h.app.dialog = Some(e);
+    h.frames(2);
+    let texts = drawn_texts(&h);
+    assert!(texts.iter().any(|t| t == "Crossing") && !texts.iter().any(|t| t == "Missing corner"), "{texts:?}");
+}
+
 /// An override of a corner where a point-to-point member ends (#15705) can't show as a picked
 /// sketch point: an edit keeps it as it is, its row says its type, and OK sends it back.
 #[test]
@@ -1402,8 +1457,8 @@ fn an_edit_keeps_an_override_of_a_pair_members_corner() {
     let e = edit_dialog(&app, f, None).unwrap();
     assert!(e.inputs[2].items.is_empty());
     assert_eq!(e.extra.get("corners"), Some(&over));
-    assert_eq!(kept_corner_text(&over[0]), "Mitre");
-    assert_eq!(kept_corner_text(&json!({"members": [bottom, "l9"], "corner": "mitre"})), "Missing corner");
+    assert_eq!(kept_corner_text(&over[0], false), "Mitre");
+    assert_eq!(kept_corner_text(&json!({"members": [bottom, "l9"], "corner": "mitre"}), false), "Missing corner");
     assert_eq!(apply_commands(&app, &e).unwrap()[0].1["params"]["corners"], over);
 }
 

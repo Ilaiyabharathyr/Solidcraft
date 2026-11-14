@@ -158,9 +158,10 @@ The section line-up limit under Corners (Known limits) applies only outside Auto
 **Crossings.** Tubes of the sketch that cross are split at the crossing. The earliest in laying order
 stays whole; each other tube is cut into pieces, each fitted to the tube that stays whole, so nothing
 overlaps. Where more than two tubes pass through a point, or tubes also end there, the earliest stays
-whole and the rest are cut and fitted in laying order. A crossing override (**Crossing** row, picked at a
-sketch point lying at the crossing, also where another tube ends there) has **Flip** only: with it the
-other tube of the pair stays whole. Its type is ignored.
+whole and the rest are cut and fitted in laying order. A crossing override (**Crossing** row, picked
+at a sketch point lying at the crossing, also where another tube ends there) has **Flip** only: with
+it the other tube of the pair stays whole. Its type is ignored. Edit Feature lists an override of a
+crossing with no sketch point as a Crossing row with a bin; it still applies.
 
 Each piece is a tube of its own. The first piece keeps its line's name; a later piece is named
 `<line's name> · <crossing tube's name>`. Piece names are pinned like line names, so renaming a piece
@@ -186,16 +187,21 @@ lives on each override row.
 {"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "rect_tube", "width": 25, "height": 25, "wall": 2}, "corner": "auto", "fit_ends": true}}
 ```
 
-**Known limits of Auto.** Crossings that involve point-to-point or 3D-sketch tubes still overlap. When a
-crossing first cuts a line, references to that line's far end (an End Cap, a face pick) are not moved and
-fail with an error. A crossing with no sketch point can only be overridden through the command's
-`corners`. A fitted face is named after the cutting tube's piece id, so its name changes if that piece's
-id changes. With an off-centre anchor a piece's crossing end can reach past the whole tube, and a later
-frame's end landing in that sliver is fitted to air. A frame has at most 1000 members, counting pieces. A flat end
-meeting a round tube's seam in some layouts is refused by the kernel with an error. A member's face
-numbers can change when its line moves, because the kernel's face order follows placement; faces
-fitted against a reversed tube can be renamed if its direction flips. A brace landing at a very
-shallow angle can leave a small step.
+**Known limits of Auto.** Crossings that involve point-to-point or 3D-sketch tubes still overlap. When
+a crossing first cuts a line, references to that line's far end (an End Cap, a face pick) stay on the
+line's first piece, which no longer has that end, and fail with an error. A short piece past a
+crossing keeps only what lies past the tube that stays whole: a stub wholly inside that tube is
+dropped (it has no body, and its pinned name is simply unused), and a stub that comes out past it is
+kept, fitted to that tube's face. Typical X braces have no sketch point where the diagonals cross, so
+their Flip can only be set through the command's `corners`. A fitted face is named after the cutting
+tube's piece id, so its name changes if that piece's id changes. With an off-centre anchor a piece's
+crossing end can reach past the whole tube, and a later frame's end landing in that sliver is fitted
+to air. A copy of a piece shorter than about twice the crossing tube's width may not be recognised as
+a tool, and a later frame's end meeting it is left overlapping. A frame has at most 1000 members,
+counting pieces. A flat end meeting a round tube's seam in some layouts is refused by the kernel with
+an error. A member's face numbers can change when its line moves, because the kernel's face order
+follows placement; faces fitted against a reversed tube can be renamed if its direction flips. A
+brace landing at a very shallow angle can leave a small step.
 
 ## frame.member
 
