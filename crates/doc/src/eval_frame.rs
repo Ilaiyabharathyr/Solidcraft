@@ -5,9 +5,9 @@
 use solidcraft_geom::prelude::*;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::f64::consts::PI;
+use std::f64::consts::{PI, TAU};
 
-use solidcore_record::{Plane, Region2, Vec2, Vec3};
+use solidcore_record::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
 use solidcraft_geom::{Aabb2, Ring};
 use solidcraft_kernel::{self as kernel, BoolOp};
 use solidcraft_sketch::{CurveKind, Sketch};
@@ -799,7 +799,7 @@ struct Layout {
 }
 
 fn layout(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &ModelState) -> Result<Layout> {
-    let FeatureKind::FrameMember { profile, anchor, locate, angle, mirror, .. } = &f.kind else {
+    let FeatureKind::FrameMember { profile, anchor, locate, angle, mirror, corner, .. } = &f.kind else {
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
     let (segments, sketch_x, drawn, planes) = segments(doc, vals, f, st)?;
@@ -826,7 +826,26 @@ fn layout(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &Mode
         Some(e) => val(vals, e, Kind::Angle)?,
         None => 0.0,
     };
+    if *corner == CornerType::Auto {
+        // A full circle is one arc, and its tube's one wall has its seam where the arc starts. Unmirrored and
+        // unturned that is the section's +x, the inside of an outline Auto lays anticlockwise; Mirror or a turn
+        // carries it round, to the outside on a mirror or a half turn, where each through tube's flat end touches
+        // the tube fitted to it along that tube's outer side. SMLib's check refuses the fit there ("Face Near
+        // missing Seam"), so under Auto every circle keeps its seam on the section's +x as placed (#4003).
+        regions = regions.iter().map(|r| seamed(r, -turn)).collect();
+    }
     Ok(Layout { segments, regions, description, at, turn, sketch_x, drawn, planes })
+}
+
+/// `region` with each full circle (a loop of one whole-turn arc) starting at angle `start`, turning the way it did.
+fn seamed(region: &Region2, start: f64) -> Region2 {
+    let seam = |l: &Loop2| match l.segs.as_slice() {
+        [Seg2::Arc { center, radius, sweep, .. }] if (sweep.abs() - TAU).abs() < 1e-9 => {
+            Loop2 { segs: vec![Seg2::Arc { center: *center, radius: *radius, start, sweep: *sweep }] }
+        }
+        _ => l.clone(),
+    };
+    Region2 { outer: seam(&region.outer), holes: region.holes.iter().map(seam).collect() }
 }
 
 /// Each member's line in the feature's component frame: (member id, start, end), the sketch's

@@ -113,8 +113,6 @@ fn a_picked_section_and_the_placement() {
     m.angle = "15 deg".into();
     m.mirror = true;
     m.name = " Rail ".into();
-    // The section and its placement, not the corners: as stage 1 built it, with None.
-    m.corner = corner_type("none");
     let c = apply_commands(&app, &d).unwrap();
     let p = &c[0].1;
     assert_eq!(p["sketch"], json!(sketch_id(&app, "Frame")));

@@ -2522,6 +2522,75 @@ fn auto_rectangle_runs_its_long_sides_through() {
     assert!(rel(left.1, 129_458.17) < MEASURED, "{left:?} vs 129458.17");
 }
 
+/// `rectangle_frame` with the profile sketch `Ring`: circles of radius 20 and 17 about its origin.
+fn ring_frame(s: &mut Session) {
+    rectangle_frame(s);
+    run(s, "sketch.create", json!({"plane": "YZ", "name": "Ring"}));
+    run(s, "sketch.circle.center", json!({"center": [0, 0], "radius": 20}));
+    run(s, "sketch.circle.center", json!({"center": [0, 0], "radius": 17}));
+    run(s, "sketch.finish", json!({}));
+}
+
+/// Mirror (or a half turn) puts a round section's seam on the frame's outer side, where each 600's flat end
+/// touches the 400 fitted to it along the 400's outer side; SMLib's check refused the fitted 400 there ("Face Near
+/// missing Seam"). Under Auto each section builds as the unmirrored, unturned one: a picked ring, a round tube and a
+/// rectangular tube, with the values of `auto_rectangle_runs_its_long_sides_through`.
+#[test]
+fn auto_builds_a_mirrored_or_turned_section() {
+    let ring = PI * (400.0 - 289.0);
+    let picked = json!({"profile_sketch": "Ring", "profiles": [{"point": [18.5, 0]}]});
+    let round = json!({"profile": {"kind": "round_tube", "diameter": 40, "wall": 3}});
+    // (section, its area, the 400s' y range and volume): fishmouthed to the 600s' centrelines in a round section,
+    // flat on their near faces in the rectangular tube.
+    let sections = [
+        (picked, ring, (0.0, 400.0), 129_458.17),
+        (round, ring, (0.0, 400.0), 129_458.17),
+        (json!({"profile": tube()}), tube_area(), (20.0, 380.0), tube_area() * 360.0),
+    ];
+    for (section, area, (y0, y1), short) in sections {
+        for variant in [json!({"mirror": true}), json!({"angle": "180 deg"})] {
+            let mut s = Session::default();
+            ring_frame(&mut s);
+            let mut p = json!({"sketch": "Frame", "corner": "auto"});
+            for (k, v) in section.as_object().unwrap().iter().chain(variant.as_object().unwrap()) {
+                p[k] = v.clone();
+            }
+            if let Err(e) = s.execute("frame.member", &p) {
+                panic!("{p}: {e}");
+            }
+            assert_eq!(bodies(&mut s).len(), 4, "{p}");
+            let (bottom, left) = bottom_and_left(&mut s);
+            assert!(near3(bottom.2, [-20.0, -20.0, -20.0]) && near3(bottom.3, [620.0, 20.0, 20.0]), "{p}: {bottom:?}");
+            assert!(rel(bottom.1, area * 640.0) < MEASURED, "{p}: {bottom:?} vs {}", area * 640.0);
+            assert!((left.2[1] - y0).abs() < 1e-3 && (left.3[1] - y1).abs() < 1e-3, "{p}: {left:?}");
+            assert!(rel(left.1, short) < MEASURED, "{p}: {left:?} vs {short}");
+        }
+    }
+}
+
+/// The New Frame Member dialog's picked ring, anchored at its bottom, turned 15° and mirrored (stage 1's dialog test
+/// `a_picked_section_and_the_placement`), builds under Auto: a ring mirrored is the same ring, so each member is the
+/// unmirrored one's, to the volume and the box.
+#[test]
+fn auto_builds_the_dialogs_mirrored_picked_ring() {
+    let build = |mirror: bool| {
+        let mut s = Session::default();
+        ring_frame(&mut s);
+        let p = json!({"sketch": "Frame", "profile_sketch": "Ring", "profiles": [{"point": [18.5, 0]}], "corner": "auto",
+                       "anchor": "bottom", "angle": "15 deg", "mirror": mirror, "body_name": "Rail"});
+        if let Err(e) = s.execute("frame.member", &p) {
+            panic!("{p}: {e}");
+        }
+        bodies(&mut s)
+    };
+    let (mirrored, plain) = (build(true), build(false));
+    let names: Vec<&str> = mirrored.iter().map(|b| b.0.as_str()).collect();
+    assert_eq!(names, ["Rail", "Rail (2)", "Rail (3)", "Rail (4)"]);
+    for (m, p) in mirrored.iter().zip(&plain) {
+        assert!(m.0 == p.0 && rel(m.1, p.1) < MEASURED && near3(m.2, p.2) && near3(m.3, p.3), "{m:?} vs {p:?}");
+    }
+}
+
 /// The 600 × 400 rectangle `Frame` with a cross-member from (300, 0) to (300, 400).
 fn cross_member_frame(s: &mut Session) {
     run(s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
