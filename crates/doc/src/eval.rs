@@ -7557,11 +7557,22 @@ fn feature_tools_with_constructor(
                     lo = hs.iter().cloned().fold(lo, f64::min) - margin;
                 }
             }
-            extrude_within_reach([lo + off, hi + off])?;
+            let is_symmetric_offset = extent.direction == crate::Direction::Symmetric && extent.symmetric_offset && off.abs() > 1e-9;
             let untrimmed = extent.to.is_none() && extent.from.is_none() && !extent.through_all;
             let mut tools = Vec::new();
-            for r in &regions {
-                tools.extend(centered_extrude(&ss.plane, r, lo + off, hi + off, Some(&ss), thin_roles.as_ref(), extent.distance2.is_some())?);
+            if is_symmetric_offset {
+                let gap = off.abs();
+                let half = hi;
+                extrude_within_reach([-gap - half, gap + half])?;
+                for r in &regions {
+                    tools.extend(centered_extrude(&ss.plane, r, gap, gap + half, Some(&ss), thin_roles.as_ref(), true)?);
+                    tools.extend(centered_extrude(&ss.plane, r, -gap - half, -gap, Some(&ss), thin_roles.as_ref(), true)?);
+                }
+            } else {
+                extrude_within_reach([lo + off, hi + off])?;
+                for r in &regions {
+                    tools.extend(centered_extrude(&ss.plane, r, lo + off, hi + off, Some(&ss), thin_roles.as_ref(), extent.distance2.is_some())?);
+                }
             }
             // A cut or a join by profiles apart in the sketch (the letters of a text): each tool
             // lies in the prism over its profile, so the tools are apart too. The body is then cut once by all of them, or joined to
@@ -7576,7 +7587,7 @@ fn feature_tools_with_constructor(
                 Operation::Join => one_target && !sheet,
                 _ => false,
             };
-            if at_once && tools.len() > 1 && regions_apart(&regions, APART_GAP) {
+            if at_once && tools.len() > 1 && !is_symmetric_offset && regions_apart(&regions, APART_GAP) {
                 let bodies: Vec<Body> = tools.iter().map(|t| t.body.clone()).collect();
                 if let Some(one) = kernel::join_apart(&bodies)? {
                     tools = vec![Traced::step(one, &tools.iter().collect::<Vec<_>>())];
@@ -7592,7 +7603,7 @@ fn feature_tools_with_constructor(
             }
             // A join's profile grows into the material it joins; its sketch plane and depth as drawn
             // still serve a join into sheet metal (`sheet_join`), which takes the sketch's regions.
-            if untrimmed || (*operation == Operation::Join && curved.is_none()) {
+            if (untrimmed || (*operation == Operation::Join && curved.is_none())) && !is_symmetric_offset {
                 *constructor = Some(ExtrudeConstructor { plane: ss.plane, interval: (lo + off, hi + off) });
             }
             // A Join tool's faces outlive the boolean where they stay on the result, so they are
@@ -7626,8 +7637,18 @@ fn feature_tools_with_constructor(
                         // curved To face) is not the feature's start or end face.
                         let nominal = |plane: &solidcore_record::Plane| {
                             let height = (plane.origin - ss.plane.origin).dot(n);
-                            let tolerance = 1e-9 * (1.0 + height.abs() + (lo + off).abs() + (hi + off).abs());
-                            (height - (lo + off)).abs() <= tolerance || (height - (hi + off)).abs() <= tolerance
+                            if is_symmetric_offset {
+                                let gap = off.abs();
+                                let half = hi;
+                                let tolerance = 1e-9 * (1.0 + height.abs() + (gap + half));
+                                (height - gap).abs() <= tolerance
+                                    || (height - (gap + half)).abs() <= tolerance
+                                    || (height - (-gap)).abs() <= tolerance
+                                    || (height - (-gap - half)).abs() <= tolerance
+                            } else {
+                                let tolerance = 1e-9 * (1.0 + height.abs() + (lo + off).abs() + (hi + off).abs());
+                                (height - (lo + off)).abs() <= tolerance || (height - (hi + off)).abs() <= tolerance
+                            }
                         };
                         for (cap, source) in caps.iter_mut().zip(body.face_sources().into_iter().flatten()) {
                             if matches!(source, Some(kernel::FaceSource::ExtrudeCap { plane, .. }) if !nominal(plane)) {

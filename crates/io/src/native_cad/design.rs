@@ -361,6 +361,7 @@ impl Builder {
                 direction,
                 distance2: second.map(mm),
                 start_offset: None,
+                symmetric_offset: false,
                 through_all: through,
                 taper: None,
                 to: None,
