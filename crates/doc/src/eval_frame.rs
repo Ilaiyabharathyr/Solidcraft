@@ -41,25 +41,30 @@ pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
     let mut plan = auto_plan(*corner, &segments, &planes, corners, &drawn)?;
     let (axes, plain) = section_axes(&segments, &planes, plan.as_ref(), turn)?;
     let (placed, unreversed) = (placer(&axes, at), unreversed_placer(&plain, at));
-    // Fit Ends to Earlier Frames: the earlier Frame Members' tubes and their copies, as cutting tools (None never fits).
-    let earlier = if *fit_ends && !corner.is_none() { earlier::earlier_tools(doc, vals, f, st)? } else { Vec::new() };
+    // Fit Ends to Earlier Frames (None never fits): the earlier Frame Members' tubes and their copies, as cutting
+    // tools, and this frame's own tubes laid before each free end (ruling A14), whether or not an earlier one exists.
+    let fits = *fit_ends && !corner.is_none();
+    let earlier = if fits { earlier::earlier_tools(doc, vals, f, st)? } else { Vec::new() };
     if let Some(plan) = plan.as_mut() {
         free_corners(plan, &earlier, &placed, frame::anchor_point(&regions, frame::Anchor::Center))?;
     }
-    let unjointed = if earlier.is_empty() { Vec::new() } else { unjointed_ends(&f.kind, &segments, plan.as_ref()) };
-    // This frame's own members, for its free ends: their laying order, and their cut ends to build their tools from.
-    let laid: Vec<usize> = match plan.as_ref() {
-        Some(plan) => {
-            let mut laid = vec![usize::MAX; segments.len()];
-            for (i, r) in plan.ranks.iter().enumerate() {
-                if let Some(p) = laid.get_mut(r.member) {
-                    *p = i;
-                }
-            }
-            laid
+    let unjointed = if fits { unjointed_ends(&f.kind, &segments, plan.as_ref()) } else { Vec::new() };
+    // This frame's own members, for its free ends: their laying order (Auto's, else the drawing order, never the
+    // pick order), and their cut ends to build their tools from.
+    let mut laid = vec![usize::MAX; segments.len()];
+    let order: Vec<usize> = match plan.as_ref() {
+        Some(plan) => plan.ranks.iter().map(|r| r.member).collect(),
+        None => {
+            let mut order: Vec<usize> = (0..segments.len()).collect();
+            order.sort_by_key(|&m| (drawn.get(m).copied().unwrap_or(m), m));
+            order
         }
-        None => (0..segments.len()).collect(),
     };
+    for (i, m) in order.into_iter().enumerate() {
+        if let Some(p) = laid.get_mut(m) {
+            *p = i;
+        }
+    }
     let own_ends =
         if unjointed.iter().any(|e| e.2) { frame_ends(&f.kind, &segments, &regions, &placed, plan.clone(), (sketch_x, &drawn))? } else { Vec::new() };
     // Only an Auto frame builds by Auto's rules; an Auto override elsewhere is the frame's own type (corner_ends).
@@ -754,9 +759,6 @@ fn fit_to_earlier(
     own: &Own,
     middle: &dyn Fn(usize) -> Vec3,
 ) -> Result<()> {
-    if earlier.is_empty() {
-        return Ok(());
-    }
     let named = |role: &str, name: &str, body: &kernel::Body| {
         let roles = (0..body.face_count()).map(|k| vec![format!("{role}:{name}:face:{k}")]).collect();
         Traced::made(body.clone(), Some(roles))
@@ -775,6 +777,9 @@ fn fit_to_earlier(
             if let Some(body) = slot.as_ref() {
                 against.push(named(role, line, body));
             }
+        }
+        if against.is_empty() {
+            continue;
         }
         let against: Vec<&Traced> = against.iter().collect();
         let member = made.get_mut(m).ok_or_else(|| DocError::Invalid(format!("no member {m}")))?;

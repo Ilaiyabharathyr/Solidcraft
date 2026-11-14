@@ -3265,6 +3265,38 @@ fn ends_at_a_free_corner_are_fitted_to_each_other_too() {
 }
 
 #[test]
+fn a_mitre_frame_fits_its_free_ends_to_its_own_tubes_in_drawing_order() {
+    // Ruling A14: with no earlier Frame Member, the Mitre rectangle's cross-member (300, 0)…(300, 400) has two free
+    // ends on the rails' middles. Each is fitted to the rail laid before it, in drawing order, not pick order: the
+    // cross-member runs y 20…380 whichever order the lines are picked in, and every body comes out the same.
+    let build = |reverse: bool| {
+        let mut s = Session::default();
+        cross_member_frame(&mut s);
+        let mut lines: Vec<String> = sketch_lines(&s, "Frame").into_iter().map(|l| l.0).collect();
+        if reverse {
+            lines.reverse();
+        }
+        let names: serde_json::Map<String, Value> = lines.iter().map(|l| (l.clone(), json!(l))).collect();
+        run(
+            &mut s,
+            "frame.member",
+            json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "fit_ends": true, "lines": lines, "names": names}),
+        );
+        built(&mut s)
+    };
+    let ((drawn, drawn_faces), (picked, picked_faces)) = (build(false), build(true));
+    assert_eq!(drawn.keys().collect::<Vec<_>>(), picked.keys().collect::<Vec<_>>());
+    for (line, (v, lo, hi)) in &drawn {
+        let (pv, plo, phi) = picked[line];
+        assert!(rel(pv, *v) < 1e-9 && near3(plo, *lo) && near3(phi, *hi), "{line}: drawn {drawn:?} picked {picked:?}");
+    }
+    assert_eq!(drawn_faces, picked_faces);
+    let cross = drawn.values().find(|b| b.1[0] > 250.0 && b.2[0] < 350.0).unwrap_or_else(|| panic!("{drawn:?}"));
+    assert!(near3(cross.1, [280.0, 20.0, -20.0]) && near3(cross.2, [320.0, 380.0, 20.0]), "{cross:?}");
+    assert!(rel(cross.0, tube_area() * 360.0) < MEASURED, "{cross:?} vs {}", tube_area() * 360.0);
+}
+
+#[test]
 fn a_corner_on_an_earlier_frames_corner_is_free() {
     // B's corner at (0, 0) is a corner of A, where A's two tubes meet: on both tubes' end or mitre faces, inside
     // neither. It still lies in A, so it is Free: the diagonal (0, 0)…(300, 200) is fitted to A's two tubes, which
