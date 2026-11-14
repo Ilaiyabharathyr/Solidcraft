@@ -6399,6 +6399,7 @@ name = "solidcraft-views"
 version = "0.42.0"
 dependencies = [
  "serde_json",
+ "solidcraft-viewport",
 ]
 
 [[package]]
