@@ -1950,6 +1950,14 @@ impl Dialog {
         }
         // Move/Copy moves one kind at a time (`dialogs_move::admit`).
         let Some(sel) = crate::dialogs_move::admit(s, &mut *self, sel) else { return };
+        // Frame Member's Corner Overrides take only corners of the frame, and say why not.
+        if let Kind::Frame(m) = &self.kind
+            && self.active == 2
+            && let Some(why) = crate::dialogs_frame::refused_corner(s, m, &self.inputs, &sel)
+        {
+            self.error = Some(why);
+            return;
+        }
         // Plane, Axis and Point: the pick is the tool's, which chooses the method again.
         if let Some(a) = &mut self.auto {
             a.toggle(sel);
@@ -2038,6 +2046,13 @@ impl Dialog {
 
     /// Box selection result: replace (or add to) the active input.
     pub fn take_box(&mut self, s: &Session, sels: Vec<Sel>, add: bool) {
+        // A marquee over a frame takes only its corners into Corner Overrides.
+        let sels = match &self.kind {
+            Kind::Frame(m) if self.active == 2 => {
+                sels.into_iter().filter(|x| crate::dialogs_frame::refused_corner(s, m, &self.inputs, x).is_none()).collect()
+            }
+            _ => sels,
+        };
         if let Some(key) = stored_input_reference_key(self, self.active) {
             self.extra.remove(key);
         }
@@ -4892,7 +4907,8 @@ fn recall(app: &SolveApp, dialog: &mut Dialog) {
             *hook = *fresh;
         }
         // The points an edit loaded belonged to that edit, and the tubes picked to that dialog.
-        // Ghost Frame Members is unticked whenever the dialog opens.
+        // Ghost Frame Members is unticked whenever the dialog opens. Corner Type and Flip come
+        // back; the overrides belonged to the last one's picks.
         (Kind::Frame(previous), Kind::Frame(fresh)) => {
             previous.whole = fresh.whole;
             previous.path.clone_from(&fresh.path);
@@ -4900,6 +4916,7 @@ fn recall(app: &SolveApp, dialog: &mut Dialog) {
             previous.pair_ids.clone_from(&fresh.pair_ids);
             previous.ghost = fresh.ghost;
             previous.picked_tubes.clear();
+            previous.overrides.clone_from(&fresh.overrides);
         }
         _ => {}
     }

@@ -1,0 +1,82 @@
+{
+  "en": {
+    "Butt": "Butt",
+    "Coped Butt": "Coped Butt",
+    "Corner Overrides": "Corner Overrides",
+    "Corner Type": "Corner Type",
+    "Flip": "Flip",
+    "Missing corner": "Missing corner",
+    "Remove this corner": "Remove this corner",
+    "ui.frame_corner_flipped": "{corner} (flipped)"
+  },
+  "ar": {
+    "Butt": "تناكب",
+    "Coped Butt": "تناكب مُشكَّل",
+    "Corner Overrides": "زوايا بإعداد خاص",
+    "Corner Type": "نوع الزاوية",
+    "Flip": "قلب",
+    "Missing corner": "زاوية مفقودة",
+    "Remove this corner": "إزالة هذه الزاوية",
+    "ui.frame_corner_flipped": "{corner} (مقلوب)"
+  },
+  "de": {
+    "Butt": "Stumpf",
+    "Coped Butt": "Stumpf, ausgeklinkt",
+    "Corner Overrides": "Ecken einzeln",
+    "Corner Type": "Eckentyp",
+    "Flip": "Umkehren",
+    "Missing corner": "Fehlende Ecke",
+    "Remove this corner": "Diese Ecke entfernen",
+    "ui.frame_corner_flipped": "{corner} (umgekehrt)"
+  },
+  "he": {
+    "Butt": "קת",
+    "Coped Butt": "קת מעוצבת",
+    "Corner Overrides": "פינות בהגדרה נפרדת",
+    "Corner Type": "סוג פינה",
+    "Flip": "היפוך",
+    "Missing corner": "פינה חסרה",
+    "Remove this corner": "הסרת פינה זו",
+    "ui.frame_corner_flipped": "{corner} (הפוך)"
+  },
+  "ja": {
+    "Butt": "突き付け",
+    "Coped Butt": "切欠き突き付け",
+    "Corner Overrides": "コーナーの個別設定",
+    "Corner Type": "コーナータイプ",
+    "Flip": "反転",
+    "Missing corner": "見つからないコーナー",
+    "Remove this corner": "このコーナーを削除",
+    "ui.frame_corner_flipped": "{corner}（反転）"
+  },
+  "ko": {
+    "Butt": "맞대기",
+    "Coped Butt": "코핑 맞대기",
+    "Corner Overrides": "개별 모서리 설정",
+    "Corner Type": "모서리 유형",
+    "Flip": "뒤집기",
+    "Missing corner": "없는 모서리",
+    "Remove this corner": "이 모서리 제거",
+    "ui.frame_corner_flipped": "{corner} (뒤집힘)"
+  },
+  "vi": {
+    "Butt": "Đối đầu",
+    "Coped Butt": "Đối đầu cắt khớp",
+    "Corner Overrides": "Góc thiết lập riêng",
+    "Corner Type": "Kiểu góc",
+    "Flip": "Lật mặt",
+    "Missing corner": "Góc bị thiếu",
+    "Remove this corner": "Xóa góc này",
+    "ui.frame_corner_flipped": "{corner} (đã lật)"
+  },
+  "zh": {
+    "Butt": "对接",
+    "Coped Butt": "相贯对接",
+    "Corner Overrides": "单独设置的拐角",
+    "Corner Type": "拐角类型",
+    "Flip": "翻转",
+    "Missing corner": "缺失的拐角",
+    "Remove this corner": "移除此拐角",
+    "ui.frame_corner_flipped": "{corner}（翻转）"
+  }
+}

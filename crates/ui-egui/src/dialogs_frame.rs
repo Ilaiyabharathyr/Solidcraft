@@ -5,14 +5,16 @@
 
 use serde_json::{Map, Value, json};
 use solidcraft_engine::doc::expr::Kind as ValueKind;
-use solidcraft_engine::doc::frame::{self, MemberProfile};
+use solidcraft_engine::doc::frame::{self, CornerType, MemberProfile};
 use solidcraft_engine::doc::{FeatureKind, ProfileSel};
 use solidcraft_engine::sketch::CurveKind;
 use solidcraft_engine::{Sel, Session};
 
 use crate::SolveApp;
-use crate::dialogs::{Dialog, Kind, check, curves_sketch, form_row, profile_indices, put, shown_expr};
-use crate::selection::{CONSTRUCTION_POINTS, ORIGIN, POINTS, PROFILES, SKETCH_LINES, SNAP_POINTS, SelInput, SelectionExt as _, VERTICES, is_point};
+use crate::dialogs::{Dialog, Kind, check, curves_sketch, form_row, input_rows_range, profile_indices, put, shown_expr};
+use crate::selection::{
+    CONSTRUCTION_POINTS, EXTERNAL_POINTS, ORIGIN, POINTS, PROFILES, SKETCH_LINES, SNAP_POINTS, SelInput, SelectionExt as _, VERTICES, is_point,
+};
 use crate::ui_kit::{choice_row, expr_row, hint_row, text_row};
 use crate::viewport::Hit;
 
@@ -30,6 +32,23 @@ const ANCHORS: &[(&str, &str)] = &[
     ("bottom", "Bottom Middle"),
     ("bottom_right", "Bottom Right"),
 ];
+
+/// The corner types as `frame.member` names them, and their labels.
+pub(crate) const CORNER_TYPES: [(&str, &str); 4] = [("none", "None"), ("mitre", "Mitre"), ("butt", "Butt"), ("coped_butt", "Coped Butt")];
+
+/// Whether Flip means anything for the corner type `index`: which member runs through.
+fn flips(index: usize) -> bool {
+    matches!(CORNER_TYPES.get(index), Some(("butt" | "coped_butt", _)))
+}
+
+fn corner_name(index: usize) -> &'static str {
+    CORNER_TYPES.get(index).map_or("none", |c| c.0)
+}
+
+fn corner_index(corner: &CornerType) -> usize {
+    let name = serde_json::to_value(corner).ok();
+    CORNER_TYPES.iter().position(|c| name.as_ref().and_then(Value::as_str) == Some(c.0)).unwrap_or(0)
+}
 
 /// The Frame Member dialog's values (the picks are its selection inputs).
 #[derive(Clone, Debug)]
@@ -65,6 +84,12 @@ pub struct Member {
     pub ghost: bool,
     /// The tubes clicked in the view (their centrelines' ids, [`Centreline::id`]), for Remove Tube.
     pub picked_tubes: Vec<String>,
+    /// How the corners are finished (an index into [`CORNER_TYPES`]), and for Butt and Coped Butt
+    /// whether the other member runs through.
+    pub corner: usize,
+    pub flip: bool,
+    /// Each corner picked in Corner Overrides with its own type and flip.
+    pub overrides: Vec<(Sel, usize, bool)>,
 }
 
 /// A member of the Frame Member the dialog previews, as its live preview made it: its id (a
@@ -304,6 +329,9 @@ impl Member {
             pair_ids: Vec::new(),
             ghost: false,
             picked_tubes: Vec::new(),
+            corner: 0,
+            flip: false,
+            overrides: Vec::new(),
         }
     }
 
@@ -354,7 +382,15 @@ const PICK_ANOTHER: &str = "Pick another point";
 /// The dialog for Frame Member.
 pub fn start(_app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
     (id == "frame.member").then(|| {
-        (Kind::Frame(Member::new()), vec![SelInput::new("Path", PATH, true).ordered_points(), SelInput::new("Section (optional)", PROFILES, true)])
+        let inputs = vec![
+            SelInput::new("Path", PATH, true).ordered_points(),
+            SelInput::new("Section (optional)", PROFILES, true),
+            // The frame sketch isn't being edited: the view offers its points only to an input
+            // that takes other sketches' points alone (`SKETCH_POINTS` would offer the active
+            // sketch's instead).
+            SelInput::new("Corner Overrides", EXTERNAL_POINTS, true),
+        ];
+        (Kind::Frame(Member::new()), inputs)
     })
 }
 
@@ -608,8 +644,116 @@ fn tr(text: &str) -> &str {
     solidcraft_ui_text::tr_label(text)
 }
 
-/// The dialog's own rows (after the selection inputs); true when Enter was pressed in a value.
-pub fn rows(app: &SolveApp, ui: &mut egui::Ui, m: &mut Member, inputs: &[SelInput]) -> bool {
+/// The dialog's own rows (after the Lines and Section inputs), then under a separator the corner
+/// settings with Corner Overrides and a block for each overridden corner; true when Enter was
+/// pressed in a value.
+pub fn rows(app: &SolveApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
+    let Kind::Frame(m) = &mut d.kind else { return false };
+    let enter = member_rows(app, ui, m, &d.inputs);
+    ui.separator();
+    let labels = CORNER_TYPES.map(|c| c.1);
+    choice_row(ui, "Corner Type", "frame_corner", &mut m.corner, &labels);
+    if flips(m.corner) {
+        form_row(ui, "Flip", |ui| check(ui, &mut m.flip));
+    }
+    input_rows_range(d, ui, &app.session, app.preferences.origin_plane_names, 2..3);
+    corner_rows(ui, d);
+    enter
+}
+
+/// A corner's text in the list: its type, flipped or not.
+fn corner_text(corner: usize, flip: bool) -> String {
+    let name = tr(CORNER_TYPES.get(corner).map_or("None", |c| c.1));
+    if flip && flips(corner) { solidcraft_ui_text::format("ui.frame_corner_flipped", &[("corner", name)]) } else { name.to_string() }
+}
+
+/// Under Corner Overrides, a block for each picked corner (its type, its Flip and a bin), as Sheet
+/// Metal Flange has for each edge; then a row for each saved override whose two lines no longer
+/// meet, kept until it is removed.
+fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog) {
+    let Kind::Frame(m) = &mut d.kind else { return };
+    let picks = crate::selection::items(&d.inputs, 2).to_vec();
+    let labels = CORNER_TYPES.map(|c| c.1);
+    let mut drop = None;
+    for (n, pick) in picks.iter().enumerate() {
+        let slot = override_slot(&mut m.overrides, pick, m.corner);
+        let Some((_, corner, flip)) = m.overrides.get_mut(slot) else { continue };
+        // Each block's rows share their labels: a scope of its own keeps their ids apart.
+        ui.scope_builder(egui::UiBuilder::new().id_salt(("frame_corner", n)), |ui| {
+            form_row(ui, &corner_text(*corner, *flip), |ui| {
+                if crate::ui_kit::bin_button(ui, tr("Remove this corner")).clicked() {
+                    drop = Some(pick.clone());
+                }
+            });
+            choice_row(ui, "Type", &format!("frame_corner_{n}"), corner, &labels);
+            if flips(*corner) {
+                form_row(ui, "Flip", |ui| check(ui, flip));
+            }
+        });
+    }
+    if let Some(pick) = drop
+        && let Some(input) = d.inputs.get_mut(2)
+    {
+        input.items.retain(|x| *x != pick);
+    }
+    let missing = d.extra.get("corners").and_then(Value::as_array).map_or(0, Vec::len);
+    let mut gone = None;
+    for k in 0..missing {
+        ui.scope_builder(egui::UiBuilder::new().id_salt(("frame_missing_corner", k)), |ui| {
+            form_row(ui, "Missing corner", |ui| {
+                if crate::ui_kit::bin_button(ui, tr("Remove this corner")).clicked() {
+                    gone = Some(k);
+                }
+            });
+        });
+    }
+    if let Some(k) = gone
+        && let Some(Value::Array(list)) = d.extra.get_mut("corners")
+    {
+        let mut i = 0;
+        list.retain(|_| {
+            i += 1;
+            i != k + 1
+        });
+        if list.is_empty() {
+            d.extra.remove("corners");
+        }
+    }
+}
+
+/// Where the own type and flip of the corner picked as `pick` are kept: a new pick starts as the
+/// feature's type, unflipped.
+fn override_slot(overrides: &mut Vec<(Sel, usize, bool)>, pick: &Sel, corner: usize) -> usize {
+    overrides.iter().position(|o| o.0 == *pick).unwrap_or_else(|| {
+        overrides.push((pick.clone(), corner, false));
+        overrides.len().saturating_sub(1)
+    })
+}
+
+/// Why a point picked into Corner Overrides is not taken: no two members end there alone. `None`
+/// takes it (or, already picked, takes it out).
+pub(crate) fn refused_corner(s: &Session, m: &Member, inputs: &[SelInput], pick: &Sel) -> Option<String> {
+    if crate::selection::items(inputs, 2).contains(pick) {
+        return None;
+    }
+    let Sel::ExternalSketchPoint { sketch, id } = pick else { return None };
+    let lines: Vec<String> = if m.all {
+        Vec::new()
+    } else {
+        crate::selection::items(inputs, 0)
+            .iter()
+            .filter_map(|x| match x {
+                Sel::ExternalSketchCurve { sketch: k, id } | Sel::SketchCurve { id, sketch: Some(k) } => (k == sketch).then(|| id.clone()),
+                Sel::SketchCurve { id, sketch: None } => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    frame::corner_at_point(&s.model.state(), *sketch, &lines, id).err().map(|e| e.to_string())
+}
+
+/// The Frame Member rows proper: the section, its placement and the name.
+fn member_rows(app: &SolveApp, ui: &mut egui::Ui, m: &mut Member, inputs: &[SelInput]) -> bool {
     let mut enter = false;
     m.sync(crate::selection::items(inputs, 0));
     form_row(ui, "All Lines", |ui| check(ui, &mut m.all));
@@ -689,9 +833,12 @@ pub fn commands(app: &SolveApp, m: &Member, inputs: &[SelInput], extra: &Map<Str
         return Err("select lines or points for the path first".into());
     }
     let mut p = json!({});
-    if !lines.is_empty() {
-        p["sketch"] =
-            json!(known.or_else(|| curves_sketch(app, &lines, section_sketch)).ok_or("the lines must be in one sketch, not the section's")?);
+    let sketch = match lines.is_empty() {
+        true => None,
+        false => Some(known.or_else(|| curves_sketch(app, &lines, section_sketch)).ok_or("the lines must be in one sketch, not the section's")?),
+    };
+    if let Some(sketch) = sketch {
+        p["sketch"] = json!(sketch);
         if !m.all {
             p["lines"] = json!(lines);
         }
@@ -724,6 +871,33 @@ pub fn commands(app: &SolveApp, m: &Member, inputs: &[SelInput], extra: &Map<Str
     if m.mirror {
         p["mirror"] = json!(true);
     }
+    if m.corner != 0 {
+        p["corner"] = json!(corner_name(m.corner));
+    }
+    if m.flip && flips(m.corner) {
+        p["flip"] = json!(true);
+    }
+    // Each picked corner, saved by the two lines that end there.
+    let mut corners = Vec::new();
+    let picks = crate::selection::items(inputs, 2);
+    if !picks.is_empty() {
+        let st = app.session.model.state();
+        let members: &[String] = if m.all { &[] } else { &lines };
+        for pick in picks {
+            let Sel::ExternalSketchPoint { sketch: at, id } = pick else { continue };
+            let sketch = sketch.filter(|s| s == at).ok_or("the corner overrides must be corners of the frame sketch")?;
+            let pair = frame::corner_at_point(&st, sketch, members, id).map_err(|e| e.to_string())?;
+            let (corner, flip) = m.overrides.iter().find(|o| o.0 == *pick).map_or((m.corner, false), |o| (o.1, o.2));
+            corners.push(json!({"members": pair, "corner": corner_name(corner), "flip": flip && flips(corner)}));
+        }
+    }
+    // Overrides whose corner has gone stay until removed (the feature then says so).
+    if let Some(Value::Array(kept)) = extra.get("corners") {
+        corners.extend(kept.iter().cloned());
+    }
+    if !corners.is_empty() {
+        p["corners"] = json!(corners);
+    }
     if let Value::Object(o) = &mut p {
         for (key, v) in extra {
             o.entry(key.clone()).or_insert_with(|| v.clone());
@@ -747,7 +921,10 @@ fn point_ref(app: &SolveApp, sel: &Sel) -> Result<Value, String> {
 /// The dialog editing a frame member feature, filled from it: the path holds its lines, then each
 /// pair's two points, each point keeping the reference it was saved as.
 pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelInput>, Map<String, Value>)> {
-    let FeatureKind::FrameMember { path_sketch, lines, pairs, profile, anchor, locate, angle, mirror, body_name, .. } = kind else { return None };
+    let FeatureKind::FrameMember { path_sketch, lines, pairs, profile, anchor, locate, angle, mirror, body_name, corner, flip, corners, .. } = kind
+    else {
+        return None;
+    };
     let (_, mut inputs) = start(app, "frame.member")?;
     let st = app.session.model.state();
     let mut m = Member::new();
@@ -799,6 +976,26 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
     let mut extra = Map::new();
     if let Some(at) = locate {
         extra.insert("locate".into(), json!(at));
+    }
+    m.corner = corner_index(corner);
+    m.flip = *flip;
+    // Each override shows as the point of its corner; one whose lines no longer meet is kept as
+    // it is, listed as a missing corner so that it can be removed.
+    let mut missing = Vec::new();
+    for o in corners {
+        match path_sketch.and_then(|ps| Some((ps.0, frame::corner_point(&st, ps.0, &o.members)?))) {
+            Some((sketch, id)) => {
+                let pick = Sel::ExternalSketchPoint { sketch, id };
+                if let Some(i) = inputs.get_mut(2) {
+                    i.items.push(pick.clone());
+                }
+                m.overrides.push((pick, corner_index(&o.corner), o.flip));
+            }
+            None => missing.push(o),
+        }
+    }
+    if !missing.is_empty() {
+        extra.insert("corners".into(), json!(missing));
     }
     Some((Kind::Frame(m), inputs, extra))
 }

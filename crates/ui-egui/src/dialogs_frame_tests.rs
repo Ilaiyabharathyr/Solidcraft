@@ -19,7 +19,11 @@ fn app_with(cmds: &[(&str, Value)]) -> SolveApp {
 /// A 600 × 400 rectangle on XY as the frame sketch `Frame`, and, drawn after it on YZ, a ring of
 /// two circles as the section sketch `Ring` (its circles' ids are not the frame's line ids).
 fn frame_app() -> SolveApp {
-    app_with(&[
+    app_with(&frame_commands())
+}
+
+fn frame_commands() -> Vec<(&'static str, Value)> {
+    vec![
         ("sketch.create", json!({"plane": "XY", "name": "Frame"})),
         ("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]})),
         ("sketch.finish", json!({})),
@@ -27,7 +31,7 @@ fn frame_app() -> SolveApp {
         ("sketch.circle.center", json!({"center": [0, 0], "radius": 20})),
         ("sketch.circle.center", json!({"center": [0, 0], "radius": 17})),
         ("sketch.finish", json!({})),
-    ])
+    ]
 }
 
 fn sketch_id(app: &SolveApp, name: &str) -> u64 {
@@ -539,6 +543,10 @@ fn an_end_cap_edit_refuses_to_drop_an_end_it_cannot_find() {
     assert!(crate::dialogs_end_cap::commands(&app, &c, &inputs, &extra).is_ok());
     inputs[0].items = vec![top, bottom];
     assert!(crate::dialogs_end_cap::commands(&app, &c, &inputs, &extra).is_ok());
+}
+
+fn corner_type(name: &str) -> usize {
+    CORNER_TYPES.iter().position(|c| c.0 == name).unwrap()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1148,4 +1156,184 @@ fn the_picked_list_shows_each_occurrence_and_a_rows_remove_takes_out_only_that_o
     assert_eq!(d.error.as_deref(), Some("Pick another point"), "p2 now waits");
     let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
     assert_eq!(c[0].1["params"]["pairs"], json!([stored[0]]), "the first pair is intact, id and references");
+}
+
+/// The Frame sketch's point at (x, y) (not the sketch origin).
+fn point_at(app: &SolveApp, x: f64, y: f64) -> String {
+    let sk = app.session.doc.sketch(sketch_id(app, "Frame")).unwrap();
+    sk.points.iter().find(|p| p.id != "origin" && (p.pos.x - x).abs() < 1e-6 && (p.pos.y - y).abs() < 1e-6).unwrap().id.clone()
+}
+
+/// The Frame sketch's lines with an end at (x, y), in the order they were drawn.
+fn lines_at(app: &SolveApp, x: f64, y: f64) -> Vec<String> {
+    let sk = app.session.doc.sketch(sketch_id(app, "Frame")).unwrap();
+    let at = |i: usize| sk.points.get(i).is_some_and(|p| (p.pos.x - x).abs() < 1e-6 && (p.pos.y - y).abs() < 1e-6);
+    sk.curves.iter().filter(|c| c.kind.ends().is_some_and(|(a, b)| at(a) || at(b))).map(|c| c.id.clone()).collect()
+}
+
+/// Corner Type and Flip reach the command; None (the start) writes neither, and a Mitre, which
+/// has no Flip, no flip.
+#[test]
+fn corner_type_and_flip_go_into_the_command() {
+    let mut app = frame_app();
+    let lines = frame_lines(&app);
+    let mut d = dialog_on(&mut app, &lines);
+    let p = &apply_commands(&app, &d).unwrap()[0].1;
+    assert!(p.get("corner").is_none() && p.get("flip").is_none() && p.get("corners").is_none(), "{p}");
+    let m = member(&mut d);
+    m.corner = corner_type("butt");
+    m.flip = true;
+    let c = apply_commands(&app, &d).unwrap();
+    assert_eq!((&c[0].1["corner"], &c[0].1["flip"]), (&json!("butt"), &json!(true)), "{}", c[0].1);
+    member(&mut d).corner = corner_type("mitre");
+    let p = &apply_commands(&app, &d).unwrap()[0].1;
+    assert!(p["corner"] == "mitre" && p.get("flip").is_none(), "{p}");
+    run_all(&mut app, c);
+    assert_eq!(body_names(&app).len(), 4);
+}
+
+/// A corner point picked into Corner Overrides is saved by the two lines that end there, with its
+/// own type: a new pick takes the feature's type, unflipped.
+#[test]
+fn a_picked_corner_point_becomes_an_override() {
+    let mut app = frame_app();
+    let lines = frame_lines(&app);
+    let frame = sketch_id(&app, "Frame");
+    let mut d = dialog_on(&mut app, &lines);
+    member(&mut d).corner = corner_type("butt");
+    let corner = Sel::ExternalSketchPoint { sketch: frame, id: point_at(&app, 0.0, 0.0) };
+    d.active = 2;
+    d.pick(&app.session, corner.clone());
+    assert_eq!(d.inputs[2].items, std::slice::from_ref(&corner), "{:?}", d.error);
+    let members = lines_at(&app, 0.0, 0.0);
+    assert_eq!(members.len(), 2);
+    let c = apply_commands(&app, &d).unwrap();
+    assert_eq!(c[0].1["corners"], json!([{"members": members, "corner": "butt", "flip": false}]));
+    member(&mut d).overrides = vec![(corner, corner_type("mitre"), false)];
+    let c = apply_commands(&app, &d).unwrap();
+    assert_eq!(c[0].1["corners"], json!([{"members": members, "corner": "mitre", "flip": false}]));
+    run_all(&mut app, c);
+    assert_eq!(body_names(&app).len(), 4);
+}
+
+/// A point where no two members end alone (the foot of a T, a point on a line's middle) is not
+/// taken, and the dialog says why.
+#[test]
+fn a_point_that_is_no_corner_is_refused_at_the_pick() {
+    let mut app = app_with(&[
+        ("sketch.create", json!({"plane": "XY", "name": "Frame"})),
+        ("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]})),
+        ("sketch.line", json!({"points": [[300, 0], [300, 400]], "ids": ["post"]})),
+        ("sketch.point", json!({"point": [0, 200], "id": "middle"})),
+        ("sketch.finish", json!({})),
+    ]);
+    let frame = sketch_id(&app, "Frame");
+    let lines = frame_lines(&app);
+    let mut d = dialog_on(&mut app, &lines);
+    d.active = 2;
+    for id in [point_at(&app, 300.0, 0.0), "middle".to_string()] {
+        d.pick(&app.session, Sel::ExternalSketchPoint { sketch: frame, id: id.clone() });
+        assert!(d.inputs[2].items.is_empty(), "{id}");
+        let e = d.error.clone().unwrap_or_default();
+        assert!(e.contains("two members end"), "{id}: {e}");
+    }
+    let corner = Sel::ExternalSketchPoint { sketch: frame, id: point_at(&app, 600.0, 400.0) };
+    d.pick(&app.session, corner.clone());
+    assert_eq!((d.inputs[2].items.as_slice(), d.error.as_deref()), ([corner].as_slice(), None));
+}
+
+/// Edit Feature brings back Corner Type, Flip and each override, the override as the point of its
+/// corner.
+#[test]
+fn an_edit_shows_the_corner_settings_and_overrides() {
+    let mut app = frame_app();
+    let members = lines_at(&app, 0.0, 0.0);
+    let corners = json!([{"members": members, "corner": "mitre", "flip": false}]);
+    app.run("frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "butt", "flip": true, "corners": corners})).unwrap();
+    let f = app.session.doc.features.last().unwrap().id;
+    let mut e = edit_dialog(&app, f, None).unwrap();
+    let frame = sketch_id(&app, "Frame");
+    let [Sel::ExternalSketchPoint { sketch, id }] = e.inputs[2].items.as_slice() else { panic!("{:?}", e.inputs[2].items) };
+    let sk = app.session.doc.sketch(frame).unwrap();
+    assert_eq!((*sketch, sk.points[sk.point_index(id).unwrap()].pos), (frame, solidcore_record::Vec2::new(0.0, 0.0)));
+    assert!(e.extra.get("corners").is_none());
+    let m = member(&mut e);
+    assert_eq!((CORNER_TYPES[m.corner].0, m.flip), ("butt", true));
+    assert_eq!(m.overrides.iter().map(|o| (CORNER_TYPES[o.1].0, o.2)).collect::<Vec<_>>(), [("mitre", false)]);
+    let c = apply_commands(&app, &e).unwrap();
+    assert_eq!(c[0].1["params"]["corners"], corners, "{}", c[0].1);
+}
+
+/// An override whose two lines no longer meet still opens for editing: it is kept, listed as a
+/// Missing corner, and its row's bin removes it.
+#[test]
+fn an_edit_opens_with_an_override_whose_corner_has_gone() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.home.open = false;
+    for (id, p) in frame_commands() {
+        h.app.run(id, p).unwrap();
+    }
+    h.app.run("frame.member", json!({"sketch": "Frame", "profile": tube()})).unwrap();
+    let lines = frame_lines(&h.app);
+    let f = h.app.session.doc.features.last().unwrap().id;
+    // The opposite sides of the rectangle never meet, as two lines a dimension edit moved apart.
+    let gone = json!([{"members": [lines[0], lines[2]], "corner": "butt", "flip": true}]);
+    let doc = std::sync::Arc::make_mut(&mut h.app.session.doc);
+    let FeatureKind::FrameMember { corners, .. } = &mut doc.feature_mut(f).unwrap().kind else { panic!() };
+    *corners = serde_json::from_value(gone.clone()).unwrap();
+    let e = edit_dialog(&h.app, f, None).unwrap();
+    assert!(e.inputs[2].items.is_empty());
+    assert_eq!(e.extra.get("corners"), Some(&gone));
+    // OK keeps it (the feature then says the override is not at a corner).
+    assert_eq!(apply_commands(&h.app, &e).unwrap()[0].1["params"]["corners"], gone);
+    h.app.dialog = Some(e);
+    h.frames(2);
+    let bin = "dialog:button:Missing corner:×";
+    assert!(crate::scenario::rect_of(bin).is_some(), "the missing corner has a row with a bin");
+    h.step(&json!({"click": {"handle": bin}})).unwrap();
+    h.frames(1);
+    let d = h.app.dialog.as_ref().unwrap();
+    assert!(d.extra.get("corners").is_none());
+    assert!(apply_commands(&h.app, d).unwrap()[0].1["params"].get("corners").is_none());
+}
+
+/// A new Frame Member starts on None, unflipped, with no overrides, even after one made with Butt.
+#[test]
+fn a_new_frame_member_starts_on_none() {
+    let mut app = frame_app();
+    let lines = frame_lines(&app);
+    let mut d = dialog_on(&mut app, &lines);
+    assert_eq!(d.inputs[2].label, "Corner Overrides");
+    let m = member(&mut d);
+    assert_eq!((CORNER_TYPES[m.corner].0, m.flip, m.overrides.len()), ("none", false, 0));
+    m.corner = corner_type("butt");
+    let c = apply_commands(&app, &d).unwrap();
+    run_all(&mut app, c);
+    app.dialog = None;
+    let mut d = dialog_on(&mut app, &lines);
+    assert_eq!(CORNER_TYPES[member(&mut d).corner].0, "none");
+}
+
+/// With Corner Overrides active, a corner of the frame sketch (not being edited) is picked in the
+/// view as that sketch's point.
+#[test]
+fn a_corner_is_picked_in_the_view() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.home.open = false;
+    for (id, p) in frame_commands() {
+        h.app.run(id, p).unwrap();
+    }
+    h.app.set_origin_shown(false);
+    h.call("ui.view", json!({"view": "top"}));
+    h.call("ui.view", json!({"view": "fit"}));
+    h.app.start("frame.member");
+    h.app.dialog.as_mut().unwrap().active = 2;
+    h.frames(2);
+    let [x, y] = h.at(&json!({"world": [600, 400, 0]})).unwrap();
+    let proj = crate::viewport::projection(&h.app, h.app.viewport.rect.unwrap());
+    let hits = crate::viewport::pick(&h.app, &proj, egui::pos2(x as f32, y as f32));
+    let d = h.app.dialog.as_ref().unwrap();
+    let picked: Vec<Sel> = hits.iter().filter_map(|hit| d.candidate(&h.app.session, hit)).collect();
+    let frame = sketch_id(&h.app, "Frame");
+    assert!(picked.contains(&Sel::ExternalSketchPoint { sketch: frame, id: point_at(&h.app, 600.0, 400.0) }), "{picked:?} from {hits:?}");
 }

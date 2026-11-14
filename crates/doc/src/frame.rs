@@ -348,7 +348,7 @@ impl crate::walk::Walk for ProfileSpec {
     }
 }
 
-pub use crate::eval::frame_member::{member_line_ids, member_names, member_of_body, member_segments};
+pub use crate::eval::frame_member::{corner_at_point, corner_point, member_line_ids, member_names, member_of_body, member_segments};
 pub use crate::frame_corners::{CornerOverride, CornerType};
 
 /// A frame member between two points (#15705): its id, which names the member as a line's id
