@@ -185,6 +185,8 @@ fn hostile_members_never_panic_and_each_is_laid_once() {
     let mut members: Vec<usize> = out.iter().map(|r| r.member).collect();
     members.sort_unstable();
     assert_eq!(members, [0, 1, 2, 3, 4]);
+    let p = plan(&segs, &planes, &[], &|_, _| true, &[]).unwrap();
+    assert_eq!(p.ranks.len(), 5);
 }
 
 #[test]
@@ -214,4 +216,159 @@ fn a_tube_crossing_the_outline_is_in_its_group() {
     let last = out.last().map(|r| (segs[r.member].0.as_str(), r.group, r.outer));
     assert_eq!(out.len(), 5);
     assert_eq!(last, Some(("across", 0, false)));
+}
+
+// --- The plan (spec A4-A6) ---
+
+fn planned(segments: &[(String, Vec3, Vec3)], overrides: &[CornerOverride]) -> Result<Plan> {
+    plan(segments, &xy(segments), &in_order(segments), &|_, _| true, overrides)
+}
+
+/// The member index named id.
+fn at(segments: &[(String, Vec3, Vec3)], id: &str) -> usize {
+    segments.iter().position(|s| s.0 == id).unwrap()
+}
+
+fn auto(members: &[&str], flip: bool) -> CornerOverride {
+    CornerOverride { members: members.iter().map(|s| s.to_string()).collect(), corner: CornerType::Auto, flip }
+}
+
+#[test]
+fn the_angle_table() {
+    assert_eq!(table(20.0), Joint::AngledButt);
+    assert_eq!(table(30.0), Joint::AngledButt);
+    assert_eq!(table(45.0), Joint::Mitre);
+    assert_eq!(table(60.0), Joint::Butt);
+    assert_eq!(table(90.0), Joint::Butt);
+    assert_eq!(table(120.0), Joint::Butt);
+    assert_eq!(table(140.0), Joint::Mitre);
+    assert_eq!(table(29.996), Joint::AngledButt); // rounds to 30.00
+}
+
+#[test]
+fn a_rectangle_is_four_butts_with_the_long_sides_long() {
+    let segs = rectangle();
+    let p = planned(&segs, &[]).unwrap();
+    assert_eq!(p.corners.len(), 4);
+    assert!(p.fits.is_empty() && p.chained.is_empty());
+    for c in &p.corners {
+        assert_eq!((c.joint, c.kind, c.flip), (Joint::Butt, CornerType::Auto, false), "{c:?}");
+        assert!((c.angle_deg - 90.0).abs() < 1e-9, "{c:?}");
+        assert!(["bottom", "top"].contains(&segs[c.long.0].0.as_str()), "{c:?}");
+        assert!(["right", "left"].contains(&segs[c.short.0].0.as_str()), "{c:?}");
+    }
+    // At the origin: the bottom's start and the left's end.
+    let origin = p.corners.iter().find(|c| c.point.dist(Vec3::ZERO) < 1e-9).unwrap();
+    assert_eq!((origin.long, origin.short), ((0, true), (3, false)));
+}
+
+#[test]
+fn a_t_junction_is_a_fit_against_the_through_tube() {
+    let segs = vec![seg("bar", (0.0, 0.0), (600.0, 0.0)), seg("stem", (300.0, 0.0), (300.0, 400.0))];
+    let p = planned(&segs, &[]).unwrap();
+    assert!(p.corners.is_empty());
+    assert_eq!(p.fits, [Fit { member: 1, at_start: true, against: vec![0] }]);
+}
+
+/// Three lines ending at the origin: a along x (600), b along y (400), c at 45° (283).
+fn three_ends() -> Vec<(String, Vec3, Vec3)> {
+    vec![seg("c", (0.0, 0.0), (200.0, 200.0)), seg("a", (0.0, 0.0), (600.0, 0.0)), seg("b", (0.0, 400.0), (0.0, 0.0))]
+}
+
+#[test]
+fn three_ends_make_one_corner_and_one_fit() {
+    let segs = three_ends();
+    let (a, b, c) = (at(&segs, "a"), at(&segs, "b"), at(&segs, "c"));
+    let p = planned(&segs, &[]).unwrap();
+    assert_eq!(p.corners.len(), 1);
+    let corner = &p.corners[0];
+    assert_eq!((corner.long, corner.short, corner.joint), ((a, true), (b, false), Joint::Butt));
+    assert_eq!(p.fits, [Fit { member: c, at_start: true, against: vec![a, b] }]);
+}
+
+#[test]
+fn mixed_sections_butt_instead_of_mitre() {
+    let segs = vec![seg("a", (0.0, 0.0), (600.0, 0.0)), seg("b", (0.0, 0.0), (-300.0, 300.0))];
+    let joint = |same: bool| {
+        let p = plan(&segs, &xy(&segs), &in_order(&segs), &|_, _| same, &[]).unwrap();
+        assert_eq!(p.corners.len(), 1);
+        assert!((p.corners[0].angle_deg - 45.0).abs() < 1e-9, "{p:?}");
+        p.corners[0].joint
+    };
+    assert_eq!(joint(true), Joint::Mitre);
+    assert_eq!(joint(false), Joint::Butt);
+}
+
+#[test]
+fn an_override_at_three_ends_flips_the_long_and_short() {
+    let segs = three_ends();
+    let (a, b) = (at(&segs, "a"), at(&segs, "b"));
+    let p = planned(&segs, &[auto(&["b", "c", "a"], true)]).unwrap();
+    let corner = &p.corners[0];
+    assert_eq!((corner.long, corner.short, corner.kind, corner.flip), ((b, false), (a, true), CornerType::Auto, true));
+    // A Mitre override has nothing to flip.
+    let mitre = CornerOverride { corner: CornerType::Mitre, ..auto(&["a", "b", "c"], true) };
+    let corner = &planned(&segs, &[mitre]).unwrap().corners[0];
+    assert_eq!((corner.long, corner.short, corner.kind), ((a, true), (b, false), CornerType::Mitre));
+}
+
+#[test]
+fn an_override_whose_tubes_changed_fails() {
+    let segs = vec![seg("l1", (0.0, 0.0), (600.0, 0.0)), seg("l2", (0.0, 400.0), (0.0, 0.0)), seg("l3", (600.0, 0.0), (600.0, 400.0))];
+    let e = planned(&segs, &[auto(&["l1", "l2", "l3"], false)]).unwrap_err();
+    assert_eq!(e.to_string(), DocError::Invalid("A corner override is not at a corner of the frame".into()).to_string());
+    // Where one tube passes through, there is no corner to override either.
+    let t = vec![seg("bar", (0.0, 0.0), (600.0, 0.0)), seg("stem", (300.0, 0.0), (300.0, 400.0))];
+    assert!(planned(&t, &[auto(&["bar", "stem"], false)]).is_err());
+    assert!(planned(&segs, &[auto(&["l1", "l2"], false)]).is_ok());
+}
+
+#[test]
+fn crossing_tubes_make_nothing() {
+    let segs = vec![seg("a", (0.0, 0.0), (400.0, 400.0)), seg("b", (0.0, 400.0), (400.0, 0.0))];
+    let p = planned(&segs, &[]).unwrap();
+    assert!(p.corners.is_empty() && p.fits.is_empty() && p.chained.is_empty(), "{p:?}");
+}
+
+#[test]
+fn tubes_in_no_plane_chain_and_mitre() {
+    let p3 = |x: f64, y: f64, z: f64| Vec3::new(x, y, z);
+    let mut segs = rectangle();
+    // Up from the bottom tube's middle, then across: point pairs, in no sketch plane.
+    segs.push(("pair1".to_string(), p3(300.0, 0.0, 0.0), p3(300.0, 0.0, 300.0)));
+    segs.push(("pair2".to_string(), p3(300.0, 0.0, 300.0), p3(300.0, 300.0, 300.0)));
+    let mut planes = xy(&segs);
+    planes[4] = None;
+    planes[5] = None;
+    let p = plan(&segs, &planes, &in_order(&segs), &|_, _| true, &[]).unwrap();
+    assert_eq!(p.corners.len(), 4, "the rectangle's corners only");
+    assert_eq!(p.chained, [(4, false, 5, true)]);
+    assert_eq!(p.fits, [Fit { member: 4, at_start: true, against: vec![0] }]);
+    // An override at the chained corner is at a corner of the frame.
+    let o = CornerOverride { members: vec!["pair1".into(), "pair2".into()], corner: CornerType::Butt, flip: false };
+    assert!(plan(&segs, &planes, &in_order(&segs), &|_, _| true, &[o]).is_ok());
+}
+
+#[test]
+fn groups_sharing_a_point_fit_the_later_group() {
+    let p = |x: f64, y: f64, z: f64| Vec3::new(x, y, z);
+    let segs = vec![
+        ("s1".to_string(), p(0.0, 0.0, 0.0), p(400.0, 0.0, 0.0)),
+        ("s2".to_string(), p(400.0, 0.0, 0.0), p(400.0, 400.0, 0.0)),
+        ("s3".to_string(), p(400.0, 400.0, 0.0), p(0.0, 400.0, 0.0)),
+        ("s4".to_string(), p(0.0, 400.0, 0.0), p(0.0, 0.0, 0.0)),
+        ("r1".to_string(), p(0.0, 0.0, 0.0), p(-600.0, 0.0, 0.0)),
+        ("r2".to_string(), p(-600.0, 0.0, 0.0), p(-600.0, 0.0, 300.0)),
+        ("r3".to_string(), p(-600.0, 0.0, 300.0), p(0.0, 0.0, 300.0)),
+        ("r4".to_string(), p(0.0, 0.0, 300.0), p(0.0, 0.0, 0.0)),
+    ];
+    let xz = Some((-Vec3::Y, Vec3::X));
+    let mut planes = xy(&segs);
+    planes[4..].fill(xz);
+    let out = plan(&segs, &planes, &in_order(&segs), &|_, _| true, &[]).unwrap();
+    let origin: Vec<&AutoCorner> = out.corners.iter().filter(|c| c.point.dist(Vec3::ZERO) < 1e-9).collect();
+    assert_eq!(origin.len(), 1);
+    assert_eq!((origin[0].long, origin[0].short), ((4, true), (7, false)), "the earlier group's r1 and r4");
+    assert_eq!(out.corners.len(), 7);
+    assert_eq!(out.fits, [Fit { member: 0, at_start: true, against: vec![4, 7] }, Fit { member: 3, at_start: false, against: vec![4, 7, 0] }]);
 }

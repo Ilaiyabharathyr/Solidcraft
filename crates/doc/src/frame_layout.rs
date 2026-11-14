@@ -1,14 +1,16 @@
 //! Frame Auto's laying order (#4003, spec A1-A3): the members in one sketch plane that meet form a group, the
 //! members on a group's outline are outer, and a fabricator lays them outer first, then inner, squarest first.
+//! [`plan`] then decides what happens at each point (spec A4-A6): the corner, the ends cut to fit, the overrides.
 //! Pure geometry on straight members: points and directions only.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::f64::consts::{PI, TAU};
 
 use solidcore_record::Vec3;
 use solidcraft_geom::prelude::*;
 
-use crate::frame_corners::{CORNER_TOL, EQUAL_LENGTH};
+use crate::frame_corners::{CORNER_TOL, CornerOverride, CornerType, EQUAL_LENGTH, away};
+use crate::{DocError, Result};
 
 /// A member's plane: Some((normal, sketch x)) for a line of a 2D sketch, None otherwise (pairs, 3D-sketch lines).
 pub type MemberPlane = Option<(Vec3, Vec3)>;
@@ -46,6 +48,11 @@ struct Group {
 /// Every member in laying order: each planar group's members (A2/A3), groups by their longest member (A1),
 /// then the members in no group plane, longest first.
 pub fn ranks(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: &[usize]) -> Vec<Rank> {
+    laying(segments, planes, drawn).0
+}
+
+/// [`ranks`], and each laid group's sketch x: a member is in a group when its rank's group indexes these.
+fn laying(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: &[usize]) -> (Vec<Rank>, Vec<Vec3>) {
     // Everything is worked in drawing order, so the pick order never matters.
     let key = |m: usize| (drawn.get(m).copied().unwrap_or(m), m);
     let mut order: Vec<usize> = (0..segments.len()).collect();
@@ -76,7 +83,7 @@ pub fn ranks(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: &
     }
     let rest = order.into_iter().filter(|&m| !grouped.get(m).copied().unwrap_or(false)).collect();
     out.extend(longest_first(rest, length, key).into_iter().map(|m| Rank { member: m, group: laid.len(), outer: false, reverse: false }));
-    out
+    (out, laid.iter().filter_map(|&g| groups.get(g)).map(|g| g.x).collect())
 }
 
 /// The planar members in sets that lie in one plane (whichever way their sketches face), each with the first-drawn
@@ -397,6 +404,192 @@ fn squareness(g: &Group, at: &HashMap<usize, Vec<usize>>, k: usize, among: Optio
         .filter_map(|end| others(g, at, k, end, among).map(off).min_by(f64::total_cmp))
         .fold(0.0, f64::max);
     (worst * 100.0).round() as i64
+}
+
+// --- The plan (spec A4-A6): at each point the corner, the ends cut to fit, and the overrides ---
+
+/// How a corner is jointed (spec A5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Joint {
+    /// The long tube cut square, the short one cut at the angle and sitting on it.
+    AngledButt,
+    Mitre,
+    /// The long tube runs through, the short one is cut to fit against its side.
+    Butt,
+    /// Not jointed here: the corner lies inside an earlier Frame Member's tube (the builder's call, never plan's).
+    Free,
+}
+
+/// Where the two earliest group tubes at a point end and no group tube passes through it (spec A4).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutoCorner {
+    pub point: Vec3,
+    /// (member, at_start) of the long tube's end and the short one's, by length with A3's ties; a Flip already applied.
+    pub long: (usize, bool),
+    pub short: (usize, bool),
+    /// How far the short tube swings from in line with the long one: 0 in line, 90 square.
+    pub angle_deg: f64,
+    /// The table's joint for the angle; between different sections a butt for a mitre.
+    pub joint: Joint,
+    /// What builds it: Auto for `joint`, else its override's type.
+    pub kind: CornerType,
+    /// Its override's Flip, already applied to `long` and `short`.
+    pub flip: bool,
+}
+
+/// A member's end cut to fit the tubes already at its point.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fit {
+    pub member: usize,
+    pub at_start: bool,
+    /// The members to fit against, in laying order.
+    pub against: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Plan {
+    pub ranks: Vec<Rank>,
+    pub corners: Vec<AutoCorner>,
+    /// In laying order.
+    pub fits: Vec<Fit>,
+    /// The corners between members in no group plane, earlier member first: chained and mitred.
+    pub chained: Vec<(usize, bool, usize, bool)>,
+}
+
+/// The joint for an angle in degrees from in line (spec A5), compared rounded to 0.01° so a boundary never flips.
+pub fn table(angle_deg: f64) -> Joint {
+    let a = (angle_deg * 100.0).round() / 100.0;
+    if a <= 30.0 {
+        Joint::AngledButt
+    } else if a < 60.0 {
+        Joint::Mitre
+    } else if a <= 120.0 {
+        Joint::Butt
+    } else {
+        Joint::Mitre
+    }
+}
+
+/// An end at a point: (laying place, member, at_start).
+type End = (usize, usize, bool);
+
+/// What happens at each point where members meet, wherever their planes (spec A4). With a group tube passing
+/// through, each group end there fits it and the earlier ends; else the two earliest group ends make a corner and
+/// later ones fit; one end alone is left. Members in no group plane come after: the two earliest of theirs at a
+/// point chain, and any other fits every tube already there. Crossing tubes are left whole (stage 3 splits them).
+/// An override matches the point whose ending members are exactly its `members` (decision 3); one that matches no
+/// corner fails.
+pub fn plan(
+    segments: &[(String, Vec3, Vec3)],
+    planes: &[MemberPlane],
+    drawn: &[usize],
+    same_section: &dyn Fn(usize, usize) -> bool,
+    overrides: &[CornerOverride],
+) -> Result<Plan> {
+    let (ranks, xs) = laying(segments, planes, drawn);
+    let mut place = vec![usize::MAX; segments.len()];
+    for (i, r) in ranks.iter().enumerate() {
+        if let Some(p) = place.get_mut(r.member) {
+            *p = i;
+        }
+    }
+    let pos = |m: usize| place.get(m).copied().unwrap_or(usize::MAX);
+    let grouped = |m: usize| ranks.get(pos(m)).is_some_and(|r| r.group < xs.len());
+    let length = |m: usize| segments.get(m).map_or(0.0, |(_, a, b)| a.dist(*b));
+    // Every member's line, met in laying order, so the points never depend on the pick order.
+    let valid: Vec<usize> = ranks
+        .iter()
+        .map(|r| r.member)
+        .filter(|&m| segments.get(m).is_some_and(|(_, a, b)| a.is_finite() && b.is_finite() && length(m).is_finite() && length(m) > 2.0 * CORNER_TOL))
+        .collect();
+    let mut points = Points::default();
+    let lines = graph(segments, &valid, &mut points);
+    // node → the ends there, and the members passing through it.
+    let mut ends: BTreeMap<usize, Vec<End>> = BTreeMap::new();
+    let mut through: HashMap<usize, Vec<usize>> = HashMap::new();
+    for l in &lines {
+        let (Some(&first), Some(&last)) = (l.nodes.first(), l.nodes.last()) else { continue };
+        if first == last {
+            continue;
+        }
+        ends.entry(first).or_default().push((pos(l.member), l.member, true));
+        ends.entry(last).or_default().push((pos(l.member), l.member, false));
+        for &n in l.nodes.get(1..l.nodes.len().saturating_sub(1)).unwrap_or_default() {
+            through.entry(n).or_default().push(l.member);
+        }
+    }
+    let wanted: Vec<BTreeSet<&str>> = overrides.iter().map(|o| o.members.iter().map(String::as_str).collect()).collect();
+    let mut used = vec![false; overrides.len()];
+    let key = |m: usize| (drawn.get(m).copied().unwrap_or(m), m);
+    let (mut corners, mut fits, mut chained) = (Vec::new(), Vec::new(), Vec::new());
+    // End e fits against these members (not itself), in laying order; against nothing it is left alone.
+    let fit = |e: &End, against: Vec<usize>, fits: &mut Vec<Fit>| {
+        let mut against: Vec<usize> = against.into_iter().filter(|&m| m != e.1).collect();
+        against.sort_by_key(|&m| pos(m));
+        against.dedup();
+        if !against.is_empty() {
+            fits.push(Fit { member: e.1, at_start: e.2, against });
+        }
+    };
+    for (n, mut here) in ends {
+        here.sort_unstable();
+        let whole = through.remove(&n).unwrap_or_default();
+        let ids: BTreeSet<&str> = here.iter().filter_map(|e| segments.get(e.1)).map(|s| s.0.as_str()).collect();
+        let mut matched = || {
+            let o = wanted.iter().position(|w| *w == ids)?;
+            if let Some(u) = used.get_mut(o) {
+                *u = true;
+            }
+            overrides.get(o)
+        };
+        let (group, rest): (Vec<End>, Vec<End>) = here.iter().partition(|e| grouped(e.1));
+        let group_whole: Vec<usize> = whole.iter().copied().filter(|&m| grouped(m)).collect();
+        let mut done = 0;
+        if let ([a, b, ..], true) = (group.as_slice(), group_whole.is_empty()) {
+            done = 2;
+            // Ties as A3: nearer the earlier one's group's sketch X axis, to 0.01°, then drawn first.
+            let x = ranks.get(a.0).and_then(|r| xs.get(r.group)).copied().unwrap_or(Vec3::X);
+            let tie = |m: usize| {
+                let off = segments.get(m).and_then(|(_, p, q)| (*q - *p).normalized()).map(|d| d.dot(x).abs().min(1.0).acos().to_degrees());
+                ((off.unwrap_or(90.0) * 100.0).round() as i64, key(m))
+            };
+            let a_long = longest_first(vec![a.1, b.1], length, tie).first() == Some(&a.1);
+            let o = matched();
+            let swap = o.is_some_and(|o| o.flip && o.corner.flips());
+            let (long, short) = if a_long != swap { ((a.1, a.2), (b.1, b.2)) } else { ((b.1, b.2), (a.1, a.2)) };
+            let angle_deg = match (away(segments, long), away(segments, short)) {
+                (Some(l), Some(s)) => (-l).dot(s).clamp(-1.0, 1.0).acos().to_degrees(),
+                _ => 0.0,
+            };
+            let joint = match table(angle_deg) {
+                Joint::Mitre if !same_section(long.0, short.0) => Joint::Butt,
+                j => j,
+            };
+            let point = points.at.get(n).copied().unwrap_or(Vec3::ZERO);
+            let (kind, flip) = o.map_or((CornerType::Auto, false), |o| (o.corner, o.flip));
+            corners.push(AutoCorner { point, long, short, angle_deg, joint, kind, flip });
+        } else if group_whole.is_empty() {
+            done = group.len(); // one end alone
+        }
+        for (i, e) in group.iter().enumerate().skip(done) {
+            fit(e, group_whole.iter().copied().chain(group.iter().take(i).map(|e| e.1)).collect(), &mut fits);
+        }
+        let mut done = 0;
+        if let [a, b, ..] = rest.as_slice() {
+            done = 2;
+            matched();
+            chained.push((a.1, a.2, b.1, b.2));
+        }
+        for (j, e) in rest.iter().enumerate().skip(done) {
+            let earlier = rest.iter().take(j).map(|e| e.1);
+            fit(e, whole.iter().copied().chain(group.iter().map(|e| e.1)).chain(earlier).collect(), &mut fits);
+        }
+    }
+    if used.contains(&false) {
+        return Err(DocError::Invalid("A corner override is not at a corner of the frame".into()));
+    }
+    fits.sort_by_key(|f| pos(f.member));
+    Ok(Plan { ranks, corners, fits, chained })
 }
 
 #[cfg(test)]
