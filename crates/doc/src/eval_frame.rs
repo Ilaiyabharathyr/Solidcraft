@@ -47,6 +47,21 @@ pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
         free_corners(plan, &earlier, &placed, frame::anchor_point(&regions, frame::Anchor::Center))?;
     }
     let unjointed = if earlier.is_empty() { Vec::new() } else { unjointed_ends(&f.kind, &segments, plan.as_ref()) };
+    // This frame's own members, for its free ends: their laying order, and their cut ends to build their tools from.
+    let laid: Vec<usize> = match plan.as_ref() {
+        Some(plan) => {
+            let mut laid = vec![usize::MAX; segments.len()];
+            for (i, r) in plan.ranks.iter().enumerate() {
+                if let Some(p) = laid.get_mut(r.member) {
+                    *p = i;
+                }
+            }
+            laid
+        }
+        None => (0..segments.len()).collect(),
+    };
+    let own_ends =
+        if unjointed.iter().any(|e| e.2) { frame_ends(&f.kind, &segments, &regions, &placed, plan.clone(), (sketch_x, &drawn))? } else { Vec::new() };
     // Only an Auto frame builds by Auto's rules; an Auto override elsewhere is the frame's own type (corner_ends).
     let mut cut = if let Some(plan) = plan {
         auto_members(&segments, &regions, (&placed, &unreversed), plan, (sketch_x, &drawn))?
@@ -70,7 +85,20 @@ pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Featu
     // A point in the section's material (a tube's wall, not its bore), half way along member m.
     let inside = regions.first().map(|r| r.interior_point()).ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;
     let middle = |m: usize| segments.get(m).map_or(Vec3::ZERO, |(_, a, b)| placed(m, (*a + *b) * 0.5).to_world(inside));
-    fit_to_earlier(&mut made, &segments, &unjointed, &earlier, &middle)?;
+    // How far a member's tool reaches from its line: twice its section's farthest point from the line, and its
+    // corner extensions.
+    let section =
+        regions.iter().flat_map(|r| &r.outer.segs).flat_map(|g| [g.start(), g.point_at(0.5), g.end()]).map(|q| q.dist(at)).fold(0.0, f64::max);
+    let near = |k: usize, p: Vec3| {
+        let ext = own_ends.get(k).map_or(0.0, |e| e.iter().flatten().map(|c| c.1).fold(0.0, f64::max));
+        segments.get(k).is_some_and(|(_, a, b)| {
+            let d = *b - *a;
+            let t = ((p - *a).dot(d) / d.dot(d).max(f64::MIN_POSITIVE)).clamp(0.0, 1.0);
+            p.dist(*a + d * t) <= 4.0 * section + ext + 1.0
+        })
+    };
+    let tool = |k: usize| member_tool(&segments, &regions, &placed, &own_ends, k);
+    fit_to_earlier(&mut made, &segments, &unjointed, &earlier, &Own { laid, near: &near, tool: &tool }, &middle)?;
     if !f.body_names.is_empty() {
         // A copy (pasted, or in a copied component) names its members by position, as any
         // feature's bodies.
@@ -645,22 +673,30 @@ fn frame_ends(
     })
 }
 
-/// An Auto frame's corners that lie inside an earlier Frame Member's tube (`earlier`, [`earlier::earlier_tools`]):
-/// the long tube's section centre there is inside a tool (exact point classification). Each becomes
-/// [`Joint::Free`], not jointed, unless an override names it (#4003 decision 1).
+/// An Auto frame's corners that lie inside the earlier Frame Members' tubes (`earlier`, [`earlier::earlier_tools`]):
+/// the long tube's section centre there is inside a tool, or on two or more, as an earlier frame's mitred or square
+/// corner lies on both its tubes' cut faces and inside neither (claude_fusion `_Tubes.holds`); on one tool's skin alone
+/// (a frame sitting on a tube) it is not. Exact point classification. Each becomes [`Joint::Free`], not jointed,
+/// unless an override names it (#4003 decision 1).
 fn free_corners(plan: &mut Plan, earlier: &[(String, Traced)], placed: &dyn Fn(usize, Vec3) -> Plane, centre: Vec2) -> Result<()> {
     if earlier.is_empty() {
         return Ok(());
     }
     for c in plan.corners.iter_mut().filter(|c| c.kind == CornerType::Auto && !c.overridden) {
         let p = placed(c.long.0, c.point).to_world(centre);
+        let mut on = 0;
         for (_, tool) in earlier {
-            // The tool's box first: classifying a point is the dearer test.
+            // The tool's box first (a point on its skin lies on the box): classifying a point is the dearer test.
             let b = tool.body.exact_bounds()?;
-            if p.dist(p.max(b.min).min(b.max)) > 0.0 {
+            if p.dist(p.max(b.min).min(b.max)) > 1e-6 {
                 continue;
             }
-            if tool.body.classify_point(p)? == kernel::PointClass::Inside {
+            match tool.body.classify_point(p)? {
+                kernel::PointClass::Inside => on = 2,
+                kernel::PointClass::OnBoundary => on += 1,
+                _ => {}
+            }
+            if on >= 2 {
                 c.joint = Joint::Free;
                 break;
             }
@@ -670,53 +706,79 @@ fn free_corners(plan: &mut Plan, earlier: &[(String, Traced)], placed: &dyn Fn(u
 }
 
 /// The ends a frame doesn't joint within itself, which Fit Ends to Earlier Frames fits to earlier tubes (#4003
-/// decision 1). Under Auto (`plan`): every end but those of a jointed corner (a Free one's are fitted) or a chained
-/// one: lone ends, ends fitted to this frame's own tubes, the third and later ends at a point. Under Mitre, Butt and
-/// Coped: the ends at no corner. Under None: none. (member, at_start).
-fn unjointed_ends(f: &FeatureKind, segments: &[(String, Vec3, Vec3)], plan: Option<&Plan>) -> Vec<(usize, bool)> {
+/// decision 1), each with whether it is a free end, fitted to this frame's members laid before it too
+/// (claude_fusion `fit`: `pool, more = tubes, mine`). Under Auto (`plan`): every end but those of a jointed corner or
+/// a chained one; the ends fitted to this frame's own tubes (`plan.fits`: T-junctions, the third and later ends at a
+/// point) are not free, as Auto fits them to their own; lone ends and a Free corner's are. Under Mitre, Butt and
+/// Coped: the ends at no corner, free. Under None: none. (member, at_start, free).
+fn unjointed_ends(f: &FeatureKind, segments: &[(String, Vec3, Vec3)], plan: Option<&Plan>) -> Vec<(usize, bool, bool)> {
     let FeatureKind::FrameMember { corner, .. } = f else { return Vec::new() };
-    let jointed: HashSet<(usize, bool)> = match plan {
-        Some(plan) => plan
-            .corners
-            .iter()
-            .filter(|c| c.joint != Joint::Free || c.kind != CornerType::Auto)
-            .flat_map(|c| [c.long, c.short])
-            .chain(plan.chained.iter().flat_map(|c| [c.a, c.b]))
-            .collect(),
+    let (jointed, fitted): (HashSet<(usize, bool)>, HashSet<(usize, bool)>) = match plan {
+        Some(plan) => (
+            plan.corners
+                .iter()
+                .filter(|c| c.joint != Joint::Free || c.kind != CornerType::Auto)
+                .flat_map(|c| [c.long, c.short])
+                .chain(plan.chained.iter().flat_map(|c| [c.a, c.b]))
+                .collect(),
+            plan.fits.iter().map(|f| (f.member, f.at_start)).collect(),
+        ),
         None if *corner == CornerType::None => return Vec::new(),
-        None => frame_corners::find_corners(segments).iter().flat_map(|c| c.ends).collect(),
+        None => (frame_corners::find_corners(segments).iter().flat_map(|c| c.ends).collect(), HashSet::new()),
     };
-    (0..segments.len()).flat_map(|m| [(m, true), (m, false)]).filter(|e| !jointed.contains(e)).collect()
+    (0..segments.len())
+        .flat_map(|m| [(m, true), (m, false)])
+        .filter(|e| !jointed.contains(e))
+        .map(|(m, at_start)| (m, at_start, !fitted.contains(&(m, at_start))))
+        .collect()
+}
+
+/// This frame's own members as tools for its free ends ([`fit_to_earlier`]): each member's place in the laying order,
+/// whether member k may reach a point (its line within reach of it, its section and corner extensions counted), and
+/// member k's tool ([`member_tool`]).
+struct Own<'a> {
+    laid: Vec<usize>,
+    near: &'a dyn Fn(usize, Vec3) -> bool,
+    tool: &'a dyn Fn(usize) -> Result<Traced>,
 }
 
 /// `made` (each member as built, by member) with each of `ends` fitted to the earlier Frame Members' tubes
-/// ([`frame_fit::fit_end`]). A fitted face is named for the end it finishes and the body it fits,
-/// `corner_start:<body>:face:<k>` (`corner_end:…`). `middle(m)`: a point in member m's material half way along.
+/// ([`frame_fit::fit_end`]), a free end to this frame's members laid before its own too (`own`), each tool built
+/// once. A fitted face is named for the end it finishes and the body or line it fits, `corner_start:<body>:face:<k>`
+/// (`corner_end:…`). `middle(m)`: a point in member m's material half way along.
 fn fit_to_earlier(
     made: &mut [Traced],
     segments: &[(String, Vec3, Vec3)],
-    ends: &[(usize, bool)],
+    ends: &[(usize, bool, bool)],
     earlier: &[(String, Traced)],
+    own: &Own,
     middle: &dyn Fn(usize) -> Vec3,
 ) -> Result<()> {
     if earlier.is_empty() {
         return Ok(());
     }
-    let named = |role: &str| -> Vec<Traced> {
-        earlier
-            .iter()
-            .map(|(body, t)| {
-                let roles = (0..t.body.face_count()).map(|k| vec![format!("{role}:{body}:face:{k}")]).collect();
-                Traced::made(t.body.clone(), Some(roles))
-            })
-            .collect()
+    let named = |role: &str, name: &str, body: &kernel::Body| {
+        let roles = (0..body.face_count()).map(|k| vec![format!("{role}:{name}:face:{k}")]).collect();
+        Traced::made(body.clone(), Some(roles))
     };
-    let (starts, finishes) = (named("corner_start"), named("corner_end"));
-    for &(m, at_start) in ends {
-        let ((id, a, b), member) = segments.get(m).zip(made.get_mut(m)).ok_or_else(|| DocError::Invalid(format!("no member {m}")))?;
-        let (end, toward, tools) = if at_start { (*a, *a - *b, &starts) } else { (*b, *b - *a, &finishes) };
-        let tools: Vec<&Traced> = tools.iter().collect();
-        *member = frame_fit::fit_end(member, end, toward, middle(m), &tools, id)?;
+    let mut tools: Vec<Option<kernel::Body>> = vec![None; segments.len()];
+    for &(m, at_start, free) in ends {
+        let (id, a, b) = segments.get(m).ok_or_else(|| DocError::Invalid(format!("no member {m}")))?;
+        let (end, toward, role) = if at_start { (*a, *a - *b, "corner_start") } else { (*b, *b - *a, "corner_end") };
+        let mut against: Vec<Traced> = earlier.iter().map(|(body, t)| named(role, body, &t.body)).collect();
+        let place = |k: usize| own.laid.get(k).copied().unwrap_or(usize::MAX);
+        for k in (0..segments.len()).filter(|&k| free && k != m && place(k) < place(m) && (own.near)(k, end)) {
+            let (Some(slot), Some((line, _, _))) = (tools.get_mut(k), segments.get(k)) else { continue };
+            if slot.is_none() {
+                *slot = Some((own.tool)(k)?.body);
+            }
+            if let Some(body) = slot.as_ref() {
+                against.push(named(role, line, body));
+            }
+        }
+        let against: Vec<&Traced> = against.iter().collect();
+        let member = made.get_mut(m).ok_or_else(|| DocError::Invalid(format!("no member {m}")))?;
+        *member = frame_fit::fit_end(member, end, toward, middle(m), &against, id)?;
     }
     Ok(())
 }

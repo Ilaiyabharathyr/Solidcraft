@@ -3169,3 +3169,49 @@ fn a_mitre_frame_fits_its_free_ends_and_none_never_does() {
         assert_b_runs(&mut s, lo, hi);
     }
 }
+
+/// The overlap (mm³) between the bodies whose names start with `prefix`.
+fn overlap(s: &mut Session, prefix: &str) -> f64 {
+    let names: Vec<String> = named(s, prefix).into_iter().map(|b| b.0).collect();
+    let i = run(s, "inspect.interference", json!({"bodies": names}));
+    i["interferences"].as_array().map_or(0.0, |all| all.iter().map(|x| f(&x["volume_mm3"])).sum())
+}
+
+#[test]
+fn ends_at_a_free_corner_are_fitted_to_each_other_too() {
+    // An upright (300, 0)…(300, 300) and a 45° diagonal (300, 0)…(500, 200), 20 mm, leave one node inside A's
+    // bottom tube: 135° from in line, Auto would mitre them, but the node is Free. Fitted to A alone, both stop at
+    // y = 20, where the upright spans x 290…310 and the diagonal x 305.9…334.1 (its centre 320, half-width
+    // 10 / cos 45°): they overlap up to y ≈ 24. The later laid of the two is also fitted to the earlier one.
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    later_frame(&mut s, 0.0, &[[[300.0, 0.0], [300.0, 300.0]], [[300.0, 0.0], [500.0, 200.0]]], 20.0, true);
+    let bs = named(&mut s, "B");
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    for b in &bs {
+        assert!(b.2[1] >= 20.0 - 1e-6, "{b:?}");
+    }
+    let o = overlap(&mut s, "B");
+    assert!(o < 1e-3, "the braces overlap by {o} mm³: {bs:?}");
+}
+
+#[test]
+fn a_corner_on_an_earlier_frames_corner_is_free() {
+    // B's corner at (0, 0) is a corner of A, where A's two tubes meet: on both tubes' end or mitre faces, inside
+    // neither. It still lies in A, so it is Free: the diagonal (0, 0)…(300, 200) is fitted to A's two tubes, which
+    // fill x < 20 and y < 20 round there (min x and y 20). Under Mitre A fills the whole corner square, so B's
+    // other tube, (0, 0)…(0, −300), stops on A's outer face y = −20.
+    for corner in ["mitre", "none"] {
+        let mut s = Session::default();
+        rectangle_frame(&mut s);
+        run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": corner, "name": "A", "body_name": "A"}));
+        later_frame(&mut s, 0.0, &[[[0.0, 0.0], [300.0, 200.0]], [[0.0, 0.0], [0.0, -300.0]]], 20.0, true);
+        let bs = named(&mut s, "B");
+        let diagonal = bs.iter().find(|b| b.3[0] > 200.0).unwrap_or_else(|| panic!("{bs:?}"));
+        assert!(diagonal.2[0] >= 20.0 - 1e-6 && diagonal.2[1] >= 20.0 - 1e-6, "{corner}: {diagonal:?}");
+        if corner == "mitre" {
+            let down = bs.iter().find(|b| b.3[0] < 20.0).unwrap_or_else(|| panic!("{bs:?}"));
+            assert!((down.3[1] + 20.0).abs() < 1e-6, "{down:?}");
+        }
+    }
+}
