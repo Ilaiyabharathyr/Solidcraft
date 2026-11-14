@@ -6,7 +6,9 @@
 use serde_json::{Map, Value, json};
 use solidcraft_engine::doc::expr::Kind as ValueKind;
 use solidcraft_engine::doc::frame::{self, CornerType, MemberProfile};
+use solidcraft_engine::doc::frame_corners::CORNER_TOL;
 use solidcraft_engine::doc::{FeatureKind, ProfileSel};
+use solidcraft_engine::geom::prelude::*;
 use solidcraft_engine::sketch::CurveKind;
 use solidcraft_engine::{Sel, Session};
 
@@ -115,6 +117,8 @@ pub struct Member {
     pub fit_ends: bool,
     /// Each corner picked in Corner Overrides with its own type and flip.
     pub overrides: Vec<(Sel, usize, bool)>,
+    /// The feature's `next_pair` (0 for a new one): the number its next new pair's id takes, at the least.
+    pub next_pair: u32,
     /// Whether the Corner Overrides rows show (the arrow on its line folds them; a new pick
     /// opens them). For this dialog only: not saved.
     pub overrides_open: bool,
@@ -361,6 +365,7 @@ impl Member {
             flip: false,
             fit_ends: true,
             overrides: Vec::new(),
+            next_pair: 0,
             overrides_open: true,
         }
     }
@@ -941,15 +946,34 @@ pub fn commands(app: &SolveApp, m: &Member, inputs: &[SelInput], extra: &Map<Str
         None => point_ref(app, picks.get(i).ok_or("the path changed")?),
     };
     let mut pairs = Vec::with_capacity(pair_picks.len());
+    let mut pair_ends = Vec::with_capacity(pair_picks.len());
     for (a, b) in pair_picks {
         let mut pair = json!({"a": end(a)?, "b": end(b)?});
+        let mut kept = None;
         if let (Some(Some(x)), Some(Some(y))) = (ids.get(a), ids.get(b))
             && x == y
         {
             pair["id"] = json!(x);
+            kept = Some(x.clone());
         }
         pairs.push(pair);
+        pair_ends.push((kept, [picks.get(a), picks.get(b)]));
     }
+    // Each pair's id as `frame.member` gives it: the one it keeps, else, in order, the next number past the feature's
+    // `next_pair` and every id kept (as the command and Edit Feature number new pairs).
+    let past = pair_ends.iter().filter_map(|(id, _)| frame::parse_pair_id(id.as_deref()?)).max().map_or(1, |n| n.saturating_add(1));
+    let mut next = m.next_pair.max(past);
+    let pair_ends: Vec<(String, [Option<&Sel>; 2])> = pair_ends
+        .into_iter()
+        .map(|(id, ends)| {
+            let id = id.unwrap_or_else(|| {
+                let id = frame::pair_id(next);
+                next = next.saturating_add(1);
+                id
+            });
+            (id, ends)
+        })
+        .collect();
     if lines.is_empty() && pairs.is_empty() {
         return Err("select lines or points for the path first".into());
     }
@@ -1011,7 +1035,14 @@ pub fn commands(app: &SolveApp, m: &Member, inputs: &[SelInput], extra: &Map<Str
         for pick in picks {
             let Sel::ExternalSketchPoint { sketch: at, id } = pick else { continue };
             let sketch = sketch.filter(|s| s == at).ok_or("the corner overrides must be corners of the frame sketch")?;
-            let ends = frame::corner_at_point(&st, sketch, members, id, m.corner == AUTO).map_err(|e| e.to_string())?;
+            let mut ends = frame::corner_at_point(&st, sketch, members, id, m.corner == AUTO).map_err(|e| e.to_string())?;
+            // Under Auto the build counts every member ending at the corner, the pairs' too (ruling A16).
+            if m.corner == AUTO
+                && let Some(at) = path_point(&app.session, pick)
+            {
+                let here = |p: &Option<&Sel>| p.and_then(|p| path_point(&app.session, p)).is_some_and(|q| q.dist(at) <= CORNER_TOL);
+                ends.extend(pair_ends.iter().filter(|(_, e)| e.iter().any(here)).map(|(id, _)| id.clone()));
+            }
             let (corner, flip) = m.overrides.iter().find(|o| o.0 == *pick).map_or((m.corner, false), |o| (o.1, o.2));
             let corner = override_type(corner, m.corner);
             corners.push(json!({"members": ends, "corner": corner_name(corner), "flip": flip && override_flips(corner)}));
@@ -1030,6 +1061,23 @@ pub fn commands(app: &SolveApp, m: &Member, inputs: &[SelInput], extra: &Map<Str
         }
     }
     Ok(vec![("frame.member".to_string(), p)])
+}
+
+/// Where a point picked into the path is in the world, as the view shows it: a sketch point picked across sketches
+/// (`<sketch>:<point>`) where its sketch puts it, a construction point where it is built, any other pick as
+/// [`crate::primitive_placement::world_point`] finds it.
+fn path_point(s: &Session, sel: &Sel) -> Option<solidcore_record::Vec3> {
+    match sel {
+        Sel::SketchPoint { id } if id.contains(':') => {
+            let (sketch, point) = id.split_once(':')?;
+            crate::primitive_placement::world_point(s, &Sel::ExternalSketchPoint { sketch: sketch.parse().ok()?, id: point.to_string() })
+        }
+        Sel::ConstructionPoint { name } => match s.world_state().ok()?.construct.iter().find(|c| c.name == *name)?.geom {
+            solidcraft_engine::doc::construct::ConstructGeom::Point(p) => Some(p),
+            _ => None,
+        },
+        _ => crate::primitive_placement::world_point(s, sel),
+    }
 }
 
 /// A point picked into the path as `frame.member` takes it; the origin stays the origin.
@@ -1061,6 +1109,7 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
         flip,
         corners,
         fit_ends,
+        next_pair,
         ..
     } = kind
     else {
@@ -1121,6 +1170,7 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
     m.corner = corner_index(corner);
     m.flip = *flip;
     m.fit_ends = *fit_ends;
+    m.next_pair = *next_pair;
     // Each override shows as the point of its corner; one whose lines no longer end there alone
     // (one has gone, or another now ends there too), or one of a corner where a point-to-point
     // member ends (not a sketch point the input can show), is kept as it is, listed with a bin so

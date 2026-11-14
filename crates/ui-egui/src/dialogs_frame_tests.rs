@@ -2,7 +2,6 @@ use crate::test_support::run_all;
 use serde_json::json;
 use solidcore_record::Vec3;
 use solidcraft_engine::Session;
-use solidcraft_engine::geom::prelude::*;
 
 use super::*;
 use crate::Services;
@@ -1453,6 +1452,48 @@ fn under_auto_a_three_tube_point_is_an_override() {
     assert!(d.inputs[2].items.is_empty());
     let e = d.error.clone().unwrap_or_default();
     assert!(e.contains("exactly two members end"), "{e}");
+}
+
+/// Under Auto, a corner picked where a point-to-point member ends too is saved with that pair's id, as
+/// the build counts every member ending there (ruling A16), and the feature builds. An edit that adds a
+/// pair names it by the id the command gives it.
+#[test]
+fn an_auto_override_names_the_pairs_ending_at_its_corner() {
+    let mut app = app_with(&[
+        ("sketch.create", json!({"plane": "XY", "name": "Frame"})),
+        ("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]})),
+        ("sketch.point", json!({"point": [300, 200], "id": "mid"})),
+        ("sketch.finish", json!({})),
+    ]);
+    let frame = sketch_id(&app, "Frame");
+    let lines = frame_lines(&app);
+    let at = |app: &SolveApp, x: f64, y: f64| Sel::SketchPoint { id: format!("{frame}:{}", point_at(app, x, y)) };
+    let mid = Sel::SketchPoint { id: format!("{frame}:mid") };
+    let mut d = dialog_on(&mut app, &lines);
+    d.active = 0;
+    pick_all(&app, &mut d, &[at(&app, 0.0, 0.0), mid.clone()]);
+    assert_eq!((path(&d).len(), d.error.as_deref()), (6, None));
+    d.active = 2;
+    d.pick(&app.session, Sel::ExternalSketchPoint { sketch: frame, id: point_at(&app, 0.0, 0.0) });
+    let c = apply_commands(&app, &d).unwrap();
+    let mut members = lines_at(&app, 0.0, 0.0);
+    members.push("pair1".into());
+    assert_eq!(c[0].1["corners"], json!([{"members": members, "corner": "auto", "flip": false}]), "{}", c[0].1);
+    run_all(&mut app, c);
+    let f = app.session.doc.features.last().unwrap().id;
+    // The edit adds a second pair from (600, 400): its id is pair2.
+    let mut e = edit_dialog(&app, f, None).unwrap();
+    e.active = 0;
+    pick_all(&app, &mut e, &[at(&app, 600.0, 400.0), mid]);
+    e.active = 2;
+    e.pick(&app.session, Sel::ExternalSketchPoint { sketch: frame, id: point_at(&app, 600.0, 400.0) });
+    let c = apply_commands(&app, &e).unwrap();
+    let mut far = lines_at(&app, 600.0, 400.0);
+    far.push("pair2".into());
+    let corners = c[0].1["params"]["corners"].as_array().cloned().unwrap_or_default();
+    assert!(corners.iter().any(|o| o["members"] == json!(far)), "{}", c[0].1);
+    run_all(&mut app, c);
+    assert_eq!(body_names(&app).len(), 6);
 }
 
 /// Edit Feature brings back Auto, Fit Ends to Earlier Frames and a three-tube override as the point
