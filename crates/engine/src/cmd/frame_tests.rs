@@ -782,6 +782,21 @@ fn a_short_coped_brace_keeps_its_own_side() {
 }
 
 #[test]
+fn a_short_coped_round_tube_keeps_its_fishmouth() {
+    // 25 mm of round U comes 5 mm out of T; its tips reach T's centreline.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "V"}));
+    run(&mut s, "sketch.line", json!({"points": [[400, 0], [0, 0], [0, 25]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let profile = json!({"kind": "round_tube", "diameter": 40, "wall": 3});
+    run(&mut s, "frame.member", json!({"sketch": "V", "profile": profile, "corner": "coped_butt"}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    let u = bs.iter().find(|b| b.3[0] - b.2[0] < 300.0).unwrap_or_else(|| panic!("{bs:?}"));
+    assert!(u.2[1].abs() < 1e-3 && (u.3[1] - 25.0).abs() < 1e-3, "{u:?}");
+}
+
+#[test]
 fn butts_at_70_and_110_degrees_meet_flush() {
     for deg in [70.0f64, 110.0] {
         let (c, sn) = (deg.to_radians().cos(), deg.to_radians().sin());

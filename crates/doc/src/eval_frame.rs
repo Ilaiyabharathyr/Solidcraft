@@ -162,10 +162,15 @@ fn cut_members(
             _ => None,
         };
         let (n, near, ext) = reached.ok_or_else(|| DocError::Invalid(format!("the member on line `{}` can't be built out to its corner", id(u))))?;
+        // U wholly inside T (its far end short of T's near face) keeps nothing of its own.
+        let far_end = segments.get(u).map(|(_, a, b)| if ue.1 { *b } else { *a });
+        if far_end.is_none_or(|q| (q - c.point).dot(n) <= near) {
+            return Err(DocError::Invalid(format!("the member on line `{}` was cut away completely", id(u))));
+        }
         if let Some(end) = ends.get_mut(u).and_then(|e| e.get_mut(usize::from(!ue.1))) {
             *end = Some((None, ext));
         }
-        copes.push((t, u, c.point, n, near));
+        copes.push((t, u, c.point, n));
     }
     // Member m built out at its cut ends and cut there, from `regions`.
     let build = |m: usize, regions: &[Region2]| -> Result<Traced> {
@@ -197,11 +202,10 @@ fn cut_members(
         out.push(Some(t));
     }
     // Copes after every plane cut. T filled is T built from its outlines alone, holes closed;
-    // U keeps its largest piece on its own side of T: its centre of mass on U's side, and coming
-    // out past T's near face (what lies past T, and slivers in T's radii with nothing past them,
-    // go). A U too short to come out of T is cut away completely.
+    // U keeps its largest piece on its own side of T, its centre of mass on U's side (what lies
+    // past T, and slivers on T's far side, go).
     let outlines: Vec<Region2> = regions.iter().map(|r| Region2 { outer: r.outer.clone(), holes: Vec::new() }).collect();
-    for (t, u, point, n, near) in copes {
+    for (t, u, point, n) in copes {
         let filled = crate::lineage::numbered_tool(build(t, &outlines)?.body);
         let Some(traced) = out.get_mut(u).and_then(Option::as_mut) else { continue };
         let gone = || DocError::Invalid(format!("the member on line `{}` was cut away completely", id(u)));
@@ -213,12 +217,7 @@ fn cut_members(
         for (body, lineage) in lumps.into_iter().zip(lineages) {
             let mass = kernel::measure_mass(&body)?;
             let v = mass.volume;
-            let own_side = (mass.centroid - point).dot(n) > 0.0;
-            if !own_side || best.as_ref().is_some_and(|(most, _)| v <= *most) {
-                continue;
-            }
-            let mesh = body.mesh(&kernel::MeshTolerance::chord((body.size() * 1e-2).max(1e-2)))?;
-            if mesh.positions.iter().any(|q| (*q - point).dot(n) > near + 1e-3) {
+            if (mass.centroid - point).dot(n) > 0.0 && best.as_ref().is_none_or(|(most, _)| v > *most) {
                 best = Some((v, Traced { body, lineage, recipe: None }));
             }
         }
