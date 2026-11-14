@@ -141,3 +141,38 @@ fn a_member_wholly_inside_a_tool_is_cut_away() {
     let e = fit_end(&m, end, toward, middle, &[&tool], "m").unwrap_err();
     assert!(e.to_string().contains("the member on line `m` was cut away completely"), "{e}");
 }
+
+#[test]
+fn an_oblique_tool_crossing_mid_span_leaves_the_member_whole() {
+    // A 600 mm member crossed at x = 200 by a brace whose box covers the end, far from the end itself.
+    let m = member(&box_tube(), Vec3::ZERO, Vec3::X * 600.0, 0.0, 600.0);
+    let (a, b) = (Vec3::new(0.0, -200.0, 0.0), Vec3::new(800.0, 600.0, 0.0));
+    let tool = fit_tool(&square_to(a, b), &box_tube(), 0.0, a.dist(b), &[]).unwrap();
+    let tb = tool.body.exact_bounds().unwrap();
+    assert!(tb.min.x < 600.0 && tb.max.x > 600.0 && tb.min.y < 0.0 && tb.max.y > 0.0, "the tool's box covers the end: {tb:?}");
+    let fitted = fit_end(&m, Vec3::X * 600.0, Vec3::X, Vec3::new(300.0, 18.5, 0.0), &[&tool], "m").unwrap();
+    assert!(fitted.body.same(&m.body));
+    assert!(rel(volume(&fitted), tube_area() * 600.0) < MEASURED);
+}
+
+#[test]
+fn an_x_brace_crossing_does_not_cut_the_brace() {
+    // The diagonals of a 600 × 400 rectangle: one brace, crossed at its middle by the other, ends at
+    // the right side's tube; only that end is fitted.
+    let (a, b) = (Vec3::ZERO, Vec3::new(600.0, 400.0, 0.0));
+    let len = a.dist(b);
+    let brace = member(&box_tube(), a, b, 0.0, len);
+    let (c, d) = (Vec3::new(0.0, 400.0, 0.0), Vec3::new(600.0, 0.0, 0.0));
+    let other = fit_tool(&square_to(c, d), &box_tube(), 0.0, c.dist(d), &[]).unwrap();
+    let side = fit_tool(&square_to(d, b), &box_tube(), -20.0, 420.0, &[]).unwrap();
+    let toward = (b - a).normalized().unwrap();
+    let (x, _) = frame::member_axes(toward, 0.0).unwrap();
+    // In the wall at the brace's middle, where the other diagonal crosses it.
+    let middle = (a + b) * 0.5 + x * 18.5;
+    let fitted = fit_end(&brace, b, toward, middle, &[&other, &side], "brace").unwrap();
+    let (got, was) = (fitted.body.exact_bounds().unwrap(), brace.body.exact_bounds().unwrap());
+    // The start and the crossing are untouched; the end stops flat on the side's near face.
+    assert!(got.min.dist(was.min) < 1e-6, "{got:?} vs {was:?}");
+    assert!((got.max.x - 580.0).abs() < 1e-6, "{got:?}");
+    assert!(volume(&fitted) > tube_area() * (len - 100.0) && volume(&fitted) < volume(&brace), "{} of {}", volume(&fitted), volume(&brace));
+}

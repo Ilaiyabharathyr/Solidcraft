@@ -68,22 +68,44 @@ pub fn fit_tool(plane: &Plane, regions: &[Region2], start: f64, end: f64, cuts: 
 }
 
 /// `member` with its end at `end_point` (its line's end, `toward` pointing out of the member) fitted to `tools`:
-/// only tools whose exact bounds come within the member's section diagonal of the end take part; the piece
-/// holding `middle` (a point inside the member's material near its line's middle) is kept; unchanged when no
-/// tool reaches the end.
+/// only tools that reach the end zone ([`zone`], `w` the member's section diagonal, never past a quarter of the
+/// member) take part, each cut only within a zone deep enough to hold its whole crossing, so a tool crossing the
+/// member mid-span leaves it whole there (claude_fusion `cope_end`); the piece holding `middle` (a point inside
+/// the member's material near its line's middle) is kept; unchanged when no tool reaches the end.
 pub fn fit_end(member: &Traced, end_point: Vec3, toward: Vec3, middle: Vec3, tools: &[&Traced], id: &str) -> Result<Traced> {
     let gone = || DocError::Invalid(format!("the member on line `{id}` was cut away completely"));
     let toward = toward.normalized().ok_or_else(|| DocError::Invalid(format!("the member on line `{id}` has no direction")))?;
-    let room = diagonal(&member.body, end_point, toward, middle);
-    let mut fitted: Option<Traced> = None;
-    for tool in tools {
+    let w = diagonal(&member.body, end_point, toward, middle);
+    let half = end_point.dist(middle);
+    // The tools that reach the end zone, each with how deep its crossing may run: the section plus the tool's
+    // own size.
+    let mut reach = Vec::new();
+    for &tool in tools {
         let b = tool.body.exact_bounds()?;
-        if end_point.dist(end_point.max(b.min).min(b.max)) > room {
+        // A cheap first look at the tool's box; fails closed on a non-finite distance.
+        if !(end_point.dist(end_point.max(b.min).min(b.max)) <= w) {
             continue;
         }
+        let size = b.max - b.min;
+        let depth = w + size.x.min(size.y).min(size.z);
+        let gate = zone(end_point, toward, w, depth.min(half / 2.0))?;
+        if kernel::boolean(&tool.body, &gate, BoolOp::Intersect)?.is_some() {
+            reach.push((tool, depth));
+        }
+    }
+    if reach.is_empty() {
+        return Ok(member.clone());
+    }
+    // A tool that reaches the end is cut over its whole crossing, an oblique brace's included, and nowhere else.
+    let clip = numbered_tool(zone(end_point, toward, w, 2.0 * reach.iter().map(|r| r.1).fold(0.0, f64::max))?);
+    let mut fitted: Option<Traced> = None;
+    for (tool, _) in reach {
+        // ponytail: every tool is clipped, even one wholly inside the zone; skip those if the boolean shows.
+        let Some(part) = kernel::boolean(&tool.body, &clip.body, BoolOp::Intersect)? else { continue };
+        let part = Traced::step(part, &[tool, &clip]);
         let from = fitted.as_ref().unwrap_or(member);
-        let cut = kernel::boolean(&from.body, &tool.body, BoolOp::Cut)?.ok_or_else(gone)?;
-        fitted = Some(Traced::step(cut, &[from, tool]));
+        let cut = kernel::boolean(&from.body, &part.body, BoolOp::Cut)?.ok_or_else(gone)?;
+        fitted = Some(Traced::step(cut, &[from, &part]));
     }
     let Some(fitted) = fitted else { return Ok(member.clone()) };
     let lumps = fitted.body.lumps()?;
@@ -94,6 +116,20 @@ pub fn fit_end(member: &Traced, end_point: Vec3, toward: Vec3, middle: Vec3, too
         }
     }
     Err(gone())
+}
+
+/// The end zone: a box `w` out from the member's line each way, from `w` past `end` back `depth` into the
+/// member, `toward` pointing out of it.
+fn zone(end: Vec3, toward: Vec3, w: f64, depth: f64) -> Result<kernel::Body> {
+    let u = toward.any_perp();
+    // x × y = u × (-toward × u) = -toward: the box runs back into the member.
+    let plane = Plane::new(end + toward * w, u, (-toward).cross(u)).ok_or_else(|| DocError::Invalid("a tube end has no zone".into()))?;
+    let square = [Vec2::new(-w, -w), Vec2::new(w, -w), Vec2::new(w, w), Vec2::new(-w, w)];
+    let mut bodies = kernel::extrude(&plane, &[Region2 { outer: Loop2::polygon(&square), holes: Vec::new() }], 0.0, depth + w)?;
+    match (bodies.pop(), bodies.is_empty()) {
+        (Some(body), true) => Ok(body),
+        _ => Err(DocError::Invalid("a tube end's zone is not one solid".into())),
+    }
 }
 
 /// The member's section diagonal at its end: twice its farthest vertex from the line through `end` along unit
