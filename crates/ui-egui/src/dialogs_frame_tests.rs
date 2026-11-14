@@ -1337,3 +1337,42 @@ fn a_corner_is_picked_in_the_view() {
     let frame = sketch_id(&h.app, "Frame");
     assert!(picked.contains(&Sel::ExternalSketchPoint { sketch: frame, id: point_at(&h.app, 600.0, 400.0) }), "{picked:?} from {hits:?}");
 }
+
+/// A marquee over the frame sketch picks its lines into Lines, and its corners into Corner Overrides.
+#[test]
+fn a_box_over_the_frame_sketch_picks_its_lines() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.home.open = false;
+    for (id, p) in frame_commands() {
+        h.app.run(id, p).unwrap();
+    }
+    h.app.set_origin_shown(false);
+    h.app.ui.show_browser = false;
+    h.app.ui.show_timeline = false;
+    h.call("ui.view", json!({"view": "top"}));
+    h.call("ui.camera", json!({"target": [300, 200, 0], "distance": 1600}));
+    h.app.start("frame.member");
+    h.frames(2);
+    let frame = sketch_id(&h.app, "Frame");
+    let drag = json!({"drag": [{"world": [-50, -50, 0]}, {"world": [650, 450, 0]}]});
+    h.step(&drag).unwrap();
+    let mut lines: Vec<String> = h.app.dialog.as_ref().unwrap().inputs[0]
+        .items
+        .iter()
+        .filter_map(|s| match s {
+            Sel::ExternalSketchCurve { sketch, id } if *sketch == frame => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    lines.sort();
+    let mut want = frame_lines(&h.app);
+    want.sort();
+    assert_eq!(lines, want, "{:?}", h.app.dialog.as_ref().unwrap().inputs[0].items);
+    // With Corner Overrides active the same marquee takes the 4 corners.
+    h.app.dialog.as_mut().unwrap().active = 2;
+    h.frames(2);
+    h.step(&drag).unwrap();
+    let corners = &h.app.dialog.as_ref().unwrap().inputs[2].items;
+    assert_eq!(corners.len(), 4, "{corners:?}");
+    assert!(corners.contains(&Sel::ExternalSketchPoint { sketch: frame, id: point_at(&h.app, 600.0, 400.0) }), "{corners:?}");
+}
