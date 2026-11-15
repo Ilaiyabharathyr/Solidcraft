@@ -3831,6 +3831,35 @@ fn a_copy_of_a_crossing_tube_is_not_taken_for_a_short_piece_inside_it() {
 }
 
 #[test]
+fn a_pasted_frame_with_a_dropped_piece_is_matched_by_shape_not_position() {
+    // The plus with v's piece past h (y 0…10) wholly inside h: no body, so a pasted copy (bodies named by position)
+    // has one body fewer than members and a body's place in the list is not its member's. w crosses h too; B, from
+    // (300, -60) along +x, lands in the copy's w tube and is still fitted to its face x = 320.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Plus"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [400, 0]], "ids": ["h"]}));
+    run(&mut s, "sketch.line", json!({"points": [[100, -100], [100, 10]], "ids": ["v"]}));
+    run(&mut s, "sketch.line", json!({"points": [[300, -100], [300, 90]], "ids": ["w"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let fid = run(&mut s, "frame.member", json!({"sketch": "Plus", "profile": tube(), "corner": "auto"}))["feature"].clone();
+    run(&mut s, "timeline.copy", json!({"features": [fid]}));
+    let copy = run(&mut s, "timeline.paste", json!({}))["pasted"][0]["id"].as_u64().unwrap();
+    assert!(!s.doc.feature(copy).unwrap().body_names.is_empty(), "a copy names its bodies by position");
+    run(&mut s, "timeline.delete", json!({"feature": fid}));
+    let w = bodies(&mut s)
+        .into_iter()
+        .find(|b| near3(b.2, [280.0, -100.0, -20.0]) && near3(b.3, [320.0, -20.0, 20.0]))
+        .unwrap_or_else(|| panic!("no W: {:?}", bodies(&mut s)))
+        .0;
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Later"}));
+    run(&mut s, "sketch.line", json!({"points": [[300, -60], [500, -60]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Later", "profile": square_of(25.0), "corner": "auto", "fit_ends": true, "body_name": "B"}));
+    let b = measured(&mut s, "B");
+    assert!(near3(b.2, [320.0, -72.5, -12.5]) && near3(b.3, [500.0, -47.5, 12.5]), "B is not cut on {w}: {b:?}");
+}
+
+#[test]
 fn a_later_end_fits_to_an_earlier_frames_whole_diagonal() {
     // The same, B landing on d1, which the crossing leaves whole (y = 2x/3): from (450, 300) on it square off to
     // (530, 180), along (2, −3)/√13. Fitted 20 along to D1's near face, B's box is x 450 + 2.5/√13 … 530 + 37.5/√13,

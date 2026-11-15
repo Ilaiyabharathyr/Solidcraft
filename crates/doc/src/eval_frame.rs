@@ -1266,6 +1266,12 @@ pub fn member_of_body(st: &ModelState, f: &Feature, body: &str) -> Result<Option
             (0..ids.len()).find(|&k| pinned(k).is_some_and(|n| n == body)).or_else(|| (0..ids.len()).find(|&k| joined(k).is_some_and(|n| n == body)));
         k.and_then(|k| ids.get(k)).cloned()
     } else {
+        // Position pairs a body with a member only when every member made one; a piece left with no body shifts
+        // the rest, and the caller then matches by shape.
+        let made = st.bodies.iter().filter(|b| b.feature == f.id).count();
+        if made != ids.len() {
+            return Ok(None);
+        }
         f.body_names.iter().position(|name| name == body).and_then(|i| ids.into_iter().nth(i))
     })
 }
