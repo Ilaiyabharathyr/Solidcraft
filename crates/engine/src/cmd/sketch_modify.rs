@@ -4066,7 +4066,7 @@ fn move_copy(s: &mut Session, p: &Value) -> Result<Value> {
             _ => Vec2::ZERO,
         };
         let rot = rotate(c, ang);
-        let (_, info) = super::sketch_3d::move_drawn(s, p, cmd, &moved_drawn, &|q: Vec2| rot(q) + t)?;
+        let (_, info) = super::sketch_3d::move_drawn(s, p, cmd, &moved_drawn, z, &|q: Vec2| rot(q) + t)?;
         if plane_picks.is_empty() {
             let curves = moved_ids;
             return reply(
