@@ -4276,6 +4276,304 @@ fn a_corner_on_an_earlier_frames_corner_is_free() {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Tubes that cross or clip in 3D are split or notched (#4003)
+
+/// Rail `pair1` (0, 0, 0)…(600, 0, 0) and brace `pair2` (300, −200, `z`)…(300, 200, `z`) in 40 × 40 × 3 tube, under
+/// `corner`, named `T` and `T (2)`, with `more` added to the command.
+fn rail_and_brace(z: f64, corner: &str, more: Value) -> Session {
+    let mut s = Session::default();
+    points(&mut s, &[("R0", [0.0, 0.0, 0.0]), ("R1", [600.0, 0.0, 0.0]), ("B0", [300.0, -200.0, z]), ("B1", [300.0, 200.0, z])]);
+    let mut p = json!({"pairs": [pair("R0", "R1"), pair("B0", "B1")], "profile": tube(), "corner": corner, "body_name": "T"});
+    for (k, v) in more.as_object().unwrap() {
+        p[k] = v.clone();
+    }
+    run(&mut s, "frame.member", p);
+    s
+}
+
+/// The body named `name`.
+fn body_named<'a>(bs: &'a [Measured], name: &str) -> &'a Measured {
+    bs.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("{name} in {bs:?}"))
+}
+
+/// `b` is a whole 40 tube from `lo` to `hi`, `length` long.
+fn assert_tube(b: &Measured, lo: [f64; 3], hi: [f64; 3], length: f64) {
+    assert!(near3(b.2, lo) && near3(b.3, hi), "{b:?}: not {lo:?}…{hi:?}");
+    assert!(rel(b.1, tube_area() * length) < MEASURED, "{b:?} vs {}", tube_area() * length);
+}
+
+#[test]
+fn a_point_pair_brace_crossing_a_rail_is_split() {
+    // Tubes in no sketch plane are laid longest first: the rail (600) before the brace (400), which gives way. Cut by
+    // the rail's filled, squared tool (y and z within ±20 over x 0…600), the brace leaves y −200…−20 and 20…200,
+    // A·180 each. The piece from its drawn start (y = −200) keeps its name; the other is named after it and the rail.
+    let mut s = rail_and_brace(0.0, "auto", json!({}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 3, "{bs:?}");
+    assert_tube(body_named(&bs, "T"), [0.0, -20.0, -20.0], [600.0, 20.0, 20.0], 600.0);
+    assert_tube(body_named(&bs, "T (2)"), [280.0, -200.0, -20.0], [320.0, -20.0, 20.0], 180.0);
+    assert_tube(body_named(&bs, "T (2) · T"), [280.0, 20.0, -20.0], [320.0, 200.0, 20.0], 180.0);
+    let o = overlap_all(&mut s);
+    assert!(o < 1e-3, "the tubes overlap by {o} mm³: {bs:?}");
+}
+
+#[test]
+fn a_clipping_tube_is_notched() {
+    // The brace runs 30 above the rail: the centrelines miss by 30, less than the section's 40. The brace keeps one
+    // body, its name and its box (z 10…50), losing what lies in the rail's squared tool, y −20…20 and z 10…20. Of its
+    // section (40 square, outer radius 6; bore 34 square, radius 3) that is the bottom 10: the outer 40 × 10 less two
+    // corners 36 − 9π, less the bore's 34 × 7 less two corners 9 − 9π/4, 150.4115, over 40 of its length: 6016.46.
+    let mut s = rail_and_brace(30.0, "auto", json!({}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    assert_tube(body_named(&bs, "T"), [0.0, -20.0, -20.0], [600.0, 20.0, 20.0], 600.0);
+    let brace = body_named(&bs, "T (2)");
+    assert!(near3(brace.2, [280.0, -200.0, 10.0]) && near3(brace.3, [320.0, 200.0, 50.0]), "{brace:?}");
+    let strip = (400.0 - 2.0 * (36.0 - 9.0 * PI)) - (34.0 * 7.0 - 2.0 * (9.0 - 9.0 * PI / 4.0));
+    let want = tube_area() * 400.0 - 40.0 * strip;
+    assert!(rel(brace.1, want) < MEASURED, "{brace:?} vs {want}");
+    let o = overlap_all(&mut s);
+    assert!(o < 1e-3, "the tubes overlap by {o} mm³: {bs:?}");
+}
+
+/// The ids of 3D sketch `name`'s wires, in drawing order.
+fn wire_ids(s: &Session, name: &str) -> Vec<String> {
+    let id = s.doc.find_feature(name).unwrap().id;
+    s.doc.sketch(id).unwrap().wires.iter().map(|w| w.id.clone()).collect()
+}
+
+#[test]
+fn a_3d_sketch_line_crossing_a_sketch_tube_is_split() {
+    // A 3D sketch's line along X (600) and its 3D line up Z through it (400), both in no sketch plane: the post is laid
+    // second and gives way, cut by the rail's tool (y and z within ±20) into z −200…−20 and 20…200, A·180 each.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Space"}));
+    run(&mut s, "sketch.options", json!({"sketch_3d": true}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [600, 0]]}));
+    run(&mut s, "sketch.line3d", json!({"points": [[300, 0, -200], [300, 0, 200]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Space", "profile": tube(), "corner": "auto", "body_name": "P"}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 3, "{bs:?}");
+    assert_tube(body_named(&bs, "P"), [0.0, -20.0, -20.0], [600.0, 20.0, 20.0], 600.0);
+    assert_tube(body_named(&bs, "P (2)"), [280.0, -20.0, -200.0], [320.0, 20.0, -20.0], 180.0);
+    assert_tube(body_named(&bs, "P (2) · P"), [280.0, -20.0, 20.0], [320.0, 20.0, 200.0], 180.0);
+    let o = overlap_all(&mut s);
+    assert!(o < 1e-3, "the tubes overlap by {o} mm³: {bs:?}");
+}
+
+#[test]
+fn fit_ends_notches_against_an_earlier_frame() {
+    // A's bottom tube (a None frame: square ends, x 0…600, y and z within ±20) and B's line (300, −100)…(300, 100) in
+    // 25 square tube. B's ends are 80 from A, beyond their end zones, so Fit Ends leaves them; the overlap mid-span is
+    // cut by A's tool: B keeps y −100…−20 (its name) and 20…100 (named after it and A's bottom tube), 80 of its 200
+    // each, prismatic, cut square. With Fit Ends off B stays whole, overlapping A.
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    later_frame(&mut s, 0.0, &[[[300.0, -100.0], [300.0, 100.0]]], 25.0, false);
+    let whole = named(&mut s, "B");
+    assert_eq!(whole.len(), 1, "{whole:?}");
+    assert!((whole[0].2[1] + 100.0).abs() < 1e-6 && (whole[0].3[1] - 100.0).abs() < 1e-6, "{whole:?}");
+    assert!(overlap_all(&mut s) > 1.0, "{whole:?}");
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    later_frame(&mut s, 0.0, &[[[300.0, -100.0], [300.0, 100.0]]], 25.0, true);
+    let bottom = bodies(&mut s).into_iter().find(|b| b.0.starts_with('A') && b.3[1] < 21.0).unwrap();
+    let bs = named(&mut s, "B");
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    let first = body_named(&bs, "B");
+    let later = body_named(&bs, &format!("B · {}", bottom.0));
+    assert!((first.2[1] + 100.0).abs() < 1e-6 && (first.3[1] + 20.0).abs() < 1e-6, "{first:?}");
+    assert!((later.2[1] - 20.0).abs() < 1e-6 && (later.3[1] - 100.0).abs() < 1e-6, "{later:?}");
+    for b in [first, later] {
+        assert!(rel(b.1, whole[0].1 * 0.4) < 1e-6, "{b:?} vs {}", whole[0].1 * 0.4);
+    }
+    // A's own corners overlap (a None frame): only B against A's bottom tube counts.
+    let i = run(&mut s, "inspect.interference", json!({"bodies": [first.0, later.0, bottom.0]}));
+    let o: f64 = i["interferences"].as_array().map_or(0.0, |all| all.iter().map(|x| f(&x["volume_mm3"])).sum());
+    assert!(o < 1e-3, "the tubes overlap by {o} mm³: {bs:?}");
+}
+
+#[test]
+fn a_none_frame_keeps_overlaps() {
+    let mut s = rail_and_brace(0.0, "none", json!({}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    assert_tube(body_named(&bs, "T (2)"), [280.0, -200.0, -20.0], [320.0, 200.0, 20.0], 400.0);
+    assert!(overlap_all(&mut s) > 1.0, "{bs:?}");
+}
+
+#[test]
+fn an_overlap_override_flips_who_gives_way() {
+    // The rail and brace of `a_point_pair_brace_crossing_a_rail_is_split`, their set flipped: the rail gives way,
+    // cut by the brace's tool (x 280…320) into x 0…280 and 320…600, A·280 each; the brace stays whole.
+    let flip = json!({"corners": [{"members": ["pair1", "pair2"], "corner": "auto", "flip": true}]});
+    let mut s = rail_and_brace(0.0, "auto", flip);
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 3, "{bs:?}");
+    assert_tube(body_named(&bs, "T"), [0.0, -20.0, -20.0], [280.0, 20.0, 20.0], 280.0);
+    assert_tube(body_named(&bs, "T · T (2)"), [320.0, -20.0, -20.0], [600.0, 20.0, 20.0], 280.0);
+    assert_tube(body_named(&bs, "T (2)"), [280.0, -200.0, -20.0], [320.0, 200.0, 20.0], 400.0);
+    // Under Mitre too: the override names no corner, and is no error.
+    let mut s = rail_and_brace(0.0, "mitre", json!({"corners": [{"members": ["pair1", "pair2"], "corner": "mitre", "flip": true}]}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 3, "{bs:?}");
+    assert_tube(body_named(&bs, "T (2)"), [280.0, -200.0, -20.0], [320.0, 200.0, 20.0], 400.0);
+}
+
+#[test]
+fn an_overlap_override_on_tubes_that_no_longer_overlap_fails() {
+    // The brace 60 above the rail misses it: an override of the two names no corner, crossing or overlap.
+    let mut s = Session::default();
+    points(&mut s, &[("R0", [0.0, 0.0, 0.0]), ("R1", [600.0, 0.0, 0.0]), ("B0", [300.0, -200.0, 60.0]), ("B1", [300.0, 200.0, 60.0])]);
+    let p = json!({"pairs": [pair("R0", "R1"), pair("B0", "B1")], "profile": tube(), "corner": "auto",
+                   "corners": [{"members": ["pair1", "pair2"], "corner": "auto", "flip": true}]});
+    let e = s.execute("frame.member", &p).map(|_| String::new()).unwrap_or_else(|e| e.to_string());
+    let member = s.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).map(|f| f.id);
+    let e = member.and_then(|m| s.model.result(m)).and_then(|r| r.error.clone()).unwrap_or(e);
+    assert!(e.contains("A corner override is not at a corner of the frame"), "{e}");
+}
+
+#[test]
+fn overlaps_are_the_same_whatever_the_pick_order() {
+    // A 3D sketch's rail (0, 0, 0)…(600, 0, 0), a brace clipping it 30 above at x = 300 and one crossing it at x = 100:
+    // the braces tie (400 each) and are laid in drawing order, never the pick order, after the rail.
+    let build = |reverse: bool| {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Space"}));
+        run(&mut s, "sketch.options", json!({"sketch_3d": true}));
+        run(&mut s, "sketch.line3d", json!({"points": [[0, 0, 0], [600, 0, 0]]}));
+        run(&mut s, "sketch.line3d", json!({"points": [[300, -200, 30], [300, 200, 30]]}));
+        run(&mut s, "sketch.line3d", json!({"points": [[100, -200, 0], [100, 200, 0]]}));
+        run(&mut s, "sketch.finish", json!({}));
+        let mut lines = wire_ids(&s, "Space");
+        if reverse {
+            lines.reverse();
+        }
+        let names: serde_json::Map<String, Value> = lines.iter().map(|l| (l.clone(), json!(l))).collect();
+        run(&mut s, "frame.member", json!({"sketch": "Space", "profile": tube(), "corner": "auto", "lines": lines, "names": names}));
+        (built(&mut s), overlap_all(&mut s))
+    };
+    let (((drawn, drawn_faces), o), ((picked, picked_faces), _)) = (build(false), build(true));
+    assert_eq!(drawn.len(), 4, "{drawn:?}");
+    assert!(o < 1e-3, "the tubes overlap by {o} mm³: {drawn:?}");
+    assert_eq!(drawn.keys().collect::<Vec<_>>(), picked.keys().collect::<Vec<_>>());
+    for (name, (v, lo, hi)) in &drawn {
+        let (pv, plo, phi) = picked[name];
+        assert!(rel(pv, *v) < 1e-9 && near3(plo, *lo) && near3(phi, *hi), "{name}: drawn {drawn:?} picked {picked:?}");
+    }
+    assert_eq!(drawn_faces, picked_faces);
+}
+
+/// Each body as `name volume min max`, the numbers exactly as `{:?}` gives them, sorted.
+fn exactly(s: &mut Session) -> Vec<String> {
+    let mut out: Vec<String> = bodies(s).into_iter().map(|b| format!("{} {:?} {:?} {:?}", b.0, b.1, b.2, b.3)).collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn frames_without_overlaps_are_unchanged() {
+    // Built before overlaps were resolved (frame-crossings c522549e9), and recorded: an Auto X brace, a Mitre
+    // cross-member with Fit Ends, two pairs mitred at a point, a later frame fitted to an earlier one, a None X
+    // brace (which keeps its overlaps) and an Auto 3D sketch.
+    let mut designs: Vec<(&str, Session)> = Vec::new();
+    let mut s = Session::default();
+    x_brace_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": "auto", "names": {"d1": "D1", "d2": "D2"}}));
+    designs.push(("auto x brace", s));
+    let mut s = Session::default();
+    cross_member_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "fit_ends": true}));
+    designs.push(("mitre cross-member", s));
+    let mut s = Session::default();
+    box_frame(&mut s);
+    run(&mut s, "frame.member", json!({"profile": tube(), "pairs": [top_rail(), upright()], "corner": "mitre"}));
+    designs.push(("mitred pairs", s));
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    later_frame(&mut s, 0.0, &[[[300.0, 0.0], [300.0, 400.0]]], 25.0, true);
+    designs.push(("fitted to an earlier frame", s));
+    let mut s = Session::default();
+    x_brace_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "none"}));
+    designs.push(("none x brace", s));
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Tower"}));
+    run(&mut s, "sketch.options", json!({"sketch_3d": true}));
+    run(&mut s, "sketch.line3d", json!({"points": [[0, 0, 0], [0, 0, 1500], [600, 0, 1500]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Tower", "profile": tube(), "corner": "auto"}));
+    designs.push(("auto 3d sketch", s));
+    let got: Vec<(&str, Vec<String>)> = designs.into_iter().map(|(what, mut s)| (what, exactly(&mut s))).collect();
+    let want: &[(&str, &[&str])] = &[
+        (
+            "auto x brace",
+            &[
+                "D1 279714.87382276944 [19.999999999999993, 19.999999999999964, -20.0] [580.0000000000001, 380.00000000000006, 20.0]",
+                "D2 130237.43691138434 [19.999999999999993, 200.00000000000003, -20.0] [299.99999999999994, 380.0, 20.0]",
+                "D2 · D1 130237.43691138568 [300.0, 20.0, -20.0] [580.0, 199.99999999999997, 20.0]",
+                "Rect Tube 40x40x3 (2) 159840.00000000076 [580.0, 20.0, -20.0] [620.0, 380.0, 20.0]",
+                "Rect Tube 40x40x3 (3) 284160.0 [-19.999999999999773, 380.0, -20.0] [620.0, 420.0, 20.0]",
+                "Rect Tube 40x40x3 (4) 159839.99999999913 [-20.0, 20.0, -20.0] [20.0, 380.0, 20.0]",
+                "Rect Tube 40x40x3 284160.0 [-20.0, -20.0, -20.0] [620.0, 20.0, 20.0]",
+            ],
+        ),
+        (
+            "mitre cross-member",
+            &[
+                "Rect Tube 40x40x3 (2) 168329.20103018565 [580.0, -20.000000000000455, -20.0] [620.0, 419.9999999999998, 20.0]",
+                "Rect Tube 40x40x3 (3) 252493.8019965837 [-20.000000000000227, 380.0, -20.0] [619.9999999999989, 420.0, 20.0]",
+                "Rect Tube 40x40x3 (4) 168329.20103018687 [-20.0, -20.0, -20.0] [20.0, 420.0, 20.0]",
+                "Rect Tube 40x40x3 (5) 151496.2808549591 [280.0, 20.0, -20.0] [320.0, 379.99999999999994, 20.0]",
+                "Rect Tube 40x40x3 252493.80199658455 [-19.999999999999773, -20.0, -20.0] [620.0, 20.0, 20.0]",
+            ],
+        ),
+        (
+            "mitred pairs",
+            &[
+                "Box 96000000.0 [0.0, 0.0, 0.0] [600.0, 400.0, 400.0]",
+                "Rect Tube 40x40x3 (2) 168329.2006366101 [580.0, -20.0, 0.0] [620.0, 20.0, 420.0000000000002]",
+                "Rect Tube 40x40x3 252493.8017773667 [0.0, -20.0, 380.0] [619.9999999999995, 20.0, 420.0]",
+            ],
+        ),
+        (
+            "fitted to an earlier frame",
+            &[
+                "A (2) 168329.20145972772 [580.0, 0.0, -20.0] [620.0, 400.0, 20.0]",
+                "A (3) 252493.8012062296 [0.0, 380.0, -20.0] [600.0, 420.0, 20.0]",
+                "A (4) 168329.20145972774 [-20.0, 0.0, -20.0] [20.0, 400.0, 20.0]",
+                "A 252493.80120622925 [0.0, -20.0, -20.0] [600.0, 20.0, 20.0]",
+                "B 62531.68038144873 [287.5, 20.0, -12.5] [312.5, 380.0, 12.5]",
+            ],
+        ),
+        (
+            "none x brace",
+            &[
+                "Rect Tube 40x40x3 (2) 168329.20145972772 [580.0, 0.0, -20.0] [620.0, 400.0, 20.0]",
+                "Rect Tube 40x40x3 (3) 252493.8012062296 [0.0, 380.0, -20.0] [600.0, 420.0, 20.0]",
+                "Rect Tube 40x40x3 (4) 168329.20145972774 [-20.0, 0.0, -20.0] [20.0, 400.0, 20.0]",
+                "Rect Tube 40x40x3 (5) 303459.78309394524 [-11.094003924504584, -16.641005886756876, -20.0] [611.0940039245046, 416.6410058867569, 20.0]",
+                "Rect Tube 40x40x3 (6) 303459.783093863 [-11.094003924504582, -16.641005886756886, -20.00000000000002] [611.0940039245046, 416.6410058867569, 20.0]",
+                "Rect Tube 40x40x3 252493.80120622925 [0.0, -20.0, -20.0] [600.0, 20.0, 20.0]",
+            ],
+        ),
+        (
+            "auto 3d sketch",
+            &[
+                "Rect Tube 40x40x3 (2) 252493.80179954885 [-19.999999999999773, -20.0, 1480.0] [600.0, 20.0, 1520.0]",
+                "Rect Tube 40x40x3 631234.5013588069 [-20.0, -20.0, 0.0] [20.0, 20.0, 1520.0]",
+            ],
+        ),
+    ];
+    assert_eq!(got.len(), want.len(), "{got:#?}");
+    for ((what, g), (w_what, w)) in got.iter().zip(want) {
+        assert_eq!(what, w_what);
+        assert_eq!(g, &w.iter().map(|l| l.to_string()).collect::<Vec<_>>(), "{what}");
+    }
+}
+
 /// A Locost-sized design (about 60 tubes over four Frame Members, all Auto with fit_ends), timed through a full
 /// evaluation, which it prints (no time is asserted). Run on demand: `cargo test ... locost_sized_design_timing --
 /// --ignored --nocapture`.

@@ -33,8 +33,10 @@ const STRAIGHT_TOL: f64 = 1e-3;
 
 /// Evaluate a `FrameMember` feature: one new body per member (a line, a pair, or under every type but None each
 /// piece of a line cut where tubes cross, [`pieced`], but for a piece left wholly inside the tubes it is fitted to),
-/// each named ([`member_names`], or by position for a copy whose `body_names` were set). An error about a piece names it by
-/// its line and the tube it starts past ([`pieces_by_line`]).
+/// each named ([`member_names`], or by position for a copy whose `body_names` were set). Under every type but None, a
+/// tube that still overlaps another is notched or split where it gives way ([`resolve_overlaps`]), a later piece named
+/// `<its name> · <the other's>`. An error about a piece names it by its line and the tube it starts past
+/// ([`pieces_by_line`]).
 pub(super) fn evaluate(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut ModelState) -> Result<()> {
     built(doc, vals, f, st).map_err(|e| pieces_by_line(st, f, e))
 }
@@ -62,8 +64,27 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
     // The plan that cuts the lines into pieces: Auto's, or the crossings' of a Mitre, Butt or Coped frame.
     let cutting = plan.as_ref().or(crossing.as_ref());
     let parts = cutting.map(|p| later_pieces(&p.pieces, &segments)).unwrap_or_default();
+    // Every type but None resolves the tubes that still overlap ([`resolve_overlaps`]): the overrides that name an
+    // overlap, and each member's line (a piece's, its line's).
+    let resolving = !corner.is_none();
+    let overlap_overrides: Vec<usize> =
+        corners.iter().enumerate().filter(|(_, o)| resolving && overlap_override(&segments, &planes, o)).map(|(k, _)| k).collect();
+    let lines: Vec<String> = match cutting {
+        Some(p) => p.pieces.iter().map(|pc| segments.get(pc.parent).map_or_else(|| pc.id.clone(), |s| s.0.clone())).collect(),
+        None => segments.iter().map(|s| s.0.clone()).collect(),
+    };
     let (segments, planes, drawn) = pieced(segments, planes, drawn, cutting)?;
     let crossed = cutting.map(cut_pieces).unwrap_or_default();
+    // Each member's place in the laying order: a piece takes its line's.
+    let mut laying = vec![usize::MAX; if resolving { segments.len() } else { 0 }];
+    if resolving {
+        let ranked = cutting.map_or_else(|| frame_layout::ranks(&segments, &planes, &drawn), |p| p.ranks.clone());
+        for (i, r) in ranked.iter().enumerate() {
+            if let Some(p) = laying.get_mut(r.member) {
+                *p = i;
+            }
+        }
+    }
     let (axes, plain) = section_axes(&segments, &planes, plan.as_ref(), turn)?;
     let (placed, unreversed) = (placer(&axes, at), unreversed_placer(&plain, at));
     // Fit Ends to Earlier Frames (None never fits): the earlier Frame Members' tubes and their copies, as cutting
@@ -118,6 +139,8 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
             *p = i;
         }
     }
+    // The plan the cut ends are worked from, for the tools of tubes that overlap others (with Fit Ends, `own_ends`).
+    let ends_plan = if resolving && !fits { plan.clone().or_else(|| crossing.clone()) } else { None };
     // Only an Auto frame builds by Auto's rules; an Auto override elsewhere is the frame's own type (corner_ends).
     let (mut cut, dropped) = if let Some(plan) = plan {
         auto_members(&segments, &regions, (&placed, &unreversed), plan, (sketch_x, &drawn))?
@@ -153,10 +176,30 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
     let near = |k: usize, p: Vec3| near_with(&own_ends, k, p);
     let tool = |k: usize| member_tool(&segments, &regions, &placed, &own_ends, k);
     fit_to_earlier(&mut made, &segments, &unjointed, &earlier, &mut Own { laid, near: &near, tool: &tool, tools }, &middle, &crossed)?;
+    let mut split = if resolving {
+        let mut ends: Option<Vec<[Option<CutEnd>; 2]>> = None;
+        let mut tool = |k: usize| -> Result<Traced> {
+            if ends.is_none() {
+                let plan = ends_plan.clone();
+                ends = Some(if fits {
+                    own_ends.clone()
+                } else {
+                    frame_ends(&f.kind, &segments, &regions, &placed, (plan, &planes), (sketch_x, &drawn))?
+                });
+            }
+            member_tool(&segments, &regions, &placed, ends.as_deref().unwrap_or_default(), k)
+        };
+        let overrides = (corners.as_slice(), overlap_overrides.as_slice());
+        resolve_overlaps(&mut made, &segments, (&laying, &lines), overrides, &earlier, &mut tool)?
+    } else {
+        Vec::new()
+    };
+    let mut later_of = |m: usize| split.get_mut(m).map(std::mem::take).unwrap_or_default();
     if !f.body_names.is_empty() {
         // A copy (pasted, or in a copied component) names its members by position, as any
         // feature's bodies.
-        for (k, t) in made.into_iter().flatten().enumerate() {
+        let all: Vec<Traced> = made.into_iter().enumerate().flat_map(|(m, t)| t.into_iter().chain(later_of(m).into_iter().map(|p| p.1))).collect();
+        for (k, t) in all.into_iter().enumerate() {
             let name = new_name(st, f, k);
             st.bodies.push(ModelBody::traced_new(name, t, f.id));
         }
@@ -164,11 +207,184 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
     }
     let base = body_name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map_or(description, str::to_string);
     let ids: Vec<String> = segments.into_iter().map(|(id, _, _)| id).collect();
+    let named = member_names(st, &ids, &parts, names, &base);
     // A piece with no body leaves its name unused.
-    for (name, t) in member_names(st, &ids, &parts, names, &base).into_iter().zip(made).filter_map(|(n, t)| Some((n, t?))) {
-        st.bodies.push(ModelBody::traced_new(name, t, f.id));
+    for (m, (name, t)) in named.iter().zip(made).enumerate() {
+        if let Some(t) = t {
+            st.bodies.push(ModelBody::traced_new(name.clone(), t, f.id));
+        }
+        // A later piece of a tube split where another overlaps it: `<its name> · <the other's>`.
+        for (by, t) in later_of(m) {
+            let x = match by {
+                Cutter::Own(k) => named.get(k).cloned(),
+                Cutter::Earlier(e) => earlier.get(e).map(|e| e.0.clone()),
+            };
+            let joined = format!("{name} · {}", x.unwrap_or_default());
+            let free = |n: &String| st.body(n).is_none() && !named.contains(n);
+            let piece = (1..=MAX_MEMBERS + 1).map(|k| if k == 1 { joined.clone() } else { format!("{joined} ({k})") }).find(free);
+            st.bodies.push(ModelBody::traced_new(piece.unwrap_or(joined), t, f.id));
+        }
     }
     Ok(())
+}
+
+/// What cuts a tube where it overlaps another ([`resolve_overlaps`]): one of this frame's members, or an earlier Frame
+/// Member's tube (an index into the earlier tools).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Cutter {
+    Own(usize),
+    Earlier(usize),
+}
+
+/// Least overlap (mm³) that counts: tubes touching face to face, as fitted ends do, don't overlap.
+const MIN_OVERLAP: f64 = 1e-6;
+
+/// Whether two bodies overlap, `ba` and `bb` their boxes: boxes sharing a volume first, then exact (the kernel's
+/// intersection, of more than [`MIN_OVERLAP`]), never a mesh.
+fn overlapping(a: &kernel::Body, ba: &solidcraft_geom::Aabb3, b: &kernel::Body, bb: &solidcraft_geom::Aabb3) -> bool {
+    let both = ba.intersection(bb);
+    let size = both.max - both.min;
+    // Written as `!(… > …)`, so a box that isn't finite shares nothing.
+    if !(size.x > 1e-6 && size.y > 1e-6 && size.z > 1e-6) {
+        return false;
+    }
+    // ponytail: a pair the kernel can't intersect or measure is left overlapping, as the frame built before; report it
+    // if one turns up.
+    matches!(kernel::boolean(a, b, BoolOp::Intersect), Ok(Some(c)) if kernel::measure_mass(&c).is_ok_and(|m| m.volume > MIN_OVERLAP))
+}
+
+/// Each member's later pieces where tubes overlapping it split it, each with the tube that cut it at its start.
+type Split = Vec<Vec<(Cutter, Traced)>>;
+
+/// The frame's tubes that still overlap once corners, crossings and fits are made (#4003), resolved: tubes in no
+/// sketch plane crossing others, and tubes that only clip each other where their lines miss. `made`: each member as
+/// built (`None`: no body). Of two members that overlap and that no end joins ([`ends_meet`]; never two pieces of one
+/// line), the later in the laying order (`place`) gives way, or the earlier where an override names their two lines
+/// (`lines`) with Flip; with Fit Ends, each member also gives way to every earlier Frame Member's tube it overlaps
+/// (`earlier`, which never change). The member giving way is cut by the other's filled tool (`tool(k)`,
+/// [`member_tool`]; the earlier tool itself), so only over their overlap. One piece left is a notch, in `made` as
+/// before; two or more, a split: the first from its line's drawn start stays in `made`, and the others come back in
+/// order along it, each with the tube cut at its start; a piece wholly inside the tool is gone. The cut faces are named
+/// `overlap:<tube>:face:<k>`. Every override in `overrides` listed in `pending` (an overlap's,
+/// [`overlap_override`]) must name two members that overlap.
+fn resolve_overlaps(
+    made: &mut [Option<Traced>],
+    segments: &[(String, Vec3, Vec3)],
+    (place, lines): (&[usize], &[String]),
+    (overrides, pending): (&[CornerOverride], &[usize]),
+    earlier: &[(String, Traced)],
+    tool: &mut dyn FnMut(usize) -> Result<Traced>,
+) -> Result<Split> {
+    let n = segments.len();
+    let bounds: Vec<Option<solidcraft_geom::Aabb3>> = made.iter().map(|t| t.as_ref().and_then(|t| t.body.exact_bounds().ok())).collect();
+    let earlier_bounds: Vec<Option<solidcraft_geom::Aabb3>> = earlier.iter().map(|(_, t)| t.body.exact_bounds().ok()).collect();
+    let body = |m: usize| made.get(m).and_then(Option::as_ref).zip(bounds.get(m).copied().flatten());
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&m| (place.get(m).copied().unwrap_or(usize::MAX), m));
+    let line = |m: usize| lines.get(m).map_or("", String::as_str);
+    let names = |o: &CornerOverride, i: usize, j: usize| match o.members.as_slice() {
+        [a, b] => (a == line(i) && b == line(j)) || (a == line(j) && b == line(i)),
+        _ => false,
+    };
+    // What cuts each member, in order: earlier frames' tubes, laid before any of this frame's, then its own by place.
+    let mut cuts: Vec<Vec<Cutter>> = vec![Vec::new(); n];
+    for &i in &order {
+        let (Some((t, bi)), Some(slot)) = (body(i), cuts.get_mut(i)) else { continue };
+        for (e, (_, tool)) in earlier.iter().enumerate() {
+            if earlier_bounds.get(e).copied().flatten().is_some_and(|be| overlapping(&t.body, &bi, &tool.body, &be)) {
+                slot.push(Cutter::Earlier(e));
+            }
+        }
+    }
+    let mut used = vec![false; overrides.len()];
+    for (k, &i) in order.iter().enumerate() {
+        for &j in order.get(..k).unwrap_or_default() {
+            if line(i) == line(j) || ends_meet(segments, i, j) {
+                continue;
+            }
+            let (Some((ti, bi)), Some((tj, bj))) = (body(i), body(j)) else { continue };
+            if !overlapping(&ti.body, &bi, &tj.body, &bj) {
+                continue;
+            }
+            let mut flip = false;
+            for (u, o) in used.iter_mut().zip(overrides).filter(|(_, o)| names(o, i, j)) {
+                *u = true;
+                flip |= o.flip;
+            }
+            let (giving, by) = if flip { (j, i) } else { (i, j) };
+            if let Some(c) = cuts.get_mut(giving) {
+                c.push(Cutter::Own(by));
+            }
+        }
+    }
+    if pending.iter().any(|&k| used.get(k) == Some(&false)) {
+        return Err(DocError::Invalid("A corner override is not at a corner of the frame".into()));
+    }
+    // Each cutting tool once, its faces named for the tube it is.
+    let mut tools: BTreeMap<Cutter, Traced> = BTreeMap::new();
+    let mut out: Split = (0..n).map(|_| Vec::new()).collect();
+    let mut members = made.iter().flatten().count();
+    for (m, by) in cuts.iter().enumerate().filter(|(_, c)| !c.is_empty()) {
+        let (Some(slot), Some((_, a, b))) = (made.get_mut(m), segments.get(m)) else { continue };
+        let Some(member) = slot.take() else { continue };
+        let d = *b - *a;
+        let mut pieces: Vec<(Option<Cutter>, Traced)> = vec![(None, member)];
+        for &c in by {
+            let cutting = match tools.entry(c) {
+                std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    let (x, body) = match c {
+                        Cutter::Own(k) => (segments.get(k).map_or("", |s| s.0.as_str()), tool(k)?.body),
+                        Cutter::Earlier(k) => {
+                            let (x, t) = earlier.get(k).ok_or_else(|| DocError::Invalid(format!("no earlier tube {k}")))?;
+                            (x.as_str(), t.body.clone())
+                        }
+                    };
+                    let roles = (0..body.face_count()).map(|k| vec![format!("overlap:{x}:face:{k}")]).collect();
+                    e.insert(Traced::made(body, Some(roles)))
+                }
+            };
+            let cutting = &*cutting;
+            let reach = cutting.body.exact_bounds()?;
+            let mut next = Vec::with_capacity(pieces.len() + 1);
+            for (start, piece) in pieces {
+                if !piece.body.exact_bounds()?.meets(&reach) {
+                    next.push((start, piece));
+                    continue;
+                }
+                // Nothing left: the piece lies wholly inside the tool.
+                let Some(cut) = kernel::boolean(&piece.body, &cutting.body, BoolOp::Cut)? else { continue };
+                let cut = Traced::step(cut, &[&piece, cutting]);
+                let lumps = cut.body.lumps()?;
+                if lumps.len() < 2 {
+                    next.push((start, cut));
+                    continue;
+                }
+                let lineages = crate::lineage::Lineage::pieces(&cut.body, cut.lineage.as_ref(), &lumps);
+                let mut along = Vec::with_capacity(lumps.len());
+                for (body, lineage) in lumps.into_iter().zip(lineages) {
+                    // Where it lies along the line: its box's centre, exact and cheap.
+                    let at = body.exact_bounds()?.center();
+                    along.push(((at - *a).dot(d), Traced { body, lineage, recipe: None }));
+                }
+                along.sort_by(|p, q| p.0.total_cmp(&q.0));
+                // The first from the drawn start keeps the piece's own start; each other starts at this tube.
+                next.extend(along.into_iter().enumerate().map(|(k, (_, t))| (if k == 0 { start } else { Some(c) }, t)));
+            }
+            pieces = next;
+            if members + pieces.len() > MAX_MEMBERS + 1 {
+                return Err(too_many_pieces());
+            }
+        }
+        let mut pieces = pieces.into_iter();
+        *slot = pieces.next().map(|p| p.1);
+        let later: Vec<(Cutter, Traced)> = pieces.map(|(start, t)| (start.unwrap_or(Cutter::Own(m)), t)).collect();
+        members += later.len();
+        if let Some(o) = out.get_mut(m) {
+            *o = later;
+        }
+    }
+    Ok(out)
 }
 
 /// The one body of an extruded member.
@@ -225,9 +441,11 @@ fn corner_ends(
         })
         .collect();
     let mut finishes = vec![finish; corners.len()];
-    // A crossing's override (its Flip used by the crossing plan) names no corner.
+    // A crossing's override (its Flip used by the crossing plan) names no corner, nor does an overlap's (None leaves
+    // overlaps, so names none).
     let crossing_override = |k: usize| crossing.is_some_and(|p| p.crossing_overrides.contains(&k));
-    for o in overrides.iter().enumerate().filter(|(k, _)| !crossing_override(*k)).map(|(_, o)| o) {
+    let named = |(k, o): &(usize, &CornerOverride)| !crossing_override(*k) && (finish.0.is_none() || !overlap_override(segments, planes, o));
+    for o in overrides.iter().enumerate().filter(named).map(|(_, o)| o) {
         // Two members: the corner they meet at. Three or more are an Auto frame's alone (which never comes here).
         let [a, b] = o.members.as_slice() else {
             if o.members.len() < 2 {
@@ -449,8 +667,39 @@ fn plans(
     if overrides.iter().any(|o| o.members.len() < 2) {
         return Err(DocError::Invalid("A corner override names at least two members".into()));
     }
+    // An overlap's override names no point of the plan ([`resolve_overlaps`] checks it).
+    let overrides: Vec<CornerOverride> = overrides.iter().filter(|o| !overlap_override(segments, planes, o)).cloned().collect();
     // One feature's members share one section.
-    frame_layout::plan(segments, planes, drawn, &|_, _| true, overrides).map(|p| (Some(p), None))
+    frame_layout::plan(segments, planes, drawn, &|_, _| true, &overrides).map(|p| (Some(p), None))
+}
+
+/// Whether an end of member i or j lies on the other's line: they meet at a corner, a fit or where a crossing cuts
+/// one of them, which joins them there.
+fn ends_meet(segments: &[(String, Vec3, Vec3)], i: usize, j: usize) -> bool {
+    let tol = frame_corners::CORNER_TOL;
+    let (Some((_, a, b)), Some((_, c, d))) = (segments.get(i), segments.get(j)) else { return false };
+    a.dist_to_segment(*c, *d) <= tol || b.dist_to_segment(*c, *d) <= tol || c.dist_to_segment(*a, *b) <= tol || d.dist_to_segment(*a, *b) <= tol
+}
+
+/// Whether override `o` names two of `segments` that no end joins ([`ends_meet`]) and that don't cross in one sketch
+/// plane (a planar crossing's): an overlap's, saying which of the two gives way where their tubes overlap
+/// ([`resolve_overlaps`]), never a corner's or a crossing's.
+fn overlap_override(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], o: &CornerOverride) -> bool {
+    let [a, b] = o.members.as_slice() else { return false };
+    let at = |id: &String| segments.iter().position(|s| s.0 == *id);
+    let (Some(i), Some(j)) = (at(a), at(b)) else { return false };
+    if i == j || ends_meet(segments, i, j) {
+        return false;
+    }
+    let planar = planes.get(i).is_some_and(Option::is_some) && planes.get(j).is_some_and(Option::is_some);
+    let cross = || match (segments.get(i), segments.get(j)) {
+        (Some((_, a, b)), Some((_, c, d))) => {
+            let (p, q) = solidcraft_geom::mesh_distance::closest_on_segments(*a, *b, *c, *d);
+            p.dist(q) <= frame_corners::CORNER_TOL
+        }
+        _ => false,
+    };
+    !(planar && cross())
 }
 
 /// The fits of `plan` at a piece's end where its line is cut: fitted to the tube that stays whole there and the ends
