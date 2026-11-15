@@ -627,10 +627,10 @@ pub(super) fn sheet_eval(
                     return Err(DocError::Invalid("the contour flange bend radius must be non-negative".into()));
                 }
             }
-            // `reverse` mirrors the sketch (older designs); with an orientation saved it is not used.
-            let legacy_reverse = *reverse && orientation.is_none();
-            let plane = if legacy_reverse { Plane { origin: ss.plane.origin, x: ss.plane.x, y: ss.plane.y * -1.0 } } else { ss.plane };
-            let segs: Vec<Seg2> = if legacy_reverse {
+            // `reverse` (Other side) mirrors the sketch, taking the width to the other side of
+            // its plane, with an orientation saved or not.
+            let plane = if *reverse { Plane { origin: ss.plane.origin, x: ss.plane.x, y: ss.plane.y * -1.0 } } else { ss.plane };
+            let segs: Vec<Seg2> = if *reverse {
                 segs.iter()
                     .map(|s| match *s {
                         Seg2::Arc { center, radius, start, sweep } => {
@@ -645,7 +645,7 @@ pub(super) fn sheet_eval(
             let orientation = orientation.as_deref().unwrap_or("side1");
             // Mirroring the sketch swaps the material side too.
             let name = new_name(st, f, 0);
-            let sh = sheet::contour_flange_path(&name, &r.name, &rv, &plane, &segs, w, orientation, *symmetric, *flip != legacy_reverse)?;
+            let sh = sheet::contour_flange_path(&name, &r.name, &rv, &plane, &segs, w, orientation, *symmetric, *flip != *reverse)?;
             let solid = sh.solid()?;
             st.bodies.push(ModelBody::new(name, solid, f.id));
             st.sheets.push(sh);
