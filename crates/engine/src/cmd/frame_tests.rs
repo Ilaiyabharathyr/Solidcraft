@@ -3135,9 +3135,9 @@ fn three_ends_at_a_point_take_their_lines_laying_order_past_a_crossing() {
 fn a_post_ending_where_a_mitre_x_brace_crosses_is_fitted() {
     // The X brace (`assert_x_brace_split`) and a post p (300, 0)…(300, 200) ending where the diagonals cross. As
     // under Auto, the post (laid after them) is fitted there to d1 and d2's two pieces, whose filled tubes cover
-    // y ≥ 200 − 20√13/3 − (2/3)|x − 300| = 175.963 − (2/3)|x − 300| over it: its box x 280…320, y 0…175.963 (its
-    // foot on the bottom's middle is left square), and A·175.963 less the V, 2·(2/3)·(6·17²/2 + 40·(20² − 17²)/2)
-    // = 4116. The sides, d1 and d2's split are the X brace's.
+    // y ≥ 200 − 20√13/3 − (2/3)|x − 300| = 175.963 − (2/3)|x − 300| over it; its foot, on the bottom's middle, is
+    // fitted to the bottom (ruling O1), flat on its face y = 20. Its box x 280…320, y 20…175.963, and A·155.963 less
+    // the V, 2·(2/3)·(6·17²/2 + 40·(20² − 17²)/2) = 4116. The sides, d1 and d2's split are the X brace's.
     let mut s = Session::default();
     run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
     run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]}));
@@ -3156,10 +3156,11 @@ fn a_post_ending_where_a_mitre_x_brace_crosses_is_fitted() {
     }
     let top = 200.0 - 20.0 * 13f64.sqrt() / 3.0;
     let p = measured(&mut s, "P");
-    assert!(rel(p.1, SQUARE_TUBE_AREA * top - 4116.0) < 1e-6 && near3(p.2, [280.0, 0.0, -20.0]) && near3(p.3, [320.0, top, 20.0]), "{p:?}");
-    let i = run(&mut s, "inspect.interference", json!({"bodies": ["P", "D1", "D2", "D2 · D1"]}));
+    assert!(rel(p.1, SQUARE_TUBE_AREA * (top - 20.0) - 4116.0) < 1e-6 && near3(p.2, [280.0, 20.0, -20.0]) && near3(p.3, [320.0, top, 20.0]), "{p:?}");
+    let bottom = bodies(&mut s).into_iter().find(|b| b.3[1] < 21.0 && b.2[0] < 0.0).unwrap().0;
+    let i = run(&mut s, "inspect.interference", json!({"bodies": ["P", "D1", "D2", "D2 · D1", bottom]}));
     let o: f64 = i["interferences"].as_array().map_or(0.0, |all| all.iter().map(|x| f(&x["volume_mm3"])).sum());
-    assert!(o < 1e-3, "the post and the diagonals overlap by {o} mm³");
+    assert!(o < 1e-3, "the post, the diagonals and the bottom overlap by {o} mm³");
 }
 
 #[test]
@@ -4367,6 +4368,40 @@ fn a_corner_on_an_earlier_frames_corner_is_free() {
 
 // ---------------------------------------------------------------------------------------------
 // Tubes that cross or clip in 3D are split or notched (#4003)
+
+#[test]
+fn a_pair_brace_ending_on_a_mitre_rails_middle_is_fitted_to_it() {
+    // Ruling O1: a point-pair post (300, 0, 0)…(300, 0, 400) stands on the bottom rail's middle, Fit Ends off. Its
+    // foot is fitted to the rail (filled, squared: z ≤ 20 there), so it runs z 20…400, A·380; the rail and the other
+    // sides are the plain Mitre rectangle's.
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    points(&mut s, &[("N", [300.0, 0.0, 0.0]), ("U", [300.0, 0.0, 400.0])]);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "pairs": [pair("N", "U")], "profile": tube(), "corner": "mitre", "body_name": "R"}));
+    let bs = bodies(&mut s);
+    let post = bs.iter().find(|b| b.3[2] > 100.0).unwrap_or_else(|| panic!("{bs:?}")).clone();
+    assert_tube(&post, [280.0, -20.0, 20.0], [320.0, 20.0, 400.0], 380.0);
+    assert_same_tubes(&volumes_and_boxes(&mut s, &[post.0.as_str()]), &plain_rectangle(tube(), "mitre"), "sides");
+    let o = overlap_all(&mut s);
+    assert!(o < 1e-3, "the frame overlaps by {o} mm³: {bs:?}");
+}
+
+#[test]
+fn a_sketch_post_ending_on_a_butt_sides_middle_is_fitted_to_it() {
+    // Ruling O1: the post (300, 0)…(300, 200) of a Butt rectangle ends on the bottom side's middle, Fit Ends off: it
+    // is fitted flat to the side's face y = 20, running y 20…200, A·180; the sides are the plain Butt rectangle's.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]}));
+    run(&mut s, "sketch.line", json!({"points": [[300, 0], [300, 200]], "ids": ["p"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "butt", "names": {"p": "P"}}));
+    let bs = bodies(&mut s);
+    assert_tube(body_named(&bs, "P"), [280.0, 20.0, -20.0], [320.0, 200.0, 20.0], 180.0);
+    assert_same_tubes(&volumes_and_boxes(&mut s, &["P"]), &plain_rectangle(tube(), "butt"), "sides");
+    let o = overlap_all(&mut s);
+    assert!(o < 1e-3, "the frame overlaps by {o} mm³: {bs:?}");
+}
 
 /// Rail `pair1` (0, 0, 0)…(600, 0, 0) and brace `pair2` (300, −200, `z`)…(300, 200, `z`) in 40 × 40 × 3 tube, under
 /// `corner`, named `T` and `T (2)`, with `more` added to the command.

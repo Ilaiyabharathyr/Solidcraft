@@ -141,6 +141,8 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
     }
     // The plan the cut ends are worked from, for the tools of tubes that overlap others (with Fit Ends, `own_ends`).
     let ends_plan = if resolving && !fits { plan.clone().or_else(|| crossing.clone()) } else { None };
+    // The pairs a corner, crossing or fit joins: no overlap between them is resolved.
+    let joined = if resolving { joints(&segments, &planes, &drawn, plan.as_ref(), crossing.as_ref()) } else { HashSet::new() };
     // Only an Auto frame builds by Auto's rules; an Auto override elsewhere is the frame's own type (corner_ends).
     let (mut cut, dropped) = if let Some(plan) = plan {
         auto_members(&segments, &regions, (&placed, &unreversed), plan, (sketch_x, &drawn))?
@@ -190,7 +192,7 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
             member_tool(&segments, &regions, &placed, ends.as_deref().unwrap_or_default(), k)
         };
         let overrides = (corners.as_slice(), overlap_overrides.as_slice());
-        resolve_overlaps(&mut made, &segments, (&laying, &lines), overrides, &earlier, &mut tool)?
+        resolve_overlaps(&mut made, &segments, (&laying, &lines, &joined), overrides, &earlier, &mut tool)?
     } else {
         Vec::new()
     };
@@ -258,8 +260,8 @@ type Split = Vec<Vec<(Cutter, Traced)>>;
 
 /// The frame's tubes that still overlap once corners, crossings and fits are made (#4003), resolved: tubes in no
 /// sketch plane crossing others, and tubes that only clip each other where their lines miss. `made`: each member as
-/// built (`None`: no body). Of two members that overlap and that no end joins ([`ends_meet`]; never two pieces of one
-/// line), the later in the laying order (`place`) gives way, or the earlier where an override names their two lines
+/// built (`None`: no body). Of two members that overlap and that nothing joins (`joined`, [`joints`]; never two pieces
+/// of one line), the later in the laying order (`place`) gives way, or the earlier where an override names their two lines
 /// (`lines`) with Flip; with Fit Ends, each member also gives way to every earlier Frame Member's tube it overlaps
 /// (`earlier`, which never change). The member giving way is cut by the other's filled tool (`tool(k)`,
 /// [`member_tool`]; the earlier tool itself), so only over their overlap. One piece left is a notch, in `made` as
@@ -270,7 +272,7 @@ type Split = Vec<Vec<(Cutter, Traced)>>;
 fn resolve_overlaps(
     made: &mut [Option<Traced>],
     segments: &[(String, Vec3, Vec3)],
-    (place, lines): (&[usize], &[String]),
+    (place, lines, joined): (&[usize], &[String], &HashSet<(usize, usize)>),
     (overrides, pending): (&[CornerOverride], &[usize]),
     earlier: &[(String, Traced)],
     tool: &mut dyn FnMut(usize) -> Result<Traced>,
@@ -299,7 +301,7 @@ fn resolve_overlaps(
     let mut used = vec![false; overrides.len()];
     for (k, &i) in order.iter().enumerate() {
         for &j in order.get(..k).unwrap_or_default() {
-            if line(i) == line(j) || ends_meet(segments, i, j) {
+            if line(i) == line(j) || joined.contains(&(i.min(j), i.max(j))) {
                 continue;
             }
             let (Some((ti, bi)), Some((tj, bj))) = (body(i), body(j)) else { continue };
@@ -410,7 +412,8 @@ type Tie<'a> = (Option<Vec3>, &'a [usize]);
 
 /// Stage 1's ends ([`frame_corners::find_corners`], each corner finished as the frame or its override says), and under
 /// Mitre, Butt and Coped those at each point where three or more members end ([`crowded`]): its corner finished as the
-/// frame's, every other end there fitted (`(None, 0, false)`, as Auto's), with the fits in laying order. `planes`: each
+/// frame's, every other end there fitted (`(None, 0, false)`, as Auto's), with the fits in laying order, and each end on
+/// another member's middle fitted to it ([`tees`]). `planes`: each
 /// member's plane, for the laying order. `crossing`: the frame's crossings ([`plans`]), whose pieces `segments` are:
 /// each end where a crossing cuts a line is fitted as Auto fits it ([`crossing_fits`]), a piece ranks by its whole
 /// line (its place in the laying order, its line's length for which member of a butt runs through), and a
@@ -469,8 +472,7 @@ fn corner_ends(
         add_corner(&mut out, c, kind.flips(), cuts, segments, regions, placed)?;
     }
     // None leaves every point as it is. No override names a point of three or more ends (Auto's alone).
-    let (crowded, mut fits) = if finish.0.is_none() { (Vec::new(), Vec::new()) } else { crowded(segments, planes, drawn, crossing) };
-    fits.extend(crossing.into_iter().flat_map(|p| crossing_fits(p, segments)).cloned());
+    let (crowded, fits) = if finish.0.is_none() { (Vec::new(), Vec::new()) } else { stage_fits(segments, planes, drawn, crossing) };
     for c in &crowded {
         let cuts = frame_corners::corner_cuts(finish.0, finish.1, c, segments, &length, placed, regions, sketch_x, drawn)?;
         add_corner(&mut out, c, finish.0.flips(), cuts, segments, regions, placed)?;
@@ -517,6 +519,88 @@ fn crowded(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: &[u
     }
     fits.sort_by_key(|f| place(f.member));
     (corners, fits)
+}
+
+/// Under Mitre, Butt and Coped: the corners where three or more members end ([`crowded`]), and every end cut to fit:
+/// there, where a crossing cuts a line ([`crossing_fits`]), and at a T-junction ([`tees`]).
+fn stage_fits(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: &[usize], crossing: Option<&Plan>) -> (Vec<Corner>, Vec<Fit>) {
+    let (corners, mut fits) = crowded(segments, planes, drawn, crossing);
+    fits.extend(crossing.into_iter().flat_map(|p| crossing_fits(p, segments)).cloned());
+    let fitted: HashSet<(usize, bool)> = fits.iter().map(|f| (f.member, f.at_start)).collect();
+    fits.extend(tees(segments, planes, drawn, crossing, &fitted));
+    (corners, fits)
+}
+
+/// Under Mitre, Butt and Coped (#4003 ruling O1), each end of a member lying on another member's middle that nothing
+/// else fits (`fitted`): a T-junction. The member ending there gives way, whatever its place in the laying order and
+/// whether or not Fit Ends is ticked: its end is cut to fit the members passing there and the ends there laid before it
+/// (as [`crowded`] lays them), as Auto fits a T-junction.
+fn tees(
+    segments: &[(String, Vec3, Vec3)],
+    planes: &[MemberPlane],
+    drawn: &[usize],
+    crossing: Option<&Plan>,
+    fitted: &HashSet<(usize, bool)>,
+) -> Vec<Fit> {
+    let tol = frame_corners::CORNER_TOL;
+    let ends: Vec<(usize, bool, Vec3)> = segments.iter().enumerate().flat_map(|(m, (_, a, b))| [(m, true, *a), (m, false, *b)]).collect();
+    // ponytail: every end against every member, O(n²) on at most MAX_MEMBERS; a grid as `meetings` has if it shows.
+    let found: Vec<(usize, bool, Vec3, Vec<usize>)> = ends
+        .iter()
+        .filter(|e| !fitted.contains(&(e.0, e.1)))
+        .filter_map(|&(m, at_start, p)| {
+            let passing: Vec<usize> = (segments.iter().enumerate())
+                .filter(|(k, (_, a, b))| *k != m && p.dist_to_segment(*a, *b) <= tol && p.dist(*a) > tol && p.dist(*b) > tol)
+                .map(|(k, _)| k)
+                .collect();
+            (!passing.is_empty()).then_some((m, at_start, p, passing))
+        })
+        .collect();
+    if found.is_empty() {
+        return Vec::new();
+    }
+    let mut laid = vec![usize::MAX; segments.len()];
+    let ranked = crossing.map_or_else(|| frame_layout::ranks(segments, planes, drawn), |p| p.ranks.clone());
+    for (i, r) in ranked.iter().enumerate() {
+        if let Some(p) = laid.get_mut(r.member) {
+            *p = i;
+        }
+    }
+    let place = |m: usize| (laid.get(m).copied().unwrap_or(usize::MAX), m);
+    found
+        .into_iter()
+        .map(|(m, at_start, p, mut against)| {
+            against.extend(ends.iter().filter(|e| e.0 != m && e.2.dist(p) <= tol && place(e.0) < place(m)).map(|e| e.0));
+            against.sort_by_key(|&k| place(k));
+            against.dedup();
+            Fit { member: m, at_start, against }
+        })
+        .collect()
+}
+
+/// The pairs of members (lower index first) a corner, chain corner, crossing or fit joins (#4003 ruling O1): under
+/// Auto, its `plan`'s; else stage 1's corners and [`stage_fits`] over `crossing`'s pieces. Two members only touching
+/// (an end on the other's line with nothing jointing them) are not joined.
+fn joints(
+    segments: &[(String, Vec3, Vec3)],
+    planes: &[MemberPlane],
+    drawn: &[usize],
+    plan: Option<&Plan>,
+    crossing: Option<&Plan>,
+) -> HashSet<(usize, usize)> {
+    let pair = |a: usize, b: usize| (a.min(b), a.max(b));
+    let fitted = |fits: &[Fit]| fits.iter().flat_map(|f| f.against.iter().map(move |&k| pair(f.member, k))).collect::<Vec<_>>();
+    match plan {
+        Some(p) => {
+            let corners = p.corners.iter().map(|c| pair(c.long.0, c.short.0));
+            corners.chain(p.chained.iter().map(|c| pair(c.a.0, c.b.0))).chain(fitted(&p.fits)).collect()
+        }
+        None => {
+            let (crowded, fits) = stage_fits(segments, planes, drawn, crossing);
+            let corners = frame_corners::find_corners(segments).into_iter().chain(crowded);
+            corners.map(|c| pair(c.ends[0].0, c.ends[1].0)).chain(fitted(&fits)).collect()
+        }
+    }
 }
 
 /// A corner's cuts as [`frame_corners::corner_cuts`] gives them, put into `ends` (each cut end with how far past
@@ -1266,8 +1350,9 @@ fn holds<'a>(p: Vec3, tools: impl IntoIterator<Item = &'a kernel::Body>) -> bool
 /// (claude_fusion `fit`: `pool, more = tubes, mine`). Under Auto (`plan`): every end but those of a jointed corner or
 /// a chained one; the ends fitted to this frame's own tubes (`plan.fits`: T-junctions, the third and later ends at a
 /// point) are not free, as Auto fits them to their own; lone ends and a Free corner's are. Under Mitre, Butt and
-/// Coped: the ends at no corner, free, and those fitted where three or more end ([`crowded`]) or where a crossing cuts
-/// a line (`plan`, the crossings', [`crossing_fits`]), not free. Under None: none. (member, at_start, free).
+/// Coped: the ends at no corner, free, and those fitted where three or more end ([`crowded`]), where a crossing cuts
+/// a line (`plan`, the crossings', [`crossing_fits`]) or on another tube's middle ([`tees`]), not free. Under None:
+/// none. (member, at_start, free).
 fn unjointed_ends(
     f: &FeatureKind,
     segments: &[(String, Vec3, Vec3)],
@@ -1287,10 +1372,9 @@ fn unjointed_ends(
         ),
         _ if *corner == CornerType::None => return Vec::new(),
         crossing => {
-            let (crowded, fits) = crowded(segments, planes, drawn, crossing);
+            let (crowded, fits) = stage_fits(segments, planes, drawn, crossing);
             let corners = frame_corners::find_corners(segments).into_iter().chain(crowded);
-            let fits = fits.iter().chain(crossing.into_iter().flat_map(|p| crossing_fits(p, segments)));
-            (corners.flat_map(|c| c.ends).collect(), fits.map(|f| (f.member, f.at_start)).collect())
+            (corners.flat_map(|c| c.ends).collect(), fits.iter().map(|f| (f.member, f.at_start)).collect())
         }
     };
     (0..segments.len())
