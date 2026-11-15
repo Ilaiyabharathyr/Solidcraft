@@ -1383,8 +1383,20 @@ pub(super) fn member_pins(s: &Session, fid: u64) -> Option<BTreeMap<String, Stri
     let lines = solidcraft_doc::frame::member_line_ids(&result.state, &f.kind).ok()?;
     let made: Vec<String> = result.state.bodies.iter().filter(|b| b.feature == fid).map(|b| b.name.clone()).collect();
     if lines.len() != made.len() {
-        let pinned: BTreeMap<String, String> = lines.iter().filter_map(|l| Some((l.clone(), names.get(l)?.clone()))).collect();
-        let named = f.body_names.is_empty() && made.len() < lines.len() && made.iter().all(|n| pinned.values().filter(|v| *v == n).count() == 1);
+        let mut pinned: BTreeMap<String, String> = lines.iter().filter_map(|l| Some((l.clone(), names.get(l)?.clone()))).collect();
+        if !f.body_names.is_empty() {
+            return None;
+        }
+        // A piece split off where another tube overlaps it (`L>X`) is no member listed: each such body is pinned under
+        // the piece id its name gives ([`solidcraft_doc::frame::member_of_body`]).
+        let unpinned: Vec<&String> = made.iter().filter(|n| !pinned.values().any(|v| v == *n)).collect();
+        for n in unpinned {
+            let id = solidcraft_doc::frame::member_of_body(&result.state, f, n).ok().flatten()?;
+            if pinned.insert(id, n.clone()).is_some() {
+                return None;
+            }
+        }
+        let named = made.iter().all(|n| pinned.values().filter(|v| *v == n).count() == 1);
         return named.then_some(pinned);
     }
     // A feature that names its own members gives each its pinned name when it can, and that name

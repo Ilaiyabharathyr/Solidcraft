@@ -519,7 +519,10 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     }
-    let pinned: BTreeMap<String, String> = ids.iter().cloned().zip(frame::member_names(&st, &ids, &later, &kept, &base)).collect();
+    let mut pinned: BTreeMap<String, String> = ids.iter().cloned().zip(frame::member_names(&st, &ids, &later, &kept, &base)).collect();
+    // A piece split off where another tube overlaps it (`L>X`) is found only as the frame is built: a name given or
+    // kept for it stays pinned under its id.
+    pinned.extend(kept.into_iter().filter(|(id, _)| frame::overlap_parent(&ids, id).is_some()));
     if let FeatureKind::FrameMember { names, .. } = &mut kind {
         *names = pinned;
     }
@@ -569,6 +572,11 @@ fn remove_member(s: &mut Session, p: &Value) -> Result<Value> {
     } else {
         None
     };
+    // A piece split off where another tube overlaps it (`L>X`, found only as the frame is built, so listed nowhere)
+    // goes with its tube L.
+    let known: Vec<String> =
+        parts.as_ref().map_or_else(|| lines.clone(), |(every, _)| every.clone()).into_iter().chain(pairs.iter().map(|p| p.id.clone())).collect();
+    gone = gone.into_iter().map(|m| frame::overlap_parent(&known, &m).cloned().unwrap_or(m)).collect();
     if let Some((every, later)) = parts {
         // Under Auto a tube may be a later piece of a line cut where tubes cross: its whole line goes, once.
         let line_of = |k: usize| later.get(k).copied().flatten().map_or(k, |(l, _)| l);
@@ -591,7 +599,7 @@ fn remove_member(s: &mut Session, p: &Value) -> Result<Value> {
     let had_lines = !lines.is_empty();
     lines.retain(|l| !gone.contains(l.as_str()));
     pairs.retain(|p| !gone.contains(p.id.as_str()));
-    names.retain(|l, _| !gone.contains(l.as_str()));
+    names.retain(|l, _| !gone.contains(l.as_str()) && frame::overlap_parent(&known, l).is_none_or(|l| !gone.contains(l.as_str())));
     // A corner override of a tube taken out names a corner that is gone with it.
     corners.retain(|c| !c.members.iter().any(|m| gone.contains(m.as_str())));
     // `next_pair` stays: a removed pair's id is never given again.

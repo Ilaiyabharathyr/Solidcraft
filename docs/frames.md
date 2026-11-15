@@ -63,9 +63,12 @@ Auto does (see Crossings under Auto below: one stays whole, the others are cut i
 it, with the same piece names, Crossing overrides and Remove Tube), and a tube ending where they cross
 (a post up to the middle of an X brace) is fitted there to the tubes laid before it, as under Auto.
 A piece counts as its whole line wherever tubes are ranked: its line's place in the laying order, and
-its line's length for which member of a butt runs through. Where a member ends on the middle of a
-single other tube, with no crossing there, nothing is cut: it stays as before. None leaves crossing
-tubes overlapping. Two members in line (within 0.01 degrees) stay square whatever the type.
+its line's length for which member of a butt runs through. A tube ending on the middle of another
+(a post standing on a rail, a sketch line, a pair or a 3D-sketch line alike) is always fitted to it,
+whatever Fit Ends to Earlier Frames says and whichever is laid first: the tube whose end lies there
+gives way. Tubes that still overlap after that are notched or split (see Overlaps under Auto below).
+None leaves crossing and overlapping tubes as they are. Two members in line (within 0.01 degrees)
+stay square whatever the type.
 A corner sharper than 5 degrees inside is refused: "Corner at (x, y, z) is too sharp to finish".
 
 - **Mitre**: both members are cut on the plane that bisects the corner.
@@ -183,6 +186,23 @@ Each piece is a tube of its own. The first piece keeps its line's name; a later 
 sticks. **Remove Tube** on a piece removes its whole line. Overrides name lines, never pieces: a
 `corners` entry naming a piece is refused. End Cap and `names` accept pieces.
 
+**Overlaps.** Under Auto, Mitre, Butt and Coped, two tubes of the frame whose solids still overlap
+where no corner, crossing or fit joins them are resolved too: tubes in no sketch plane (pairs, 3D-sketch
+lines) crossing each other or sketch tubes, and tubes that only clip each other where their lines
+miss. The later of the two in laying order gives way (a piece of a crossing takes its line's place);
+it is cut by the other's filled tube, only where they overlap. One piece left is a notch: the tube
+keeps its name. Two or more is a split: the piece from the line's drawn start keeps the name, and each
+later piece is named `<tube's name> · <name of the tube that cut it>`, its id `L>X` (L the tube's
+line or pair id, X the cutting tube's). A piece wholly inside the cutting tube is dropped; one that
+sticks out is kept. With Fit Ends to Earlier Frames, every tube also gives way where it overlaps an
+earlier Frame Member's tube or a copy of one, which never changes (X is then that tube's body name).
+None leaves overlaps as they are. Split pieces behave like crossing pieces: their names are pinned
+once renamed (`names` accepts `L>X`), **Remove Tube** on one removes its whole line or pair, and End
+Cap goes on a piece's line end but refuses the end where it was cut ("not an open end"). To make the
+other tube give way, add a `corners` entry naming the two tubes' line or pair ids with Flip; its type
+is ignored, and an entry for two tubes that no longer overlap fails the frame with "A corner override
+is not at a corner of the frame".
+
 **Fit Ends to Earlier Frames** (`fit_ends`, ticked by default in the dialog, false when absent)
 fits the tubes' free ends to the tubes of Frame Members made earlier in the timeline, to the Move,
 Mirror and Pattern copies of those, and to this frame's own tubes laid before them. A corner that lies
@@ -202,8 +222,11 @@ lives on each override row.
 {"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "rect_tube", "width": 25, "height": 25, "wall": 2}, "corner": "auto", "fit_ends": true}}
 ```
 
-**Known limits of Auto** (and of crossings under Mitre, Butt and Coped). Crossings that involve
-point-to-point or 3D-sketch tubes still overlap. When
+**Known limits of Auto** (and of crossings and overlaps under Mitre, Butt and Coped). Which tube
+gives way at an overlap can be set only through the command's `corners`: these overlaps usually have
+no sketch point to pick, so the dialog has no row for them. A tube passing through another at a very
+shallow angle is cut along the whole of their overlap, so it may lose a long sliver, as cut to fit
+does elsewhere. When
 a crossing first cuts a line, references to that line's far end (an End Cap, a face pick) stay on the
 line's first piece, which no longer has that end, and fail with an error. A short piece past a
 crossing keeps only what lies past the tube that stays whole: a stub wholly inside that tube is

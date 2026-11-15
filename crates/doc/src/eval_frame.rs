@@ -215,16 +215,19 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
         if let Some(t) = t {
             st.bodies.push(ModelBody::traced_new(name.clone(), t, f.id));
         }
-        // A later piece of a tube split where another overlaps it: `<its name> · <the other's>`.
+        // A later piece of a tube split where another overlaps it, `L>X` (X: the other's member id, or an earlier
+        // tube's body name): its pinned name, else `<its name> · <the other's>` ([`member_of_body`] finds it by either).
         for (by, t) in later_of(m) {
-            let x = match by {
-                Cutter::Own(k) => named.get(k).cloned(),
-                Cutter::Earlier(e) => earlier.get(e).map(|e| e.0.clone()),
+            let (x, x_name) = match by {
+                Cutter::Own(k) => (ids.get(k), named.get(k)),
+                Cutter::Earlier(e) => earlier.get(e).map(|e| (&e.0, &e.0)).unzip(),
             };
-            let joined = format!("{name} · {}", x.unwrap_or_default());
             let free = |n: &String| st.body(n).is_none() && !named.contains(n);
+            let id = format!("{}>{}", ids.get(m).map_or("", String::as_str), x.map_or("", String::as_str));
+            let pinned = names.get(&id).map(|n| n.trim().to_string()).filter(|n| !n.is_empty() && free(n));
+            let joined = format!("{name} · {}", x_name.map_or("", String::as_str));
             let piece = (1..=MAX_MEMBERS + 1).map(|k| if k == 1 { joined.clone() } else { format!("{joined} ({k})") }).find(free);
-            st.bodies.push(ModelBody::traced_new(piece.unwrap_or(joined), t, f.id));
+            st.bodies.push(ModelBody::traced_new(pinned.or(piece).unwrap_or(joined), t, f.id));
         }
     }
     Ok(())
@@ -1567,7 +1570,7 @@ pub fn member_segments(doc: &Document, st: &ModelState, f: &Feature) -> Result<V
 /// to the cut), its length as cut, its profile in that plane, and whether an End Cap may go on its [start, end]: an
 /// uncut end, or a through member's end of a Butt or Coped corner, Auto's included (not the butting member's end,
 /// which lies against the through member, a cope, a fit or a mitre, nor a piece's end where it is cut, fitted to the
-/// tube that crosses there).
+/// tube that crosses there). A piece split off where another tube overlaps it (`L>X`) is laid as L, only L's end open.
 pub(crate) fn member_section(
     doc: &Document,
     vals: &BTreeMap<String, Value>,
@@ -1581,7 +1584,14 @@ pub(crate) fn member_section(
     let Layout { segments, regions, at, turn, sketch_x, drawn, planes, .. } = layout(doc, vals, f, st)?;
     let (plan, crossing) = plans(*corner, &segments, &planes, corners, &drawn)?;
     let (segments, planes, drawn) = pieced(segments, planes, drawn, plan.as_ref().or(crossing.as_ref()))?;
-    let m = segments.iter().position(|(id, _, _)| id == line).ok_or_else(|| DocError::Unknown(format!("line `{line}` of the member feature")))?;
+    // A piece split off where another tube overlaps it (`L>X`) lies along L, never from L's start: its ends at the cuts
+    // lie inside L, so only L's end may be open.
+    let ids: Vec<String> = segments.iter().map(|s| s.0.clone()).collect();
+    let (m, later) = match ids.iter().position(|id| id == line) {
+        Some(m) => (Some(m), false),
+        None => (overlap_parent(&ids, line).and_then(|l| ids.iter().position(|id| id == l)), true),
+    };
+    let m = m.ok_or_else(|| DocError::Unknown(format!("line `{line}` of the member feature")))?;
     let (axes, _) = section_axes(&segments, &planes, plan.as_ref(), turn)?;
     let (x, y) = axes.get(m).copied().ok_or_else(|| DocError::Invalid(format!("line `{line}` has no length")))?;
     let (a, b) = segments.get(m).map(|s| (s.1, s.2)).ok_or_else(|| DocError::Unknown(format!("line `{line}` of the member feature")))?;
@@ -1603,7 +1613,7 @@ pub(crate) fn member_section(
     let (plane, sections) = along(plane, &regions, dir);
     let region = sections.first().cloned().ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;
     let open = |e: Option<CutEnd>| e.is_none_or(|e| e.2);
-    Ok((plane, a.dist(b) + hi - lo, region, [open(start), open(end)]))
+    Ok((plane, a.dist(b) + hi - lo, region, [open(start) && !later, open(end)]))
 }
 
 /// The body name of the member on each of `lines` (member ids): its own name from `pinned` (by
@@ -1716,6 +1726,8 @@ pub fn member_parts(st: &ModelState, kind: &FeatureKind) -> Result<(Vec<String>,
 /// The member (line, pair or piece id) of Frame Member `f` whose body is `body`, if one is: by
 /// position when the feature names its bodies itself, else by its `names` entry, or for a later
 /// piece with none, by the name [`member_names`] gives it from its line's and its crossing tube's.
+/// A piece split off where another tube overlaps it, found only as the frame is built, is `L>X`
+/// ([`overlap_parent`]): by its `names` entry, or by its name `<L's name> · <X's name>`.
 pub fn member_of_body(st: &ModelState, f: &Feature, body: &str) -> Result<Option<String>> {
     let FeatureKind::FrameMember { names, .. } = &f.kind else { return Ok(None) };
     let (ids, later) = member_parts(st, &f.kind)?;
@@ -1725,9 +1737,28 @@ pub fn member_of_body(st: &ModelState, f: &Feature, body: &str) -> Result<Option
             let (l, x) = later.get(k).copied().flatten().filter(|_| pinned(k).is_none())?;
             Some(format!("{} · {}", pinned(l)?, pinned(x)?))
         };
+        // A piece split off where another tube overlaps it ([`resolve_overlaps`]), with no pin of its own:
+        // `<L's name> · <X's name>`, X one of this frame's members or an earlier tube (its body name), its id `L>X`.
+        // The longest L's name wins: a name may hold ` · ` itself.
+        // ponytail: a derived name another body had, numbered `… (2)`, is not found; parse the number if one turns up.
+        let overlap = || {
+            let mut best: Option<(usize, String)> = None;
+            for (l, id) in ids.iter().enumerate() {
+                let Some(n) = pinned(l) else { continue };
+                let Some(x) = body.strip_prefix(n.as_str()).and_then(|r| r.strip_prefix(" · ")) else { continue };
+                if best.as_ref().is_some_and(|(len, _)| *len >= n.len()) {
+                    continue;
+                }
+                let x = (0..ids.len()).find(|&k| pinned(k).is_some_and(|p| p == x)).and_then(|k| ids.get(k)).map_or(x, String::as_str);
+                best = Some((n.len(), format!("{id}>{x}")));
+            }
+            best.map(|b| b.1)
+        };
+        // A renamed one is pinned under its piece id.
+        let piece = || names.iter().find(|(id, n)| *n == body && overlap_parent(&ids, id).is_some()).map(|(id, _)| id.clone());
         let k =
             (0..ids.len()).find(|&k| pinned(k).is_some_and(|n| n == body)).or_else(|| (0..ids.len()).find(|&k| joined(k).is_some_and(|n| n == body)));
-        k.and_then(|k| ids.get(k)).cloned()
+        k.and_then(|k| ids.get(k)).cloned().or_else(piece).or_else(overlap)
     } else {
         // Position pairs a body with a member only when every member made one; a piece left with no body shifts
         // the rest, and the caller then matches by shape.
@@ -1737,6 +1768,15 @@ pub fn member_of_body(st: &ModelState, f: &Feature, body: &str) -> Result<Option
         }
         f.body_names.iter().position(|name| name == body).and_then(|i| ids.into_iter().nth(i))
     })
+}
+
+/// The member of `ids` that `piece`, a piece split off where another tube overlaps it (`L>X`, [`resolve_overlaps`]),
+/// is cut from: the longest id that `piece` starts with, then `>`. `None` for one of `ids` itself.
+pub fn overlap_parent<'a>(ids: &'a [String], piece: &str) -> Option<&'a String> {
+    if ids.iter().any(|id| id == piece) {
+        return None;
+    }
+    ids.iter().filter(|id| piece.strip_prefix(id.as_str()).is_some_and(|x| x.len() > 1 && x.starts_with('>'))).max_by_key(|id| id.len())
 }
 
 /// Each pair's ends, found again as construction geometry finds its points: in this feature's

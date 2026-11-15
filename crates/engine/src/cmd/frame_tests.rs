@@ -4698,9 +4698,85 @@ fn frames_without_overlaps_are_unchanged() {
     }
 }
 
-/// A Locost-sized design (about 60 tubes over four Frame Members, all Auto with fit_ends), timed through a full
-/// evaluation, which it prints (no time is asserted). Run on demand: `cargo test ... locost_sized_design_timing --
-/// --ignored --nocapture`.
+/// The id of the session's first Frame Member.
+fn first_frame(s: &Session) -> u64 {
+    s.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().id
+}
+
+/// The member of Frame Member `fid` whose body is `body`, as the context menu and End Cap find it.
+fn member_of(s: &Session, fid: u64, body: &str) -> Option<String> {
+    solidcraft_doc::frame::member_of_body(&s.model.state(), s.doc.feature(fid).unwrap(), body).unwrap()
+}
+
+#[test]
+fn removing_an_overlap_piece_removes_its_line() {
+    // The brace split by the rail (`a_point_pair_brace_crossing_a_rail_is_split`): its later piece `T (2) · T` is the
+    // brace's piece past the rail, `pair2>pair1`. Remove Tube on it takes the whole brace out, and the rail stays whole.
+    let mut s = rail_and_brace(0.0, "auto", json!({}));
+    let fid = first_frame(&s);
+    assert_eq!(member_of(&s, fid, "T (2) · T").as_deref(), Some("pair2>pair1"));
+    remove(&mut s, json!([{"feature": fid, "line": "pair2>pair1"}]));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 1, "{bs:?}");
+    assert_tube(body_named(&bs, "T"), [0.0, -20.0, -20.0], [600.0, 20.0, 20.0], 600.0);
+    // The same for a sketch's lines: the 3D sketch's post split by its rail.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Space"}));
+    run(&mut s, "sketch.options", json!({"sketch_3d": true}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [600, 0]]}));
+    run(&mut s, "sketch.line3d", json!({"points": [[300, 0, -200], [300, 0, 200]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Space", "profile": tube(), "corner": "auto", "body_name": "P"}));
+    let fid = first_frame(&s);
+    let piece = member_of(&s, fid, "P (2) · P").unwrap();
+    let post = member_of(&s, fid, "P (2)").unwrap();
+    assert!(piece.starts_with(&format!("{post}>")), "{piece} {post}");
+    remove(&mut s, json!([{"feature": fid, "line": piece}]));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 1, "{bs:?}");
+    assert_tube(body_named(&bs, "P"), [0.0, -20.0, -20.0], [600.0, 20.0, 20.0], 600.0);
+}
+
+#[test]
+fn an_end_cap_on_an_overlap_pieces_cut_end_is_refused() {
+    // The brace's later piece `T (2) · T` runs from its cut at the rail's face y = 20 to its line's end y = 200: End Cap
+    // goes on that end (40 × 40, 6 past it) and refuses its cut end, as it does the first piece's cut end y = −20.
+    let mut s = rail_and_brace(0.0, "auto", json!({}));
+    let top = face_pick(&s, "T (2) · T", [318.5, 200.0, 0.0], [0.0, 1.0, 0.0]);
+    run(&mut s, "frame.end_cap", json!({"faces": [top], "thickness": 6}));
+    let cap = measured(&mut s, "T (2) · T End Cap");
+    assert!(near3(cap.2, [280.0, 200.0, -20.0]) && near3(cap.3, [320.0, 206.0, 20.0]), "{cap:?}");
+    for (body, y, n) in [("T (2) · T", 20.0, -1.0), ("T (2)", -20.0, 1.0)] {
+        let cut = face_pick(&s, body, [318.5, y, 0.0], [0.0, n, 0.0]);
+        let e = s.execute("frame.end_cap", &json!({"faces": [cut], "thickness": 6})).unwrap_err().to_string();
+        assert!(e.contains("not an open end"), "{body}: {e}");
+    }
+}
+
+#[test]
+fn an_overlap_piece_rename_is_kept() {
+    // Renamed, the brace's later piece is pinned under its piece id `pair2>pair1`, not by position: it keeps its name
+    // when the rail it was named after is renamed, and through an edit of the feature.
+    let mut s = rail_and_brace(0.0, "auto", json!({}));
+    let fid = first_frame(&s);
+    run(&mut s, "body.rename", json!({"body": "T (2) · T", "name": "Upper brace"}));
+    let names = pinned_names(&s, &json!(fid));
+    assert_eq!(names.get("pair2>pair1").map(String::as_str), Some("Upper brace"), "{names:?}");
+    assert!(s.doc.feature(fid).unwrap().body_names.is_empty());
+    run(&mut s, "body.rename", json!({"body": "T", "name": "Rail"}));
+    let solidcraft_doc::FeatureKind::FrameMember { pairs, .. } = member_kind(&s, &json!(fid)) else { panic!() };
+    let bigger = json!({"kind": "rect_tube", "width": 50, "height": 50, "wall": 3});
+    let params = json!({"pairs": pairs, "profile": bigger, "corner": "auto", "body_name": "T"});
+    run(&mut s, "timeline.redefine", json!({"feature": fid, "command": "frame.member", "params": params}));
+    let mut made: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+    made.sort();
+    assert_eq!(made, ["Rail", "T (2)", "Upper brace"]);
+    assert_eq!(member_of(&s, fid, "Upper brace").as_deref(), Some("pair2>pair1"));
+}
+
+/// A Locost-sized design (about 60 tubes over four Frame Members, and point-pair braces crossing them, all Auto with
+/// fit_ends), timed through a full evaluation, which it prints (no time is asserted). Run on demand: `cargo test ...
+/// locost_sized_design_timing -- --ignored --nocapture`.
 #[test]
 #[ignore = "timing check, run on demand"]
 fn locost_sized_design_timing() {
@@ -4746,6 +4822,15 @@ fn locost_sized_design_timing() {
         "frame.member",
         json!({"sketch": "Crossed", "profile": json!({"kind": "rect_tube", "width": 20, "height": 20, "wall": 2}), "corner": "auto", "fit_ends": true, "body_name": "Cross"}),
     );
+    // Point-pair braces in the floor's plane, in no sketch plane: two along X crossing the floor's four cross-members,
+    // and one along Y crossing both of them and the floor's sides, so overlaps split them against earlier frames and
+    // each other.
+    let ends = [("P0", [100.0, 150.0, 0.0]), ("P1", [900.0, 150.0, 0.0]), ("P2", [100.0, 450.0, 0.0]), ("P3", [900.0, 450.0, 0.0])];
+    points(&mut s, &ends);
+    points(&mut s, &[("P4", [500.0, -100.0, 0.0]), ("P5", [500.0, 700.0, 0.0])]);
+    let pairs = [pair("P0", "P1"), pair("P2", "P3"), pair("P4", "P5")];
+    let profile = json!({"kind": "rect_tube", "width": 20, "height": 20, "wall": 2});
+    run(&mut s, "frame.member", json!({"pairs": pairs, "profile": profile, "corner": "auto", "fit_ends": true, "body_name": "Pair"}));
     let json_doc = s.doc.to_json();
     let start = std::time::Instant::now();
     let mut reopened = Session::new(solidcraft_doc::Document::from_json(&json_doc).unwrap());
