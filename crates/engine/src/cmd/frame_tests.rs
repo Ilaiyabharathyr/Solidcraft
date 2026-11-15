@@ -3073,6 +3073,95 @@ fn a_none_x_brace_keeps_its_crossings_overlapping() {
     assert!(overlap_all(&mut s) > 1000.0);
 }
 
+/// A sketch `Lines` of the lines `(id, [start, end])`, and its square tube members finished `corner`, each named its
+/// id in capitals.
+fn lines_frame(lines: &[(&str, [[f64; 2]; 2])], corner: &str) -> Session {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Lines"}));
+    for (id, points) in lines {
+        run(&mut s, "sketch.line", json!({"points": points, "ids": [id]}));
+    }
+    run(&mut s, "sketch.finish", json!({}));
+    let names: serde_json::Map<String, Value> = lines.iter().map(|(id, _)| (id.to_string(), json!(id.to_uppercase()))).collect();
+    run(&mut s, "frame.member", json!({"sketch": "Lines", "profile": square_tube(), "corner": corner, "names": names}));
+    s
+}
+
+#[test]
+fn a_butt_corner_between_pieces_runs_the_longer_line_through() {
+    // A chevron, a (0, 0)…(450, 0) and b (0, 0)…(0, 350), and a rail r (100, −150)…(−50, 300) along 3x + y = 150,
+    // crossing a at (50, 0) and b at (0, 150). r is laid first (longest, 474.3), so it stays whole and a and b are
+    // cut, leaving pieces of 50 (A) and 150 (B) at the apex. As Auto ranks them, by their lines, a (450) runs
+    // through, not B's longer piece: A keeps x ≥ −20 (b's outer face), B y ≥ 20 (A's near face). Each is fitted
+    // to r, whose tube fills 3x + y ≥ 150 − 20√10 = 86.754 near them: A ends at x = (86.754 + 20)/3 = 35.585 (at
+    // y = −20), B at y = 86.754 + 60 = 146.754 (at x = −20).
+    let mut s =
+        lines_frame(&[("a", [[0.0, 0.0], [450.0, 0.0]]), ("b", [[0.0, 0.0], [0.0, 350.0]]), ("r", [[100.0, -150.0], [-50.0, 300.0]])], "butt");
+    let near = 150.0 - 20.0 * 10f64.sqrt();
+    let (a, b) = (measured(&mut s, "A"), measured(&mut s, "B"));
+    assert!(near3(a.2, [-20.0, -20.0, -20.0]) && near3(a.3, [(near + 20.0) / 3.0, 20.0, 20.0]), "{a:?}");
+    assert!(near3(b.2, [-20.0, 20.0, -20.0]) && near3(b.3, [20.0, near + 60.0, 20.0]), "{b:?}");
+    let o = overlap_all(&mut s);
+    assert!(o < 1e-3, "the frame overlaps by {o} mm³");
+}
+
+#[test]
+fn three_ends_at_a_point_take_their_lines_laying_order_past_a_crossing() {
+    // x (0, 0)…(500, 0), y (0, 0)…(0, 450) and z (0, 0)…(0, −300) end at the origin; the rail r (50, −300)…(50, 300),
+    // laid first (longest), crosses x, leaving a 50 piece X at the origin. Laid by their lines, as Auto lays them,
+    // x and y come first and make the corner, x (500) running through: X keeps x ≥ −20 (y's outer face) and ends at
+    // r's tube (x = 30), Y keeps y ≥ 20, and z is fitted to them, y ≤ −20. (Laid by piece, y and z would make an
+    // in-line corner and X be fitted to them.)
+    let lines = [
+        ("x", [[0.0, 0.0], [500.0, 0.0]]),
+        ("y", [[0.0, 0.0], [0.0, 450.0]]),
+        ("z", [[0.0, 0.0], [0.0, -300.0]]),
+        ("r", [[50.0, -300.0], [50.0, 300.0]]),
+    ];
+    let mut s = lines_frame(&lines, "butt");
+    for (name, lo, hi) in [
+        ("X", [-20.0, -20.0, -20.0], [30.0, 20.0, 20.0]),
+        ("Y", [-20.0, 20.0, -20.0], [20.0, 450.0, 20.0]),
+        ("Z", [-20.0, -300.0, -20.0], [20.0, -20.0, 20.0]),
+    ] {
+        let m = measured(&mut s, name);
+        assert!(near3(m.2, lo) && near3(m.3, hi), "{m:?}");
+    }
+    let o = overlap_all(&mut s);
+    assert!(o < 1e-3, "the frame overlaps by {o} mm³");
+}
+
+#[test]
+fn a_post_ending_where_a_mitre_x_brace_crosses_is_fitted() {
+    // The X brace (`assert_x_brace_split`) and a post p (300, 0)…(300, 200) ending where the diagonals cross. As
+    // under Auto, the post (laid after them) is fitted there to d1 and d2's two pieces, whose filled tubes cover
+    // y ≥ 200 − 20√13/3 − (2/3)|x − 300| = 175.963 − (2/3)|x − 300| over it: its box x 280…320, y 0…175.963 (its
+    // foot on the bottom's middle is left square), and A·175.963 less the V, 2·(2/3)·(6·17²/2 + 40·(20² − 17²)/2)
+    // = 4116. The sides, d1 and d2's split are the X brace's.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]}));
+    for (id, points) in [("d1", [[0, 0], [600, 400]]), ("d2", [[0, 400], [600, 0]]), ("p", [[300, 0], [300, 200]])] {
+        run(&mut s, "sketch.line", json!({"points": points, "ids": [id]}));
+    }
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": "mitre", "names": {"d1": "D1", "d2": "D2", "p": "P"}}));
+    assert_eq!(bodies(&mut s).len(), 8, "{:?}", bodies(&mut s));
+    assert_same_tubes(&volumes_and_boxes(&mut s, &["D1", "D2", "D2 · D1", "P"]), &plain_rectangle(square_tube(), "mitre"), "sides");
+    let d1 = measured(&mut s, "D1");
+    assert!(rel(d1.1, FITTED_DIAGONAL) < 1e-6 && near3(d1.2, [20.0, 20.0, -20.0]) && near3(d1.3, [580.0, 380.0, 20.0]), "{d1:?}");
+    for (name, lo, hi) in [("D2", [20.0, 200.0, -20.0], [300.0, 380.0, 20.0]), ("D2 · D1", [300.0, 20.0, -20.0], [580.0, 200.0, 20.0])] {
+        let piece = measured(&mut s, name);
+        assert!(rel(piece.1, 130_237.436_911) < 1e-6 && near3(piece.2, lo) && near3(piece.3, hi), "{piece:?}");
+    }
+    let top = 200.0 - 20.0 * 13f64.sqrt() / 3.0;
+    let p = measured(&mut s, "P");
+    assert!(rel(p.1, SQUARE_TUBE_AREA * top - 4116.0) < 1e-6 && near3(p.2, [280.0, 0.0, -20.0]) && near3(p.3, [320.0, top, 20.0]), "{p:?}");
+    let i = run(&mut s, "inspect.interference", json!({"bodies": ["P", "D1", "D2", "D2 · D1"]}));
+    let o: f64 = i["interferences"].as_array().map_or(0.0, |all| all.iter().map(|x| f(&x["volume_mm3"])).sum());
+    assert!(o < 1e-3, "the post and the diagonals overlap by {o} mm³");
+}
+
 #[test]
 fn a_diagonal_into_a_mitred_or_butted_rectangle_is_the_same_whatever_the_pick_order() {
     for corner in ["mitre", "butt"] {

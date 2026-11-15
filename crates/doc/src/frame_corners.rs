@@ -161,13 +161,18 @@ pub fn away(segments: &[(String, Vec3, Vec3)], (m, at_start): (usize, bool)) -> 
     (if at_start { *b - *a } else { *a - *b }).normalized()
 }
 
-/// Index into `corner.ends` (0 or 1) of the member that runs through, unflipped: the longer, then
+/// Member m's length as drawn ([`through`]'s `length` for members that are whole lines).
+pub fn segment_length(segments: &[(String, Vec3, Vec3)]) -> impl Fn(usize) -> f64 + '_ {
+    |m| segments.get(m).map_or(0.0, |(_, a, b)| a.dist(*b))
+}
+
+/// Index into `corner.ends` (0 or 1) of the member that runs through, unflipped: the longer by
+/// `length` (a piece of a line cut where tubes cross ranks by its whole line, as Auto ranks it), then
 /// the one nearer the sketch's X axis, then the one drawn first: `drawn[m]` is member m's place in
 /// the sketch's drawing order (a member missing from it ranks by its index), never the pick order.
-pub fn through(segments: &[(String, Vec3, Vec3)], corner: &Corner, sketch_x: Option<Vec3>, drawn: &[usize]) -> usize {
+pub fn through(segments: &[(String, Vec3, Vec3)], corner: &Corner, length: &dyn Fn(usize) -> f64, sketch_x: Option<Vec3>, drawn: &[usize]) -> usize {
     let [e0, e1] = corner.ends;
     let pick = |first: bool| if first { 0 } else { 1 };
-    let length = |m: usize| segments.get(m).map_or(0.0, |(_, a, b)| a.dist(*b));
     let (l0, l1) = (length(e0.0), length(e1.0));
     if (l0 - l1).abs() > EQUAL_LENGTH {
         return pick(l0 > l1);
@@ -225,12 +230,14 @@ pub fn reach(plane: &Plane, regions: &[Region2], point: Vec3, dir: Vec3) -> f64 
 
 /// The cuts at one corner: (member index, at_start, Cut) for each member it cuts. Coped's U gets
 /// no plane cut here; it returns T's cut only, plus the pair (t, u) for coping. `placed(member,
-/// at)` is the member's section plane placed square to its line at `at`.
+/// at)` is the member's section plane placed square to its line at `at`; `length`, `sketch_x` and
+/// `drawn` pick the member that runs through ([`through`]).
 pub fn corner_cuts(
     kind: CornerType,
     flip: bool,
     corner: &Corner,
     segments: &[(String, Vec3, Vec3)],
+    length: &dyn Fn(usize) -> f64,
     placed: &dyn Fn(usize, Vec3) -> Plane,
     regions: &[Region2],
     sketch_x: Option<Vec3>,
@@ -251,7 +258,7 @@ pub fn corner_cuts(
         let n = (dir(e0)? - dir(e1)?).normalized().ok_or_else(|| DocError::Invalid("a mitre corner has no bisector".into()))?;
         return Ok((vec![(e0.0, e0.1, Cut { origin: p, normal: n }), (e1.0, e1.1, Cut { origin: p, normal: -n })], None));
     }
-    let (te, ue) = if (through(segments, corner, sketch_x, drawn) == 0) != flip { (e0, e1) } else { (e1, e0) };
+    let (te, ue) = if (through(segments, corner, length, sketch_x, drawn) == 0) != flip { (e0, e1) } else { (e1, e0) };
     let (t, u) = (-dir(te)?, dir(ue)?);
     // d made square to `axis`: the normal of a side face of the member along axis.
     let across =

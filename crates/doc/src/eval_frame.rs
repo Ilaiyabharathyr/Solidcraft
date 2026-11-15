@@ -412,8 +412,9 @@ type Tie<'a> = (Option<Vec3>, &'a [usize]);
 /// Mitre, Butt and Coped those at each point where three or more members end ([`crowded`]): its corner finished as the
 /// frame's, every other end there fitted (`(None, 0, false)`, as Auto's), with the fits in laying order. `planes`: each
 /// member's plane, for the laying order. `crossing`: the frame's crossings ([`plans`]), whose pieces `segments` are:
-/// each piece's end where its line is cut is fitted as Auto fits it ([`crossing_fits`]), and a crossing's override
-/// names no corner.
+/// each end where a crossing cuts a line is fitted as Auto fits it ([`crossing_fits`]), a piece ranks by its whole
+/// line (its place in the laying order, its line's length for which member of a butt runs through), and a
+/// crossing's override names no corner.
 fn corner_ends(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
@@ -441,6 +442,8 @@ fn corner_ends(
         })
         .collect();
     let mut finishes = vec![finish; corners.len()];
+    // A piece ranks by its whole line, as Auto ranks it.
+    let length = |m: usize| line_length(segments, crossing, m);
     // A crossing's override (its Flip used by the crossing plan) names no corner, nor does an overlap's (None leaves
     // overlaps, so names none).
     let crossing_override = |k: usize| crossing.is_some_and(|p| p.crossing_overrides.contains(&k));
@@ -462,14 +465,14 @@ fn corner_ends(
     // Each member's cut ends, and each Coped Butt's (T, U): U loses T's filled shape once every plane cut is made.
     let mut out: CornerEnds = (vec![[None, None]; segments.len()], Vec::new());
     for (c, (kind, flip)) in corners.iter().zip(finishes) {
-        let cuts = frame_corners::corner_cuts(kind, flip, c, segments, placed, regions, sketch_x, drawn)?;
+        let cuts = frame_corners::corner_cuts(kind, flip, c, segments, &length, placed, regions, sketch_x, drawn)?;
         add_corner(&mut out, c, kind.flips(), cuts, segments, regions, placed)?;
     }
     // None leaves every point as it is. No override names a point of three or more ends (Auto's alone).
-    let (crowded, mut fits) = if finish.0.is_none() { (Vec::new(), Vec::new()) } else { crowded(segments, planes, drawn) };
-    fits.extend(crossing.into_iter().flat_map(crossing_fits).cloned());
+    let (crowded, mut fits) = if finish.0.is_none() { (Vec::new(), Vec::new()) } else { crowded(segments, planes, drawn, crossing) };
+    fits.extend(crossing.into_iter().flat_map(|p| crossing_fits(p, segments)).cloned());
     for c in &crowded {
-        let cuts = frame_corners::corner_cuts(finish.0, finish.1, c, segments, placed, regions, sketch_x, drawn)?;
+        let cuts = frame_corners::corner_cuts(finish.0, finish.1, c, segments, &length, placed, regions, sketch_x, drawn)?;
         add_corner(&mut out, c, finish.0.flips(), cuts, segments, regions, placed)?;
     }
     for f in &fits {
@@ -484,16 +487,18 @@ fn corner_ends(
 
 /// Under Mitre, Butt and Coped (#4003), each point where three or more members end and none passes through
 /// ([`frame_corners::find_crowded`]): the two laid first ([`frame_layout::ranks`]: outer tubes first, longest first,
-/// never the pick order) make its corner, its ends by member index as stage 1's, and each other end there is cut to
+/// never the pick order; under `crossing`, whose pieces `segments` are, its ranks: each piece in its whole line's
+/// place, as Auto lays them) make its corner, its ends by member index as stage 1's, and each other end there is cut to
 /// fit the tubes laid before it there, as Auto fits the third end at a point. The corners, and the fits in laying
 /// order.
-fn crowded(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: &[usize]) -> (Vec<Corner>, Vec<Fit>) {
+fn crowded(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: &[usize], crossing: Option<&Plan>) -> (Vec<Corner>, Vec<Fit>) {
     let points = frame_corners::find_crowded(segments);
     if points.is_empty() {
         return (Vec::new(), Vec::new());
     }
     let mut laid = vec![usize::MAX; segments.len()];
-    for (i, r) in frame_layout::ranks(segments, planes, drawn).iter().enumerate() {
+    let ranked = crossing.map_or_else(|| frame_layout::ranks(segments, planes, drawn), |p| p.ranks.clone());
+    for (i, r) in ranked.iter().enumerate() {
         if let Some(p) = laid.get_mut(r.member) {
             *p = i;
         }
@@ -642,9 +647,9 @@ fn cut_members(
 
 /// A frame's plans: an Auto frame's ([`frame_layout::plan`]), as only an Auto frame builds by Auto's rules and lines
 /// its sections up; and a Mitre, Butt or Coped frame's crossings (#4003), cut as Auto cuts them: the same plan, of
-/// which only its pieces, the fits of their cut ends ([`crossing_fits`]) and its crossing overrides are used. `None`
-/// for a frame with no crossing, which builds exactly as it always did, and under None, which leaves crossings
-/// overlapping.
+/// which only its pieces, their ranks, the fits at its crossings ([`crossing_fits`]) and its crossing overrides are
+/// used. `None` for a frame with no crossing, which builds exactly as it always did, and under None, which leaves
+/// crossings overlapping.
 fn plans(
     corner: CornerType,
     segments: &[(String, Vec3, Vec3)],
@@ -702,10 +707,27 @@ fn overlap_override(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], o
     !(planar && cross())
 }
 
-/// The fits of `plan` at a piece's end where its line is cut: fitted to the tube that stays whole there and the ends
-/// laid before it.
-fn crossing_fits(plan: &Plan) -> impl Iterator<Item = &Fit> {
-    plan.fits.iter().filter(|f| plan.pieces.get(f.member).is_some_and(|p| if f.at_start { p.from > 0.0 } else { p.to < 1.0 }))
+/// The fits of `plan` where its crossings cut a line, exactly as Auto fits them: each piece's end cut there, and each
+/// tube's end there (a post up to the middle of an X brace), fitted to the tube that stays whole there and the ends
+/// laid before it. `segments`: the plan's pieces.
+fn crossing_fits<'a>(plan: &'a Plan, segments: &'a [(String, Vec3, Vec3)]) -> impl Iterator<Item = &'a Fit> {
+    let at_crossing = |p: Vec3| plan.crossings.iter().any(|c| c.dist(p) <= frame_corners::CORNER_TOL);
+    plan.fits.iter().filter(move |f| {
+        let cut = plan.pieces.get(f.member).is_some_and(|p| if f.at_start { p.from > 0.0 } else { p.to < 1.0 });
+        cut || segments.get(f.member).is_some_and(|(_, a, b)| at_crossing(if f.at_start { *a } else { *b }))
+    })
+}
+
+/// Member m's length as Auto ranks it: under `plan` (whose pieces `segments` are) its whole line's, from its line's
+/// first piece's start to its last piece's end, which are the line's own ends ([`pieced`]); else its own.
+fn line_length(segments: &[(String, Vec3, Vec3)], plan: Option<&Plan>, m: usize) -> f64 {
+    let own = frame_corners::segment_length(segments)(m);
+    let Some((plan, parent)) = plan.and_then(|p| Some((p, p.pieces.get(m)?.parent))) else { return own };
+    let mut line = plan.pieces.iter().zip(segments).filter(|(p, _)| p.parent == parent);
+    match (line.clone().find(|(p, _)| p.from <= 0.0), line.find(|(p, _)| p.to >= 1.0)) {
+        (Some((_, (_, a, _))), Some((_, (_, _, b)))) => a.dist(*b),
+        _ => own,
+    }
 }
 
 /// The members a frame builds from its lines (`segments`, with each line's plane and place in the drawing order). Under
@@ -980,6 +1002,8 @@ fn auto_ends(
 ) -> Result<(CornerEnds, Vec<Fit>)> {
     let mut out: CornerEnds = (vec![[None, None]; segments.len()], Vec::new());
     let mut fits = plan.fits;
+    // `through` only works out the Flip that keeps `long` through: any length does.
+    let length = frame_corners::segment_length(segments);
     for ac in &plan.corners {
         let c = Corner { point: ac.point, ends: [ac.long, ac.short] };
         let inside = frame_corners::interior(segments, &c);
@@ -993,8 +1017,8 @@ fn auto_ends(
         }
         // corner_cuts runs a butt's longer member through, then Flip swaps it; `long` already is the one to run
         // through (the plan applied Flip), so ask for whichever Flip keeps it.
-        let flip = frame_corners::through(segments, &c, sketch_x, drawn) != 0;
-        let cuts = |kind| frame_corners::corner_cuts(kind, flip, &c, segments, placed, regions, sketch_x, drawn);
+        let flip = frame_corners::through(segments, &c, &length, sketch_x, drawn) != 0;
+        let cuts = |kind| frame_corners::corner_cuts(kind, flip, &c, segments, &length, placed, regions, sketch_x, drawn);
         match (ac.kind, ac.joint) {
             (CornerType::Auto, Joint::AngledButt) => {
                 let angled = frame_corners::angled_butt_cuts(&c, ac.long.0, ac.short.0, segments);
@@ -1016,7 +1040,7 @@ fn auto_ends(
     for ch in &plan.chained {
         let (Some(pa), Some(pb)) = (end(ch.a), end(ch.b)) else { continue };
         let c = Corner { point: (pa + pb) * 0.5, ends: [ch.a, ch.b] };
-        let cuts = frame_corners::corner_cuts(ch.kind, ch.flip, &c, segments, placed, regions, sketch_x, drawn)?;
+        let cuts = frame_corners::corner_cuts(ch.kind, ch.flip, &c, segments, &length, placed, regions, sketch_x, drawn)?;
         add_corner(&mut out, &c, ch.kind.flips(), cuts, segments, regions, placed)?;
     }
     let mut place = vec![usize::MAX; segments.len()];
@@ -1263,9 +1287,9 @@ fn unjointed_ends(
         ),
         _ if *corner == CornerType::None => return Vec::new(),
         crossing => {
-            let (crowded, fits) = crowded(segments, planes, drawn);
+            let (crowded, fits) = crowded(segments, planes, drawn, crossing);
             let corners = frame_corners::find_corners(segments).into_iter().chain(crowded);
-            let fits = fits.iter().chain(crossing.into_iter().flat_map(crossing_fits));
+            let fits = fits.iter().chain(crossing.into_iter().flat_map(|p| crossing_fits(p, segments)));
             (corners.flat_map(|c| c.ends).collect(), fits.map(|f| (f.member, f.at_start)).collect())
         }
     };

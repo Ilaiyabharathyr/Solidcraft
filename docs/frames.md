@@ -58,10 +58,14 @@ corner to corner), the two that come first in Auto's laying order (see Auto belo
 longest first, never the pick order) make the corner, finished with the frame's type and flip
 exactly as if they were alone there, and every other tube ending there is cut to fit the tubes laid
 before it there, as Auto fits it, whatever Fit Ends to Earlier Frames says: a brace fits into a
-rectangle's mitre or butt. Where a member ends on the middle of another, nothing is cut: it stays as
-before. Where sketch lines cross, Mitre, Butt and Coped split the tubes exactly as Auto does (see
-Crossings under Auto below: one stays whole, the others are cut into pieces fitted to it, with the same
-piece names, Crossing overrides and Remove Tube); None leaves crossing tubes overlapping. Two members in line (within 0.01 degrees) stay square whatever the type.
+rectangle's mitre or butt. Where sketch lines cross, Mitre, Butt and Coped split the tubes exactly as
+Auto does (see Crossings under Auto below: one stays whole, the others are cut into pieces fitted to
+it, with the same piece names, Crossing overrides and Remove Tube), and a tube ending where they cross
+(a post up to the middle of an X brace) is fitted there to the tubes laid before it, as under Auto.
+A piece counts as its whole line wherever tubes are ranked: its line's place in the laying order, and
+its line's length for which member of a butt runs through. Where a member ends on the middle of a
+single other tube, with no crossing there, nothing is cut: it stays as before. None leaves crossing
+tubes overlapping. Two members in line (within 0.01 degrees) stay square whatever the type.
 A corner sharper than 5 degrees inside is refused: "Corner at (x, y, z) is too sharp to finish".
 
 - **Mitre**: both members are cut on the plane that bisects the corner.
