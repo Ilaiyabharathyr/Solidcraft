@@ -23,8 +23,9 @@
 //! own member ([`super::member_of_body`]); a copy is matched to the member and pose it is exactly: points in that
 //! member's material a quarter, half and three quarters along it, placed by the pose, all lie inside the body (exact
 //! point classification, never a mesh), so a member crossing the body (an X brace's other diagonal) is not it. A
-//! known member is checked the same way at any one of those points (an overlap may have notched or split it, #4003);
-//! a piece of a tube an overlap split (`L` or `L>X`) is its member's tool cut to the piece's own span along it. Only
+//! known member is checked the same way at its middle. A piece of a tube an overlap split (`L` or `L>X`, #4003), or a
+//! known member whose middle is gone, is checked at the middle of the body's own span along the member instead, and
+//! its tool is the member's cut to that span (if the kernel can't cut it, it is not fitted to). Only
 //! then is the member's tool built (once per member in a call) and placed (once per pose). This also refuses a body
 //! moved some way the walk doesn't follow (Align, Rest, a transfer to another component, a mirror at a placement): it
 //! is not fitted to, rather than fitted to in the wrong place.
@@ -44,7 +45,8 @@ use solidcraft_kernel::{self as kernel, PointClass};
 
 use super::super::{ModelState, mirror_matrix, pattern_transforms, point, val};
 use super::{
-    Axes, CutEnd, Layout, frame_ends, layout, member_line_ids, member_of_body, member_tool, overlap_parent, pieced, placer, plans, section_axes,
+    Axes, CutEnd, Layout, frame_ends, frame_member_id, layout, member_line_ids, member_tool, members_of_bodies, overlap_parent, pieced, placer,
+    plans, section_axes,
 };
 use crate::expr::{Kind, Value};
 use crate::frame::MAX_MEMBERS;
@@ -62,9 +64,13 @@ thread_local! {
 type Pose = (u64, Mat, Option<usize>);
 
 /// Every tube made before feature `f` by a FrameMember feature, and every moved / mirrored / patterned copy of
-/// one, as a cutting tool placed where that body is now: (body name, tool). Tools are built once per call.
-pub fn earlier_tools(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &ModelState) -> Result<Vec<(String, Traced)>> {
-    let Some(here) = doc.features.iter().position(|g| g.id == f.id) else { return Ok(Vec::new()) };
+/// one, as a cutting tool placed where that body is now: (body name, tool), and each one's id as an overlap piece's id
+/// names it (ruling O4): a Frame Member's own tube `<feature id>:<member id>` ([`frame_member_id`]), a copy (or a tube
+/// whose member isn't found) its body name. Tools are built once per call.
+pub fn earlier_tools(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &ModelState) -> Result<(Vec<(String, Traced)>, Vec<String>)> {
+    let Some(here) = doc.features.iter().position(|g| g.id == f.id) else { return Ok(Default::default()) };
+    // Each Frame Member's own tube's id.
+    let mut ids_of: HashMap<String, String> = HashMap::new();
     // Each tracked body's feature (a Frame Member, or what copied it) and the poses it may have.
     let mut tracked: BTreeMap<String, (u64, Vec<Pose>)> = BTreeMap::new();
     // The bodies that are pieces of a tube an overlap split (#4003): `L` and its `L>X`s.
@@ -75,10 +81,15 @@ pub fn earlier_tools(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature
             FeatureKind::FrameMember { .. } => {
                 let ids = member_line_ids(st, &g.kind).unwrap_or_default();
                 // Each body's member: an overlap piece `L>X` is a piece of L.
+                let refs: Vec<&str> = made.iter().map(String::as_str).collect();
+                let found = members_of_bodies(doc, st, g, &refs).unwrap_or_else(|_| vec![None; made.len()]);
                 let lines: Vec<(String, Option<String>, bool)> = made
                     .into_iter()
-                    .map(|n| {
-                        let id = member_of_body(st, g, &n).ok().flatten();
+                    .zip(found)
+                    .map(|(n, id)| {
+                        if let Some(id) = &id {
+                            ids_of.insert(n.clone(), frame_member_id(g.id, id));
+                        }
                         let parent = id.as_ref().and_then(|id| overlap_parent(&ids, id)).cloned();
                         let piece = parent.is_some();
                         (n, parent.or(id), piece)
@@ -143,6 +154,7 @@ pub fn earlier_tools(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature
     let mut members: HashMap<u64, Option<Members>> = HashMap::new();
     let mut placed: HashMap<(u64, usize, [u64; 16]), Traced> = HashMap::new();
     let mut out = Vec::new();
+    let mut ids = Vec::new();
     for b in &st.bodies {
         let Some((_, poses)) = tracked.get(&b.name) else { continue };
         let (Some(to_f), false, Ok(bounds)) = (into_f(b.component), b.body.is_mesh(), b.body.exact_bounds()) else { continue };
@@ -170,12 +182,27 @@ pub fn earlier_tools(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature
                 }
             };
             for k in candidates {
-                let Some(points) = source.points.get(k) else { continue };
-                // A known member: any one point, as a tube an overlap notched or split (#4003) may have lost the others.
-                // ponytail: a piece holding none of the three is not fitted to; sample more points if one turns up.
-                if !(if known.is_some() { points.iter().any(inside) } else { points.iter().all(inside) }) {
-                    continue;
-                }
+                let (Some(&points), Some((a, z))) = (source.points.get(k), source.segments.get(k).map(|s| (s.1, s.2))) else { continue };
+                let spanned = match known {
+                    // A copy: all three points.
+                    None if points.iter().all(inside) => false,
+                    None => continue,
+                    // A member's own body, whole: its middle, as before overlaps (#4003).
+                    Some(_) if !pieces.contains(&b.name) && points.get(1).is_some_and(inside) => false,
+                    // A piece of a tube an overlap split, or a body a cut or a notch left without its middle: the point
+                    // at the middle of the body's own span along the member (points run linearly along it), and the
+                    // tool cut to that span.
+                    Some(_) => {
+                        let (pa, pz) = (crate::apply_point(m, a), crate::apply_point(m, z));
+                        let Some((lo, hi)) = extent((pa, pz), &bounds, &crate::IDENTITY) else { continue };
+                        let t = (lo + hi) * 0.5 / pa.dist(pz).max(f64::MIN_POSITIVE);
+                        let [p1, _, p3] = points;
+                        if !inside(&(p1 + (p3 - p1) * ((t - 0.25) / 0.5))) {
+                            continue;
+                        }
+                        true
+                    }
+                };
                 let at = crate::mat_mul(&to_f, m);
                 let tool = match placed.entry((*g, k, bits(&at))) {
                     std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
@@ -185,19 +212,32 @@ pub fn earlier_tools(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature
                         e.insert(crate::lineage::numbered_tool(body)).clone()
                     }
                 };
-                let tool = match source.segments.get(k) {
-                    // A piece of a split tube fits only along its own span.
-                    Some((_, a, z)) if pieces.contains(&b.name) => {
-                        span(&tool, (crate::apply_point(&at, *a), crate::apply_point(&at, *z)), &bounds, &to_f)?
+                let tool = if spanned {
+                    // A tool the kernel can't cut to the span is not fitted to, rather than failing this frame.
+                    match span(&tool, (crate::apply_point(&at, a), crate::apply_point(&at, z)), &bounds, &to_f) {
+                        Ok(t) => t,
+                        Err(_) => continue,
                     }
-                    _ => tool,
+                } else {
+                    tool
                 };
                 out.push((b.name.clone(), tool));
+                ids.push(ids_of.get(&b.name).cloned().unwrap_or_else(|| b.name.clone()));
                 break 'body;
             }
         }
     }
-    Ok(out)
+    Ok((out, ids))
+}
+
+/// How far along the line `a`…`b` the box `piece` begins and ends, its corners placed by `to`.
+fn extent((a, b): (Vec3, Vec3), piece: &solidcraft_geom::Aabb3, to: &Mat) -> Option<(f64, f64)> {
+    let d = (b - a).normalized()?;
+    let (lo, hi) = (piece.min, piece.max);
+    let corners = [lo.x, hi.x].into_iter().flat_map(|x| [lo.y, hi.y].into_iter().flat_map(move |y| [lo.z, hi.z].map(|z| Vec3::new(x, y, z))));
+    let (from, to) =
+        corners.map(|c| (crate::apply_point(to, c) - a).dot(d)).fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), t| (l.min(t), h.max(t)));
+    (from.is_finite() && to.is_finite()).then_some((from, to))
 }
 
 /// `tool` (a member's, placed, its line `a`…`b`) cut square to that line where the box `piece` (in its body's
@@ -205,10 +245,7 @@ pub fn earlier_tools(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature
 /// (#4003). What it loses lies in the tube that cut the piece.
 fn span(tool: &Traced, (a, b): (Vec3, Vec3), piece: &solidcraft_geom::Aabb3, to_f: &Mat) -> Result<Traced> {
     let d = (b - a).normalized().ok_or_else(|| DocError::Invalid("an earlier tube's line has no length".into()))?;
-    let (lo, hi) = (piece.min, piece.max);
-    let corners = [lo.x, hi.x].into_iter().flat_map(|x| [lo.y, hi.y].into_iter().flat_map(move |y| [lo.z, hi.z].map(|z| Vec3::new(x, y, z))));
-    let along: Vec<f64> = corners.map(|c| (crate::apply_point(to_f, c) - a).dot(d)).collect();
-    let (from, to) = along.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &t| (l.min(t), h.max(t)));
+    let (from, to) = extent((a, b), piece, to_f).ok_or_else(|| DocError::Invalid("an earlier piece has no span".into()))?;
     let mut body = tool.body.clone();
     for (at, normal) in [(from, d), (to, -d)] {
         let plane =

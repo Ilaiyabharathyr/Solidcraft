@@ -1382,22 +1382,30 @@ pub(super) fn member_pins(s: &Session, fid: u64) -> Option<BTreeMap<String, Stri
     let result = s.model.result(fid)?;
     let lines = solidcraft_doc::frame::member_line_ids(&result.state, &f.kind).ok()?;
     let made: Vec<String> = result.state.bodies.iter().filter(|b| b.feature == fid).map(|b| b.name.clone()).collect();
-    if lines.len() != made.len() {
-        let mut pinned: BTreeMap<String, String> = lines.iter().filter_map(|l| Some((l.clone(), names.get(l)?.clone()))).collect();
+    // A piece split off where another tube overlaps it (`L>X`) is no member listed: it is found by its name
+    // ([`solidcraft_doc::frame::members_of_bodies`]), and a frame that has one pairs every body by name, never by
+    // position, even when the counts happen to agree.
+    let found = if f.body_names.is_empty() {
+        let refs: Vec<&str> = made.iter().map(String::as_str).collect();
+        solidcraft_doc::frame::members_of_bodies(&s.doc, &result.state, f, &refs).ok()?
+    } else {
+        Vec::new()
+    };
+    let overlap = found.iter().flatten().any(|id| solidcraft_doc::frame::overlap_parent(&lines, id).is_some());
+    if lines.len() != made.len() || overlap {
         if !f.body_names.is_empty() {
             return None;
         }
-        // A piece split off where another tube overlaps it (`L>X`) is no member listed: each such body is pinned under
-        // the piece id its name gives ([`solidcraft_doc::frame::member_of_body`]).
-        let unpinned: Vec<&String> = made.iter().filter(|n| !pinned.values().any(|v| v == *n)).collect();
-        for n in unpinned {
-            let id = solidcraft_doc::frame::member_of_body(&result.state, f, n).ok().flatten()?;
+        let mut pinned: BTreeMap<String, String> = lines.iter().filter_map(|l| Some((l.clone(), names.get(l)?.clone()))).collect();
+        for (n, id) in made.iter().zip(found) {
+            // A body no member is found for keeps its name unpinned, rather than unpinning the frame.
+            let Some(id) = id.filter(|_| !pinned.values().any(|v| v == n)) else { continue };
             if pinned.insert(id, n.clone()).is_some() {
                 return None;
             }
         }
-        let named = made.iter().all(|n| pinned.values().filter(|v| *v == n).count() == 1);
-        return named.then_some(pinned);
+        let once = made.iter().all(|n| pinned.values().filter(|v| *v == n).count() <= 1);
+        return once.then_some(pinned);
     }
     // A feature that names its own members gives each its pinned name when it can, and that name
     // to no other: a body with another member's pinned name was made for that member.

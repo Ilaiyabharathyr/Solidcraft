@@ -4705,7 +4705,7 @@ fn first_frame(s: &Session) -> u64 {
 
 /// The member of Frame Member `fid` whose body is `body`, as the context menu and End Cap find it.
 fn member_of(s: &Session, fid: u64, body: &str) -> Option<String> {
-    solidcraft_doc::frame::member_of_body(&s.model.state(), s.doc.feature(fid).unwrap(), body).unwrap()
+    solidcraft_doc::frame::member_of_body(&s.doc, &s.model.state(), s.doc.feature(fid).unwrap(), body).unwrap()
 }
 
 #[test]
@@ -4772,6 +4772,76 @@ fn an_overlap_piece_rename_is_kept() {
     made.sort();
     assert_eq!(made, ["Rail", "T (2)", "Upper brace"]);
     assert_eq!(member_of(&s, fid, "Upper brace").as_deref(), Some("pair2>pair1"));
+}
+
+#[test]
+fn an_overlap_piece_cut_by_an_earlier_tube_keeps_its_pin_when_that_tube_is_renamed() {
+    // B's line, split by A's bottom tube under Fit Ends (`fit_ends_notches_against_an_earlier_frame`): its later piece's
+    // id names that tube by its feature and member (ruling O4), not its body name, so renaming the tube keeps the
+    // piece's id and the name pinned under it.
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    later_frame(&mut s, 0.0, &[[[300.0, -100.0], [300.0, 100.0]]], 25.0, true);
+    let a = first_frame(&s);
+    let b = s.doc.features.iter().rev().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().id;
+    let bottom = bodies(&mut s).into_iter().find(|x| x.0.starts_with('A') && x.3[1] < 21.0).unwrap().0;
+    let piece = format!("B · {bottom}");
+    let id = member_of(&s, b, &piece).unwrap();
+    assert!(id.contains(&format!(">{a}:")), "{id}");
+    run(&mut s, "body.rename", json!({"body": piece, "name": "Upper B"}));
+    run(&mut s, "body.rename", json!({"body": bottom, "name": "Base"}));
+    let made: Vec<String> = bodies(&mut s).into_iter().map(|x| x.0).collect();
+    assert!(made.contains(&"Upper B".to_string()) && !made.contains(&"B · Base".to_string()), "{made:?}");
+    assert_eq!(pinned_names(&s, &json!(b)).get(&id).map(String::as_str), Some("Upper B"));
+    assert_eq!(member_of(&s, b, "Upper B"), Some(id));
+}
+
+#[test]
+fn an_overlap_piece_with_a_numbered_name_is_found() {
+    // A body already called `T (2) · T`: the brace's later piece is numbered `T (2) · T (2)`. It is still the piece
+    // `pair2>pair1` (ruling O5), and Remove Tube on it takes the brace out.
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"corner": [2000, 2000, 2000], "length": 10, "width": 10, "height": 10, "body_name": "T (2) · T"}));
+    points(&mut s, &[("R0", [0.0, 0.0, 0.0]), ("R1", [600.0, 0.0, 0.0]), ("B0", [300.0, -200.0, 0.0]), ("B1", [300.0, 200.0, 0.0])]);
+    run(&mut s, "frame.member", json!({"pairs": [pair("R0", "R1"), pair("B0", "B1")], "profile": tube(), "corner": "auto", "body_name": "T"}));
+    let fid = first_frame(&s);
+    assert!(bodies(&mut s).iter().any(|b| b.0 == "T (2) · T (2)"));
+    assert_eq!(member_of(&s, fid, "T (2) · T (2)").as_deref(), Some("pair2>pair1"));
+    remove(&mut s, json!([{"feature": fid, "line": "pair2>pair1"}]));
+    let mut made: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+    made.sort();
+    assert_eq!(made, ["T", "T (2) · T"]);
+}
+
+#[test]
+fn an_overlap_piece_of_a_line_with_no_pin_is_found() {
+    // The brace's pin taken away (a frame pinned before its brace was): it is named `T (2)` from the base name, and its
+    // later piece `T (2) · T` is still the piece `pair2>pair1`.
+    let mut s = rail_and_brace(0.0, "auto", json!({}));
+    let fid = first_frame(&s);
+    change_pins(&mut s, &json!(fid), |names| {
+        names.remove("pair2");
+    });
+    s.refresh();
+    assert!(bodies(&mut s).iter().any(|b| b.0 == "T (2) · T"));
+    assert_eq!(member_of(&s, fid, "T (2) · T").as_deref(), Some("pair2>pair1"));
+}
+
+#[test]
+fn fit_ends_fits_a_later_frame_to_an_earlier_short_end_piece() {
+    // The rail at y = −120 cuts the brace (300, −200)…(300, 200) in its first quarter: its short piece `T (2)` runs
+    // y −200…−140 and holds none of the brace's quarter points. A later Fit Ends tube y = −170, x 200…400, 25 square,
+    // crosses it mid-span and is split by its tool, x 200…280 and 320…400, overlapping nothing.
+    let mut s = Session::default();
+    points(&mut s, &[("R0", [0.0, -120.0, 0.0]), ("R1", [600.0, -120.0, 0.0]), ("B0", [300.0, -200.0, 0.0]), ("B1", [300.0, 200.0, 0.0])]);
+    run(&mut s, "frame.member", json!({"pairs": [pair("R0", "R1"), pair("B0", "B1")], "profile": tube(), "corner": "auto", "body_name": "T"}));
+    let short = measured(&mut s, "T (2)");
+    assert!((short.2[1] + 200.0).abs() < 1e-6 && (short.3[1] + 140.0).abs() < 1e-6, "{short:?}");
+    later_frame(&mut s, 0.0, &[[[200.0, -170.0], [400.0, -170.0]]], 25.0, true);
+    let bs = named(&mut s, "B");
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    let o = overlap_all(&mut s);
+    assert!(o < 1e-3, "the tubes overlap by {o} mm³: {bs:?}");
 }
 
 #[test]

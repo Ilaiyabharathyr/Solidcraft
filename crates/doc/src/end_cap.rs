@@ -51,7 +51,7 @@ pub fn member(doc: &Document, st: &ModelState, plane: &PlaneRef) -> Result<Membe
     if !matches!(source.kind, FeatureKind::FrameMember { .. }) {
         return Err(invalid("the face is not on a frame member"));
     }
-    let line = crate::frame::member_of_body(st, source, &anchor.target.body)?
+    let line = crate::frame::member_of_body(doc, st, source, &anchor.target.body)?
         .ok_or_else(|| invalid("the face is no longer on the member it was picked on"))?;
     Ok(Member { feature: source.id.into(), line })
 }

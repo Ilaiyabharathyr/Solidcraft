@@ -90,7 +90,7 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
     // Fit Ends to Earlier Frames (None never fits): the earlier Frame Members' tubes and their copies, as cutting
     // tools, and this frame's own tubes laid before each free end (ruling A14), whether or not an earlier one exists.
     let fits = *fit_ends && !corner.is_none();
-    let earlier = if fits { earlier::earlier_tools(doc, vals, f, st)? } else { Vec::new() };
+    let (earlier, earlier_ids) = if fits { earlier::earlier_tools(doc, vals, f, st)? } else { Default::default() };
     let centre = frame::anchor_point(&regions, frame::Anchor::Center);
     if let Some(plan) = plan.as_mut() {
         free_corners(plan, &earlier, &placed, centre);
@@ -216,11 +216,12 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
             st.bodies.push(ModelBody::traced_new(name.clone(), t, f.id));
         }
         // A later piece of a tube split where another overlaps it, `L>X` (X: the other's member id, or an earlier
-        // tube's body name): its pinned name, else `<its name> · <the other's>` ([`member_of_body`] finds it by either).
+        // tube's id, [`earlier::earlier_tools`]): its pinned name, else `<its name> · <the other's>`
+        // ([`member_of_body`] finds it by either).
         for (by, t) in later_of(m) {
             let (x, x_name) = match by {
                 Cutter::Own(k) => (ids.get(k), named.get(k)),
-                Cutter::Earlier(e) => earlier.get(e).map(|e| (&e.0, &e.0)).unzip(),
+                Cutter::Earlier(e) => (earlier_ids.get(e), earlier.get(e).map(|e| &e.0)),
             };
             let free = |n: &String| st.body(n).is_none() && !named.contains(n);
             let id = format!("{}>{}", ids.get(m).map_or("", String::as_str), x.map_or("", String::as_str));
@@ -1635,20 +1636,32 @@ pub fn member_names(
     pinned: &BTreeMap<String, String>,
     base: &str,
 ) -> Vec<String> {
+    names_with(&|n| st.body(n).is_some(), st.bodies.len(), lines, later, pinned, base)
+}
+
+/// [`member_names`], `taken` saying which names other bodies have (`bodies` of them at most).
+fn names_with(
+    taken: &dyn Fn(&str) -> bool,
+    bodies: usize,
+    lines: &[String],
+    later: &[Option<(usize, usize)>],
+    pinned: &BTreeMap<String, String>,
+    base: &str,
+) -> Vec<String> {
     let reserved: HashSet<&str> = pinned.values().map(String::as_str).collect();
     let mut used: HashSet<String> = HashSet::new();
     let mut out: Vec<Option<String>> = lines
         .iter()
         .map(|line| {
-            let n = pinned.get(line).map(|n| n.trim()).filter(|n| !n.is_empty() && st.body(n).is_none())?;
+            let n = pinned.get(line).map(|n| n.trim()).filter(|n| !n.is_empty() && !taken(n))?;
             used.insert(n.to_string()).then(|| n.to_string())
         })
         .collect();
     let base = if base.trim().is_empty() { "Member" } else { base.trim() };
-    let free = |n: &str, used: &HashSet<String>| st.body(n).is_none() && !used.contains(n) && !reserved.contains(n);
+    let free = |n: &str, used: &HashSet<String>| !taken(n) && !used.contains(n) && !reserved.contains(n);
     // Each candidate is refused at most once per body, used or reserved name: past that many,
     // a free one has been found for every member.
-    let limit = st.bodies.len() + reserved.len() + lines.len() + 2;
+    let limit = bodies + reserved.len() + lines.len() + 2;
     let mut next = 1usize;
     let mut number = |used: &mut HashSet<String>| {
         while next <= limit {
@@ -1730,50 +1743,89 @@ pub fn member_parts(st: &ModelState, kind: &FeatureKind) -> Result<(Vec<String>,
 }
 
 /// The member (line, pair or piece id) of Frame Member `f` whose body is `body`, if one is: by
-/// position when the feature names its bodies itself, else by its `names` entry, or for a later
-/// piece with none, by the name [`member_names`] gives it from its line's and its crossing tube's.
-/// A piece split off where another tube overlaps it, found only as the frame is built, is `L>X`
-/// ([`overlap_parent`]): by its `names` entry, or by its name `<L's name> · <X's name>`.
-pub fn member_of_body(st: &ModelState, f: &Feature, body: &str) -> Result<Option<String>> {
-    let FeatureKind::FrameMember { names, .. } = &f.kind else { return Ok(None) };
+/// position when the feature names its bodies itself, else by the name evaluation gives it ([`member_names`]: its
+/// `names` entry, or for a later piece of a crossing with none, `<its line's name> · <its crossing tube's>`). A piece
+/// split off where another tube overlaps it, found only as the frame is built, is `L>X` ([`overlap_parent`]): by its
+/// `names` entry, or by its name `<L's name> · <X's name>`, numbered `(n)` or not.
+pub fn member_of_body(doc: &Document, st: &ModelState, f: &Feature, body: &str) -> Result<Option<String>> {
+    Ok(members_of_bodies(doc, st, f, &[body])?.into_iter().next().flatten())
+}
+
+/// [`member_of_body`] of each of `bodies`, the frame laid out once.
+pub fn members_of_bodies(doc: &Document, st: &ModelState, f: &Feature, bodies: &[&str]) -> Result<Vec<Option<String>>> {
+    let FeatureKind::FrameMember { names, body_name, profile, .. } = &f.kind else { return Ok(vec![None; bodies.len()]) };
     let (ids, later) = member_parts(st, &f.kind)?;
-    Ok(if f.body_names.is_empty() {
-        let pinned = |k: usize| ids.get(k).and_then(|id| names.get(id));
-        let joined = |k: usize| {
-            let (l, x) = later.get(k).copied().flatten().filter(|_| pinned(k).is_none())?;
-            Some(format!("{} · {}", pinned(l)?, pinned(x)?))
-        };
-        // A piece split off where another tube overlaps it ([`resolve_overlaps`]), with no pin of its own:
-        // `<L's name> · <X's name>`, X one of this frame's members or an earlier tube (its body name), its id `L>X`.
-        // The longest L's name wins: a name may hold ` · ` itself.
-        // ponytail: a derived name another body had, numbered `… (2)`, is not found; parse the number if one turns up.
-        let overlap = || {
-            let mut best: Option<(usize, String)> = None;
-            for (l, id) in ids.iter().enumerate() {
-                let Some(n) = pinned(l) else { continue };
-                let Some(x) = body.strip_prefix(n.as_str()).and_then(|r| r.strip_prefix(" · ")) else { continue };
-                if best.as_ref().is_some_and(|(len, _)| *len >= n.len()) {
-                    continue;
-                }
-                let x = (0..ids.len()).find(|&k| pinned(k).is_some_and(|p| p == x)).and_then(|k| ids.get(k)).map_or(x, String::as_str);
-                best = Some((n.len(), format!("{id}>{x}")));
-            }
-            best.map(|b| b.1)
-        };
-        // A renamed one is pinned under its piece id.
-        let piece = || names.iter().find(|(id, n)| *n == body && overlap_parent(&ids, id).is_some()).map(|(id, _)| id.clone());
-        let k =
-            (0..ids.len()).find(|&k| pinned(k).is_some_and(|n| n == body)).or_else(|| (0..ids.len()).find(|&k| joined(k).is_some_and(|n| n == body)));
-        k.and_then(|k| ids.get(k)).cloned().or_else(piece).or_else(overlap)
-    } else {
+    if !f.body_names.is_empty() {
         // Position pairs a body with a member only when every member made one; a piece left with no body shifts
         // the rest, and the caller then matches by shape.
         let made = st.bodies.iter().filter(|b| b.feature == f.id).count();
-        if made != ids.len() {
-            return Ok(None);
+        let at = |body: &str| f.body_names.iter().position(|name| name == body).and_then(|i| ids.get(i)).cloned();
+        return Ok(bodies.iter().map(|b| if made == ids.len() { at(b) } else { None }).collect());
+    }
+    // The names evaluation gives (`built`): against the bodies of everything but this feature.
+    let base = match body_name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => n.to_string(),
+        None => profile_regions(&doc.evaluation_values(), st, profile).map(|r| r.1).unwrap_or_default(),
+    };
+    let named = names_with(&|n| st.body(n).is_some_and(|b| b.feature != f.id), st.bodies.len(), &ids, &later, names, &base);
+    let here = doc.features.iter().position(|g| g.id == f.id);
+    // X's part of a piece id, from X's name: one of this frame's members (not L), else an earlier tube ([`earlier_id`]).
+    let cutter = |l: usize, x: &str| match named.iter().enumerate().find(|(k, n)| *k != l && *n == x) {
+        Some((k, _)) => ids.get(k).cloned(),
+        None => earlier_id(doc, st, here, x),
+    };
+    // A piece split off where another tube overlaps it ([`resolve_overlaps`]), with no pin of its own:
+    // `<L's name> · <X's name>`. The longest L's name wins: a name may hold ` · ` itself.
+    let overlap = |body: &str| {
+        let mut best: Option<(usize, String)> = None;
+        for (l, n) in named.iter().enumerate() {
+            let Some(x) = body.strip_prefix(n.as_str()).and_then(|r| r.strip_prefix(" · ")) else { continue };
+            if best.as_ref().is_some_and(|(len, _)| *len >= n.len()) {
+                continue;
+            }
+            if let (Some(id), Some(x)) = (ids.get(l), cutter(l, x)) {
+                best = Some((n.len(), format!("{id}>{x}")));
+            }
         }
-        f.body_names.iter().position(|name| name == body).and_then(|i| ids.into_iter().nth(i))
-    })
+        best.map(|b| b.1)
+    };
+    let one = |body: &str| {
+        if let Some(k) = named.iter().position(|n| n == body) {
+            return ids.get(k).cloned();
+        }
+        // A renamed piece is pinned under its piece id.
+        if let Some((id, _)) = names.iter().find(|(id, n)| *n == body && overlap_parent(&ids, id).is_some()) {
+            return Some(id.clone());
+        }
+        // Numbered `(n)` when another body had its name.
+        overlap(body).or_else(|| unnumbered(body).and_then(overlap))
+    };
+    Ok(bodies.iter().map(|b| one(b)).collect())
+}
+
+/// `name` without a trailing ` (n)`, if it has one.
+fn unnumbered(name: &str) -> Option<&str> {
+    let (rest, n) = name.strip_suffix(')')?.rsplit_once(" (")?;
+    (!n.is_empty() && n.bytes().all(|c| c.is_ascii_digit())).then_some(rest)
+}
+
+/// What an overlap piece's id calls the earlier tube `body` that cut it (ruling O4), for the feature at `here` in the
+/// timeline: an earlier Frame Member's own tube by its feature and member ([`frame_member_id`]), anything else (a Move,
+/// Mirror or Pattern copy, or a tube whose member isn't found) by its body name. `None` when no earlier body has it.
+fn earlier_id(doc: &Document, st: &ModelState, here: Option<usize>, body: &str) -> Option<String> {
+    let g = doc.feature(st.body(body)?.feature)?;
+    if doc.features.iter().position(|h| h.id == g.id) >= here {
+        return None;
+    }
+    if !matches!(g.kind, FeatureKind::FrameMember { .. }) {
+        return Some(body.to_string());
+    }
+    Some(member_of_body(doc, st, g, body).ok().flatten().map_or_else(|| body.to_string(), |m| frame_member_id(g.id, &m)))
+}
+
+/// An earlier Frame Member's own tube as an overlap piece's id names its cutter: `<feature id>:<member id>`.
+pub(crate) fn frame_member_id(feature: u64, member: &str) -> String {
+    format!("{feature}:{member}")
 }
 
 /// The member of `ids` that `piece`, a piece split off where another tube overlaps it (`L>X`, [`resolve_overlaps`]),
