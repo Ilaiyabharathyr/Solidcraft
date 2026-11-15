@@ -952,6 +952,7 @@ One setting per line, sorted by name. A change that adds a setting adds its own 
 
 - `angle_decimals`
 - `assembly_move_handles` (default true): explicit Assembly Move uses the permitted joint-motion handles; false keeps the previous Move panel.
+- `assistant_intro_at_top` (default false: a new chat in the Assistant shows a short introduction and the hint to type in the message box just above that box, #11256; true: the full introduction at the top of the panel, as before)
 - `auto_operation` (default true: feature windows choose Join, New Body or Cut from what their material touches until one is picked; false: each keeps the operation it opens with, Extrude its own Join or Cut)
 - `background_image` (string, default empty: a picture's file, shown behind the model and covering the window from its centre).
 - `browser_bodies_folders` (`several` (default): a component with one body and no groups lists it straight under the component in the browser, without a Bodies folder; `always`; `never`: components list their bodies and groups straight under them, and the folder's menu items are on the component's menu; the design's own Bodies folder, and one hidden with its eye, always show; #4217)
