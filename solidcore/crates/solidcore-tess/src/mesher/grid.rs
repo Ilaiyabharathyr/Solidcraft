@@ -83,8 +83,8 @@ pub(crate) fn quad(boundary: &[[f64; 2]]) -> Option<Quad> {
     }
     let mut bbox = [(f64::MAX, f64::MIN); 2];
     for p in boundary {
-        for d in 0..2 {
-            bbox[d] = (bbox[d].0.min(p[d]), bbox[d].1.max(p[d]));
+        for (bb, x) in bbox.iter_mut().zip(p) {
+            *bb = (bb.0.min(*x), bb.1.max(*x));
         }
     }
     let ext = [bbox[0].1 - bbox[0].0, bbox[1].1 - bbox[1].0];
@@ -130,12 +130,12 @@ pub(crate) fn quad(boundary: &[[f64; 2]]) -> Option<Quad> {
         seen |= side.bit();
         let d = side.along();
         let mut chain: Vec<u32> = chain.into_iter().map(|i| i as u32).collect();
-        let coord = |i: &u32| boundary.get(*i as usize).map_or(0.0, |p| p[d]);
+        let coord = |i: &u32| boundary.get(*i as usize).and_then(|p| p.get(d)).map_or(0.0, |x| *x);
         if chain.first().map(coord) > chain.last().map(coord) {
             chain.reverse();
         }
         // The edge nodes must advance along the side.
-        if chain.windows(2).any(|w| coord(&w[0]) >= coord(&w[1])) && chain.len() > 2 {
+        if chain.windows(2).any(|w| matches!(w, [a, b] if coord(a) >= coord(b))) && chain.len() > 2 {
             return None;
         }
         let slot = SIDES.iter().position(|s| *s == side)?;
@@ -156,7 +156,7 @@ pub(crate) fn aligned_lines(boundary: &[[f64; 2]], q: &Quad, d: usize) -> Option
     let eps = (hi - lo) * 1e-9;
     let mut lines = Vec::with_capacity(a.len());
     for (i, j) in a.iter().zip(b) {
-        let (x, y) = (boundary.get(*i as usize)?[d], boundary.get(*j as usize)?[d]);
+        let (x, y) = (*boundary.get(*i as usize)?.get(d)?, *boundary.get(*j as usize)?.get(d)?);
         if (x - y).abs() > eps {
             return None;
         }
@@ -177,7 +177,7 @@ pub(crate) fn strip(boundary: &[[f64; 2]], q: &Quad, d: usize) -> Option<Vec<[u3
         return None;
     }
     let mut tris = Vec::new();
-    zip(boundary, q.sides.get(low)?, q.sides.get(high)?, d, d == 1, &mut tris)?;
+    zip(boundary, q.sides.get(low)?, q.sides.get(high)?, d, tie(q, d)?, d == 1, &mut tris)?;
     for t in &tris {
         if !(signed_area(boundary, *t)? > 0.0) {
             return None;
@@ -229,7 +229,7 @@ pub(crate) fn structured(boundary: &[[f64; 2]], q: &Quad, us: &[f64], vs: &[f64]
         // The strip lies inside the box from its side: below the top and left of the right
         // side its triangles come out clockwise.
         let flip = matches!(side, Side::VMax | Side::UMin);
-        zip(&uv, outer, &inner, side.along(), flip, &mut tris)?;
+        zip(&uv, outer, &inner, side.along(), tie(q, side.along())?, flip, &mut tris)?;
     }
     // Every triangle counter-clockwise: one that is not has folded over.
     for t in &tris {
@@ -246,12 +246,22 @@ fn signed_area(uv: &[[f64; 2]], t: [u32; 3]) -> Option<f64> {
     Some((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]))
 }
 
+/// How far apart two nodes may lie along direction `d` and still stand at the same parameter:
+/// 1e-9 of the box, as [`aligned_lines`] takes it.
+fn tie(q: &Quad, d: usize) -> Option<f64> {
+    let (lo, hi) = q.bbox.get(d).copied()?;
+    Some((hi - lo) * 1e-9)
+}
+
 /// Join a side's outer chain (edge nodes) to the inner chain (grid line), both ordered along
 /// direction `d`: advance whichever chain's next node comes first along the side, so nodes at
-/// the same parameter on both chains are joined straight across.
-fn zip(uv: &[[f64; 2]], outer: &[u32], inner: &[u32], d: usize, flip: bool, tris: &mut Vec<[u32; 3]>) -> Option<()> {
+/// the same parameter on both chains are joined straight across. Nodes less than `eps` apart
+/// along the side stand at the same parameter, and the outer chain advances first there: the
+/// two nodes of a moved copy differ in the last bits, and an exact comparison would then split
+/// the quad they close along its other diagonal, as it does not on the original.
+fn zip(uv: &[[f64; 2]], outer: &[u32], inner: &[u32], d: usize, eps: f64, flip: bool, tris: &mut Vec<[u32; 3]>) -> Option<()> {
     let mut push = |a: u32, b: u32, c: u32| tris.push(if flip { [a, c, b] } else { [a, b, c] });
-    let coord = |chain: &[u32], k: usize| chain.get(k).and_then(|i| uv.get(*i as usize)).map(|p| p[d]);
+    let coord = |chain: &[u32], k: usize| chain.get(k).and_then(|i| uv.get(*i as usize)).and_then(|p| p.get(d).copied());
     let (mut a, mut b) = (0usize, 0usize);
     while a + 1 < outer.len() || b + 1 < inner.len() {
         let advance_outer = if a + 1 >= outer.len() {
@@ -259,7 +269,7 @@ fn zip(uv: &[[f64; 2]], outer: &[u32], inner: &[u32], d: usize, flip: bool, tris
         } else if b + 1 >= inner.len() {
             true
         } else {
-            coord(outer, a + 1)? <= coord(inner, b + 1)?
+            coord(outer, a + 1)? <= coord(inner, b + 1)? + eps
         };
         if advance_outer {
             push(*outer.get(a)?, *outer.get(a + 1)?, *inner.get(b)?);
@@ -348,6 +358,32 @@ mod tests {
         let Some(tris) = strip(&t, &q, 1) else { panic!("a strip") };
         assert!((area(&t, &tris) - 1.0).abs() < 1e-12);
         assert!(strip(&b, &q, 0).is_none() || strip(&t, &q, 0).is_none());
+    }
+
+    /// A strip whose two long sides carry the same parameters (a cylinder wall along its axis)
+    /// takes the same diagonals when one side's nodes are off by rounding, either way: a copy
+    /// moved to another place meshes as the original (#16815).
+    #[test]
+    fn a_strip_splits_its_quads_alike_when_its_nodes_are_off_by_rounding() {
+        // Six nodes along the bottom and the same six along the top, single-segment ends.
+        let k = 6;
+        let mut b: Vec<[f64; 2]> = (0..k).map(|i| [i as f64 / (k - 1) as f64, 0.0]).collect();
+        b.extend((0..k).rev().map(|i| [i as f64 / (k - 1) as f64, 1.0]));
+        let mesh = |b: &[[f64; 2]]| {
+            let Some(q) = quad(b) else { panic!("a quad") };
+            let Some(tris) = strip(b, &q, 0) else { panic!("a strip") };
+            tris
+        };
+        let exact = mesh(&b);
+        assert_eq!(exact.len(), 2 * (k - 1));
+        for off in [-1e-14, 1e-14] {
+            let mut moved = b.clone();
+            // The top's inner nodes: its corners stay on the box.
+            for p in moved.iter_mut().skip(k + 1).take(k - 2) {
+                p[0] += off;
+            }
+            assert_eq!(mesh(&moved), exact, "top off by {off}");
+        }
     }
 
     #[test]

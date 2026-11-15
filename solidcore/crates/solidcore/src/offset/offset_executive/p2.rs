@@ -28,8 +28,7 @@
 //! upstream); member null is native 1006, API null/invalid selection is native 1007.
 //! Offset/member inputs are mutable so existing queries can populate lazy UV trim
 //! geometry in the same arena; this adds no constructive capability or topology copy.
-//! With the opt-in `offset_updates_result_tolerances` (WR-705, not upstream or the
-//! fork) the two API entry points run the tolerance update on their result.
+//! Not upstream or the fork (WR-705): the two API entry points run the tolerance update on their result.
 //! `sm_OrderEdgeusesByBrep` (void upstream) propagates a dangling-id error from its
 //! face and edge-use queries; only a corrupt B-rep reaches it.
 //! Source faces use the native owning-list order. Temporary allocation uses the real
@@ -243,9 +242,9 @@ fn make_shell_edges_exact(
 /// at the original B-rep's tolerance): the distance reaches a radius of curvature of the face
 /// (a round offset by its radius), so the offset is a line there, neither a face nor inside
 /// out, and building on lifts the faces beside it across it and grows their tolerances into
-/// an unsound body. An offset that folds (the distance passes the radius) is not refused
-/// here: its face comes out inside out, and the executive takes it away as upstream does
-/// (the lamina edge test). A base that is no NURB has nothing to prove.
+/// an unsound body. An offset that folds (the distance passes the radius) is
+/// [`refuse_folding_offset`]'s, which runs after it. A base that is no NURB has nothing to
+/// prove.
 fn refuse_singular_offset(
     kernel: &Kernel,
     original: &Brep,
@@ -277,7 +276,7 @@ fn refuse_singular_offset(
     }
 }
 
-/// Opt-in (WR-718, #2350 S1): refuses the offset of `face` (whose implicit offset
+/// Not upstream (WR-718, #2350 S1): refuses the offset of `face` (whose implicit offset
 /// surface is `offset`) when it folds on the face's parameter box
 /// ([`crate::offset::construction::sheets::certify_regular`]), naming the largest wall
 /// that works.
@@ -1475,23 +1474,13 @@ impl OffsetExecutive {
             super::face::build_local(original, &self.local_faces, &self.local_surfaces, faceuse)?
         };
         // Not upstream (#2350): a face whose offset provably collapses (a round offset by
-        // its radius) is refused, never built into an unsound body
+        // its radius) is refused, never built into an unsound body; one whose offset folds
+        // (WR-718, S1) is refused, naming the largest wall that works
         if self.local_faces.is_empty() && self.operation() != OffsetOperation::LocalOperation {
             if let Some(crate::surface::surface::SurfaceKind::OffsetSurface(offset)) =
                 surface.as_ref().map(crate::surface::surface::Surface::kind)
             {
                 refuse_singular_offset(kernel, original, id, offset, operation)?;
-            }
-        }
-        // Not upstream (WR-718, #2350 S1), opt-in `Kernel::fixes.shell_one_construction`:
-        // a face whose offset folds is refused, naming the largest wall that works
-        if kernel.fixes.shell_one_construction
-            && self.local_faces.is_empty()
-            && self.operation() != OffsetOperation::LocalOperation
-        {
-            if let Some(crate::surface::surface::SurfaceKind::OffsetSurface(offset)) =
-                surface.as_ref().map(crate::surface::surface::Surface::kind)
-            {
                 refuse_folding_offset(kernel, original, id, offset, operation)?;
             }
         }
@@ -1865,21 +1854,19 @@ pub fn api_offset_brep_full(
     Ok(result)
 }
 
-/// (Not upstream, WR-705, `Kernel::fixes.offset_updates_result_tolerances`.) The
+/// (Not upstream, WR-705.) The
 /// tolerance update `SmBrep::ValidateAndUpdateTolerances(FALSE)` on an API offset's or
 /// shell's result, with no report list, at level 0: each vertex and edge grows to cover
-/// the gaps it bounds, as the update grows them. Nothing is done with the flag off.
+/// the gaps it bounds, as the update grows them.
 ///
 /// # Errors
 ///
 /// Those of [`validate_and_update_tolerances`](crate::topology::brep::validation::validate_and_update_tolerances)
 /// (broken topology links of the result).
 fn update_result_tolerances(kernel: &mut Kernel, result: &mut Brep) -> Result<()> {
-    if kernel.fixes.offset_updates_result_tolerances {
-        crate::topology::brep::validation::validate_and_update_tolerances(
-            kernel, result, false, None, 0,
-        )?;
-    }
+    crate::topology::brep::validation::validate_and_update_tolerances(
+        kernel, result, false, None, 0,
+    )?;
     Ok(())
 }
 
