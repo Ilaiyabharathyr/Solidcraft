@@ -14406,17 +14406,22 @@ fn a_dropped_window_opens_at_the_shown_place_kept_on_its_monitor() {
     assert_eq!((window.mouse_passthrough, window.window_level, window.active), (Some(true), Some(egui::WindowLevel::AlwaysOnTop), Some(false)));
     assert_eq!((window.fullsize_content_view, window.title_shown), (Some(true), Some(false)));
     assert_eq!(adapter.drop_window(&other, "Other".into(), landing).0, dropped, "one window for the whole drag");
-    // It is drawn only once the OS has created it, hidden first.
+    // It is drawn only once the OS has created it, visible but not activated: shown
+    // later, a hidden window would take the app's focus and cancel the drag.
     assert!(adapter.drop_ready(&ctx, &window).is_err(), "no OS windows where viewports are embedded");
     let desktop = egui::Context::default();
     desktop.set_embed_viewports(false);
     let mut waiting = false;
-    let output = desktop.run_ui(egui::RawInput::default(), |ui| waiting = adapter.drop_ready(ui.ctx(), &window) == Ok(false));
+    let mut output = desktop.run_ui(egui::RawInput::default(), |ui| waiting = adapter.drop_ready(ui.ctx(), &window) == Ok(false));
+    output.textures_delta.clear();
     assert!(waiting);
-    assert_eq!(output.viewport_output.get(&dropped).map(|viewport| viewport.builder.visible), Some(Some(false)));
+    assert_eq!(
+        output.viewport_output.get(&dropped).map(|viewport| (viewport.builder.visible, viewport.builder.active)),
+        Some((Some(true), Some(false)))
+    );
     let mut created = egui::RawInput::default();
     created.viewports.entry(dropped).or_default().native_pixels_per_point = Some(2.0);
-    let _ = desktop.run_ui(created, |ui| assert_eq!(adapter.drop_ready(ui.ctx(), &window), Ok(true)));
+    desktop.run_ui(created, |ui| assert_eq!(adapter.drop_ready(ui.ctx(), &window), Ok(true))).textures_delta.clear();
     assert_eq!(window.visible, Some(true));
     let opened = HostId::new("drop-opened").unwrap();
     let create = [HostEffect::CreateNative { host: opened.clone(), section: SectionId::new("opened-section").unwrap() }];

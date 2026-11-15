@@ -287,9 +287,11 @@ impl DesktopNativeAdapter {
         (viewport, builder)
     }
 
-    /// Like `ready`, for the window a drag shows: it is created hidden first.
-    /// Until it exists it is not shown, so release keeps the panel in the app;
-    /// after the startup time this drag stops asking for it.
+    /// Like `ready`, for the window a drag shows, but it is created visible and
+    /// not activated: on macOS, showing a hidden window makes it the key window,
+    /// and the app's focus loss would cancel the drag. Until it exists it is not
+    /// drawn, so release keeps the panel in the app; after the startup time this
+    /// drag stops asking for it.
     pub fn drop_ready(&self, ctx: &egui::Context, builder: &egui::ViewportBuilder) -> PanelResult<bool> {
         if ctx.embed_viewports() {
             return Err(error(Rule::Capability, "native viewports unavailable"));
@@ -304,7 +306,7 @@ impl DesktopNativeAdapter {
             return Err(error(Rule::Lifecycle, "desktop panel window did not open"));
         }
         drop(state);
-        ctx.show_viewport_deferred(viewport, builder.clone().with_visible(false), |_, _| {});
+        ctx.show_viewport_deferred(viewport, builder.clone(), |_, _| {});
         ctx.request_repaint_after(Duration::from_millis(30));
         Ok(false)
     }
