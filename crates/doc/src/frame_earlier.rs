@@ -227,7 +227,7 @@ impl Members {
         let inside = regions.first().map(|r| r.interior_point()).ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;
         let (ends, points) = {
             let placed = placer(&axes, at);
-            let ends = frame_ends(&g.kind, &segments, &regions, &placed, plan, (sketch_x, &drawn))?;
+            let ends = frame_ends(&g.kind, &segments, &regions, &placed, (plan, &planes), (sketch_x, &drawn))?;
             let along = |m: usize, a: Vec3, b: Vec3, t: f64| placed(m, a + (b - a) * t).to_world(inside);
             (ends, segments.iter().enumerate().map(|(m, (_, a, b))| [0.25, 0.5, 0.75].map(|t| along(m, *a, *b, t))).collect())
         };

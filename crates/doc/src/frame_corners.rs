@@ -73,6 +73,30 @@ pub struct Cut {
 /// The points where exactly two members end and no third member ends or passes, ordered by the
 /// lower member index, then the other.
 pub fn find_corners(segments: &[(String, Vec3, Vec3)]) -> Vec<Corner> {
+    let mut corners: Vec<Corner> = meetings(segments)
+        .into_iter()
+        .filter_map(|(point, ends)| match ends.as_slice() {
+            &[a, b] => Some(Corner { point, ends: [a, b] }),
+            _ => None,
+        })
+        .collect();
+    corners.sort_by_key(|c| {
+        let [(a, sa), (b, sb)] = c.ends;
+        (a, b, sa, sb)
+    });
+    corners
+}
+
+/// The points where three or more members end and no other member ends or passes, each with its ends
+/// `(member, at_start)` by member index.
+pub fn find_crowded(segments: &[(String, Vec3, Vec3)]) -> Vec<(Vec3, Vec<(usize, bool)>)> {
+    meetings(segments).into_iter().filter(|(_, ends)| ends.len() >= 3).collect()
+}
+
+/// The points where two or more ends of different members meet, each end there within CORNER_TOL of
+/// every other and of no end elsewhere, and no other member passes: each point (the mean of its ends)
+/// with its ends `(member, at_start)` by member index.
+fn meetings(segments: &[(String, Vec3, Vec3)]) -> Vec<(Vec3, Vec<(usize, bool)>)> {
     let ends: Vec<(usize, bool, Vec3)> =
         segments.iter().enumerate().flat_map(|(m, (_, a, b))| [(m, true, *a), (m, false, *b)]).filter(|e| e.2.is_finite()).collect();
     // Ends within CORNER_TOL of each other fall in the same or neighbouring cells.
@@ -81,9 +105,10 @@ pub fn find_corners(segments: &[(String, Vec3, Vec3)]) -> Vec<Corner> {
     for (k, e) in ends.iter().enumerate() {
         grid.entry(cell(e.2)).or_default().push(k);
     }
-    let near = |k: usize, p: Vec3| {
+    // End k and the ends near it, sorted.
+    let with_near = |k: usize, p: Vec3| {
         let (x, y, z) = cell(p);
-        let mut out = Vec::new();
+        let mut out = vec![k];
         for dx in -1..=1i64 {
             for dy in -1..=1i64 {
                 for dz in -1..=1i64 {
@@ -93,27 +118,30 @@ pub fn find_corners(segments: &[(String, Vec3, Vec3)]) -> Vec<Corner> {
                 }
             }
         }
+        out.sort_unstable();
         out
     };
-    let mut corners = Vec::new();
-    for (i, &(mi, si, pi)) in ends.iter().enumerate() {
-        let &[&j] = near(i, pi).as_slice() else { continue };
-        let Some(&(mj, sj, pj)) = ends.get(j) else { continue };
-        if j < i || mi == mj || near(j, pj) != [&i] {
+    let mut out = Vec::new();
+    for (i, &(_, _, pi)) in ends.iter().enumerate() {
+        let here = with_near(i, pi);
+        // Each point once, from its first end; every end there near exactly the others.
+        if here.len() < 2 || here.first() != Some(&i) || here.iter().skip(1).any(|&j| ends.get(j).is_none_or(|e| with_near(j, e.2) != here)) {
             continue;
         }
-        let point = (pi + pj) * 0.5;
-        // ponytail: every corner checks every member, O(members × corners), fine under MAX_MEMBERS; grid the segments if it shows.
-        let crossed = segments.iter().enumerate().any(|(m, (_, a, b))| m != mi && m != mj && point.dist_to_segment(*a, *b) <= CORNER_TOL);
+        let at: Vec<(usize, bool, Vec3)> = here.iter().filter_map(|&j| ends.get(j).copied()).collect();
+        // A member with both ends here has no length: no corner.
+        if at.windows(2).any(|w| matches!(w, [a, b] if a.0 == b.0)) {
+            continue;
+        }
+        let (Some(&(_, _, first)), n) = (at.first(), at.len()) else { continue };
+        let point = at.iter().skip(1).fold(first, |s, e| s + e.2) * (1.0 / n as f64);
+        // ponytail: every point checks every member, O(members × points), fine under MAX_MEMBERS; grid the segments if it shows.
+        let crossed = segments.iter().enumerate().any(|(m, (_, a, b))| !at.iter().any(|e| e.0 == m) && point.dist_to_segment(*a, *b) <= CORNER_TOL);
         if !crossed {
-            corners.push(Corner { point, ends: [(mi, si), (mj, sj)] });
+            out.push((point, at.into_iter().map(|(m, s, _)| (m, s)).collect()));
         }
     }
-    corners.sort_by_key(|c| {
-        let [(a, sa), (b, sb)] = c.ends;
-        (a, b, sa, sb)
-    });
-    corners
+    out
 }
 
 /// "Corner at (x, y, z) is {what}", each coordinate to 2 decimals without trailing zeros.

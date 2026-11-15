@@ -768,7 +768,9 @@ fn members_in_line_are_left_square() {
 }
 
 #[test]
-fn three_members_at_a_point_are_left_alone() {
+fn the_third_member_at_a_point_is_fitted_to_the_first_two() {
+    // Three tubes end at (300, 0): the two along X, laid first, make the corner, in line, so both stay square; the
+    // upright, laid last, is fitted flat to their top faces at y = 20, A·280 of it left.
     let mut s = Session::default();
     run(&mut s, "sketch.create", json!({"plane": "XY", "name": "T"}));
     run(&mut s, "sketch.line", json!({"points": [[0, 0], [300, 0], [600, 0]]}));
@@ -778,9 +780,28 @@ fn three_members_at_a_point_are_left_alone() {
     let bs = bodies(&mut s);
     assert_eq!(bs.len(), 3, "{bs:?}");
     for (lo, hi) in
-        [([0.0, -20.0, -20.0], [300.0, 20.0, 20.0]), ([300.0, -20.0, -20.0], [600.0, 20.0, 20.0]), ([280.0, 0.0, -20.0], [320.0, 300.0, 20.0])]
+        [([0.0, -20.0, -20.0], [300.0, 20.0, 20.0]), ([300.0, -20.0, -20.0], [600.0, 20.0, 20.0]), ([280.0, 20.0, -20.0], [320.0, 300.0, 20.0])]
     {
         assert!(bs.iter().any(|b| near3(b.2, lo) && near3(b.3, hi)), "{lo:?} {hi:?}: {bs:?}");
+    }
+    assert!(bs.iter().any(|b| b.2[1] > 1.0 && rel(b.1, tube_area() * 280.0) < MEASURED), "{bs:?}");
+    assert!(overlap_all(&mut s) < 1e-3);
+}
+
+#[test]
+fn an_end_cap_on_the_third_member_fitted_at_a_point_is_refused() {
+    // The upright of `the_third_member_at_a_point_is_fitted_to_the_first_two`, in square tube: its fitted end lies
+    // flat on the horizontals' top faces at y = 20, square to its line, and is no open end, as Auto's fitted ends.
+    for corner in ["mitre", "butt", "coped_butt"] {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "T"}));
+        run(&mut s, "sketch.line", json!({"points": [[0, 0], [300, 0], [600, 0]]}));
+        run(&mut s, "sketch.line", json!({"points": [[300, 0], [300, 300]], "ids": ["up"]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "frame.member", json!({"sketch": "T", "profile": square_tube(), "corner": corner, "names": {"up": "Up"}}));
+        let face = face_pick(&s, "Up", [281.5, 20.0, 0.0], [0.0, -1.0, 0.0]);
+        let e = s.execute("frame.end_cap", &json!({"faces": [face], "thickness": 6})).unwrap_err().to_string();
+        assert!(e.contains("not an open end"), "{corner}: {e}");
     }
 }
 
@@ -2865,37 +2886,171 @@ fn three_tubes_through_a_point_and_one_ending_there_never_overlap() {
     assert!(o < 1e-3, "the tubes overlap by {o} mm³");
 }
 
+/// The 600 × 400 rectangle `Frame` and its diagonal `d` (0, 0)…(600, 400).
+fn diagonal_frame(s: &mut Session) {
+    run(s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
+    run(s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]}));
+    run(s, "sketch.line", json!({"points": [[0, 0], [600, 400]], "ids": ["d"]}));
+    run(s, "sketch.finish", json!({}));
+}
+
+/// A body's volume and box.
+type Tube = (f64, [f64; 3], [f64; 3]);
+
+/// Each body's volume and box but `skip`'s, sorted by box.
+fn volumes_and_boxes(s: &mut Session, skip: &[&str]) -> Vec<Tube> {
+    let mut out: Vec<Tube> = bodies(s).into_iter().filter(|b| !skip.contains(&b.0.as_str())).map(|b| (b.1, b.2, b.3)).collect();
+    out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(a.2.partial_cmp(&b.2).unwrap()));
+    out
+}
+
+/// The plain 600 × 400 rectangle's four tubes finished `corner`: volume and box, sorted by box.
+fn plain_rectangle(profile: Value, corner: &str) -> Vec<Tube> {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": profile, "corner": corner}));
+    volumes_and_boxes(&mut s, &[])
+}
+
+fn assert_same_tubes(got: &[Tube], want: &[Tube], what: &str) {
+    assert_eq!(got.len(), want.len(), "{what}: {got:?} vs {want:?}");
+    for (g, w) in got.iter().zip(want) {
+        assert!(rel(g.0, w.0) < 1e-9 && near3(g.1, w.1) && near3(g.2, w.2), "{what}: {got:?} vs {want:?}");
+    }
+}
+
+/// Square tube 40 × 40 × 3 (no radii): A = 40² − 34².
+const SQUARE_TUBE_AREA: f64 = 444.0;
+/// The diagonal (0, 0)…(600, 400) in square tube fitted at both ends to the tubes filling x ≤ 20 and y ≤ 20 round
+/// (0, 0) (and x ≥ 580 and y ≥ 380 round (600, 400)), as worked by hand in `an_auto_x_brace_keeps_one_diagonal_whole`:
+/// A·L − 2C.
+const FITTED_DIAGONAL: f64 = 279_714.873_823;
+
 #[test]
-fn a_mitre_frame_keeps_its_crossings_overlapping() {
-    // Only Auto cuts crossings: on a Mitre frame the diagonals stay whole and pass through each other, built exactly
-    // as before crossings were cut. Each diagonal meets two sides at its corners, three tubes at a point, which a
-    // Mitre frame leaves square: A × L = 420.82 × 721.110 = 303459.78 each, its box its line ± (11.094, 16.641)
-    // across it (20 × (2, 3)/√13). The volumes (to 1e-12, as the last bits may differ from platform to platform)
-    // and the face names were recorded on `frame-crossings` at 27b384111, before the build changed (its non-Auto path
-    // is stage 2's).
+fn a_diagonal_into_a_mitred_rectangle_fits_the_corners() {
+    // Three tubes end at (0, 0) and at (600, 400): two sides and d. The sides, laid first (outer tubes, longest
+    // first), make the mitre exactly as the plain rectangle's (stage 1: the bottom runs -20…620 in x, A·600, the left
+    // -20…420 in y, A·400); d is cut to fit them, whatever Fit Ends says. The mitred bottom (|y| ≤ 20, x ≥ y) and
+    // left (|x| ≤ 20, y ≥ x) fill y ≤ 20 or x ≤ 20 round the corner, as Auto's butted sides do: d is the diagonal
+    // Auto fits there, FITTED_DIAGONAL, its box x 20…580, y 20…380, and no tube overlaps another.
+    let plain = plain_rectangle(square_tube(), "mitre");
+    let a = SQUARE_TUBE_AREA;
+    for (lo, hi, len) in [([-20.0, -20.0, -20.0], [620.0, 20.0, 20.0], 600.0), ([-20.0, -20.0, -20.0], [20.0, 420.0, 20.0], 400.0)] {
+        assert!(plain.iter().any(|b| rel(b.0, a * len) < MEASURED && near3(b.1, lo) && near3(b.2, hi)), "{plain:?}");
+    }
+    for fit_ends in [false, true] {
+        let mut s = Session::default();
+        diagonal_frame(&mut s);
+        let p = json!({"sketch": "Frame", "profile": square_tube(), "corner": "mitre", "fit_ends": fit_ends, "names": {"d": "D"}});
+        run(&mut s, "frame.member", p);
+        assert_same_tubes(&volumes_and_boxes(&mut s, &["D"]), &plain, &format!("fit_ends {fit_ends}"));
+        let d = measured(&mut s, "D");
+        assert!(rel(d.1, FITTED_DIAGONAL) < 1e-6, "fit_ends {fit_ends}: {d:?}");
+        assert!(near3(d.2, [20.0, 20.0, -20.0]) && near3(d.3, [580.0, 380.0, 20.0]), "fit_ends {fit_ends}: {d:?}");
+        let o = overlap_all(&mut s);
+        assert!(o < 1e-3, "fit_ends {fit_ends}: the frame overlaps by {o} mm³");
+    }
+}
+
+#[test]
+fn a_diagonal_into_a_butted_or_coped_rectangle_fits_the_corners() {
+    // As the mitre: the sides make the corner exactly as the plain rectangle's; d is fitted to them. The butted (or
+    // coped) sides fill y ≤ 20 or x ≤ 20 round the corner too (a coped tube's tool runs to its line's end), so d's
+    // box is x 20…580, y 20…380.
+    for corner in ["butt", "coped_butt"] {
+        let plain = plain_rectangle(tube(), corner);
+        let mut s = Session::default();
+        diagonal_frame(&mut s);
+        run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": corner, "names": {"d": "D"}}));
+        assert_same_tubes(&volumes_and_boxes(&mut s, &["D"]), &plain, corner);
+        let d = measured(&mut s, "D");
+        assert!(near3(d.2, [20.0, 20.0, -20.0]) && near3(d.3, [580.0, 380.0, 20.0]), "{corner}: {d:?}");
+        let o = overlap_all(&mut s);
+        assert!(o < 1e-3, "{corner}: the frame overlaps by {o} mm³");
+    }
+}
+
+#[test]
+fn a_mitre_x_brace_fits_its_diagonals_into_the_corners() {
+    // Only Auto cuts crossings: on a Mitre frame the diagonals stay whole and pass through each other. At each corner
+    // two sides and a diagonal end: the sides mitre as the plain rectangle's, and the diagonal is fitted to them,
+    // FITTED_DIAGONAL each (d2 is d1 mirrored), boxes x 20…580, y 20…380. Only the diagonals overlap.
     let mut s = Session::default();
     x_brace_frame(&mut s);
-    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "names": {"d1": "D1", "d2": "D2"}}));
-    let (got, faces) = built(&mut s);
-    assert_eq!(got.len(), 6, "{got:?}");
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": "mitre", "names": {"d1": "D1", "d2": "D2"}}));
+    assert_eq!(bodies(&mut s).len(), 6);
+    assert_same_tubes(&volumes_and_boxes(&mut s, &["D1", "D2"]), &plain_rectangle(square_tube(), "mitre"), "sides");
+    for name in ["D1", "D2"] {
+        let d = measured(&mut s, name);
+        assert!(rel(d.1, FITTED_DIAGONAL) < 1e-6, "{d:?}");
+        assert!(near3(d.2, [20.0, 20.0, -20.0]) && near3(d.3, [580.0, 380.0, 20.0]), "{d:?}");
+    }
+    let names: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+    let i = run(&mut s, "inspect.interference", json!({"bodies": names}));
+    let mut diagonals = 0.0;
+    for x in i["interferences"].as_array().unwrap() {
+        let pair = [x["a"].as_str().unwrap(), x["b"].as_str().unwrap()];
+        let v = f(&x["volume_mm3"]);
+        if pair.contains(&"D1") && pair.contains(&"D2") {
+            diagonals = v;
+        } else {
+            assert!(v < 1e-3, "{pair:?} overlap by {v} mm³");
+        }
+    }
+    assert!(diagonals > 1000.0, "the diagonals overlap by {diagonals} mm³");
+}
+
+#[test]
+fn a_diagonal_into_a_mitred_or_butted_rectangle_is_the_same_whatever_the_pick_order() {
+    for corner in ["mitre", "butt"] {
+        let build = |reverse: bool| {
+            let mut s = Session::default();
+            diagonal_frame(&mut s);
+            let mut lines: Vec<String> = sketch_lines(&s, "Frame").into_iter().map(|l| l.0).collect();
+            assert_eq!(lines.len(), 5);
+            if reverse {
+                lines.reverse();
+            }
+            let names: serde_json::Map<String, Value> = lines.iter().map(|l| (l.clone(), json!(l))).collect();
+            run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": corner, "lines": lines, "names": names}));
+            built(&mut s)
+        };
+        let ((drawn, drawn_faces), (picked, picked_faces)) = (build(false), build(true));
+        assert_eq!(drawn.keys().collect::<Vec<_>>(), picked.keys().collect::<Vec<_>>());
+        for (line, (v, lo, hi)) in &drawn {
+            let (pv, plo, phi) = picked[line];
+            assert!(rel(pv, *v) < 1e-9 && near3(plo, *lo) && near3(phi, *hi), "{corner} {line}: drawn {drawn:?} picked {picked:?}");
+        }
+        assert_eq!(drawn_faces, picked_faces, "{corner}");
+        // d's fitted faces are named for its ends and the sides they fit.
+        for role in ["corner_start:", "corner_end:"] {
+            assert!(drawn_faces["d"].iter().any(|n| n.contains(role)), "{corner} {role}: {:?}", drawn_faces["d"]);
+        }
+    }
+}
+
+#[test]
+fn a_diagonal_in_a_none_frame_is_left_square() {
+    // None finishes no corner: five square tubes, each A·L, the diagonal's box its line ± (11.094, 16.641) across
+    // it (20 × (2, 3)/√13).
+    let mut s = Session::default();
+    diagonal_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "none", "names": {"d": "D"}}));
     let (h, w) = (11.094_003_924_504_584, 16.641_005_886_756_876);
     let l = 721.110_255_092_797_8;
-    let mut names: Vec<String> = (0..18).map(|k| format!("F2:face:{k}")).collect();
-    names.sort();
-    for (name, recorded) in [("D1", 303_459.783_093_945_24), ("D2", 303_459.783_093_863)] {
-        let (v, lo, hi) = got[name];
-        assert!(
-            rel(v, tube_area() * l) < MEASURED && near3(lo, [-h, -w, -20.0]) && near3(hi, [600.0 + h, 400.0 + w, 20.0]),
-            "{name}: {:?}",
-            got[name]
-        );
-        assert!(rel(v, recorded) < 1e-12, "{name}: {v:?}");
-        assert_eq!(faces[name], names, "{name}");
+    let d = measured(&mut s, "D");
+    assert!(rel(d.1, tube_area() * l) < MEASURED && near3(d.2, [-h, -w, -20.0]) && near3(d.3, [600.0 + h, 400.0 + w, 20.0]), "{d:?}");
+    let sides = volumes_and_boxes(&mut s, &["D"]);
+    assert_eq!(sides.len(), 4, "{sides:?}");
+    for (len, lo, hi) in [
+        (400.0, [-20.0, 0.0, -20.0], [20.0, 400.0, 20.0]),
+        (600.0, [0.0, -20.0, -20.0], [600.0, 20.0, 20.0]),
+        (600.0, [0.0, 380.0, -20.0], [600.0, 420.0, 20.0]),
+        (400.0, [580.0, 0.0, -20.0], [620.0, 400.0, 20.0]),
+    ] {
+        assert!(sides.iter().any(|b| rel(b.0, tube_area() * len) < MEASURED && near3(b.1, lo) && near3(b.2, hi)), "{len} {lo:?}: {sides:?}");
     }
-    let names: Vec<String> = ["D1", "D2"].map(String::from).to_vec();
-    let i = run(&mut s, "inspect.interference", json!({"bodies": names}));
-    let o: f64 = i["interferences"].as_array().map_or(0.0, |all| all.iter().map(|x| f(&x["volume_mm3"])).sum());
-    assert!(o > 1000.0, "the diagonals overlap by {o} mm³");
+    assert!(overlap_all(&mut s) > 1000.0);
 }
 
 #[test]

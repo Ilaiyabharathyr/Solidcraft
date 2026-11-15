@@ -85,17 +85,18 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
         })
     };
     // This frame's own members' cut ends, to build their tools from, and each tool once built.
-    let mut own_ends = if fits { frame_ends(&f.kind, &segments, &regions, &placed, plan.clone(), (sketch_x, &drawn))? } else { Vec::new() };
+    let mut own_ends =
+        if fits { frame_ends(&f.kind, &segments, &regions, &placed, (plan.clone(), &planes), (sketch_x, &drawn))? } else { Vec::new() };
     let mut tools: Vec<Option<kernel::Body>> = vec![None; segments.len()];
     if fits && let Some(plan) = plan.as_mut() {
         // A chain corner that turns Free changes only its chain's members' ends, never a group member's (whose tools
         // it builds): the tools built stay right.
         let tool = |k: usize| member_tool(&segments, &regions, &placed, &own_ends, k);
         if free_chains(plan, &earlier, (&placed, centre), &|k, p| near_with(&own_ends, k, p), &tool, &mut tools, &segments)? {
-            own_ends = frame_ends(&f.kind, &segments, &regions, &placed, Some(plan.clone()), (sketch_x, &drawn))?;
+            own_ends = frame_ends(&f.kind, &segments, &regions, &placed, (Some(plan.clone()), &planes), (sketch_x, &drawn))?;
         }
     }
-    let unjointed = if fits { unjointed_ends(&f.kind, &segments, plan.as_ref()) } else { Vec::new() };
+    let unjointed = if fits { unjointed_ends(&f.kind, &segments, plan.as_ref(), (&planes, &drawn)) } else { Vec::new() };
     // This frame's own members, for its free ends: their laying order (Auto's, else the drawing order, never the
     // pick order), and their cut ends to build their tools from.
     let mut laid = vec![usize::MAX; segments.len()];
@@ -119,8 +120,10 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
         // A frame with no corners to finish is built exactly as it always was.
         (Vec::new(), Vec::new())
     } else {
-        let (ends, copes) = corner_ends(&segments, &regions, &placed, (*corner, *flip), corners, (sketch_x, &drawn))?;
-        (cut_members(&segments, &regions, (&placed, &|_, _| None), &ends, copes)?, Vec::new())
+        let ((ends, copes), fits) = corner_ends(&segments, &regions, &placed, (*corner, *flip), corners, (&planes, sketch_x, &drawn))?;
+        let mut cut = cut_members(&segments, &regions, (&placed, &|_, _| None), &ends, copes)?;
+        fit_members(&segments, &regions, &placed, &ends, &fits, (&mut cut, &[], &mut []))?;
+        (cut, Vec::new())
     };
     // Each member's body; `None` for a piece left wholly inside the tubes it is fitted to.
     let mut made = Vec::with_capacity(segments.len());
@@ -182,14 +185,18 @@ type CornerEnds = (Vec<[Option<CutEnd>; 2]>, Vec<(usize, usize, Vec3, Vec3)>);
 /// each member's place in the sketch's drawing order.
 type Tie<'a> = (Option<Vec3>, &'a [usize]);
 
+/// Stage 1's ends ([`frame_corners::find_corners`], each corner finished as the frame or its override says), and under
+/// Mitre, Butt and Coped those at each point where three or more members end ([`crowded`]): its corner finished as the
+/// frame's, every other end there fitted (`(None, 0, false)`, as Auto's), with the fits in laying order. `planes`: each
+/// member's plane, for the laying order.
 fn corner_ends(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
     placed: &dyn Fn(usize, Vec3) -> Plane,
     finish: (CornerType, bool),
     overrides: &[CornerOverride],
-    (sketch_x, drawn): Tie,
-) -> Result<CornerEnds> {
+    (planes, sketch_x, drawn): (&[MemberPlane], Option<Vec3>, &[usize]),
+) -> Result<(CornerEnds, Vec<Fit>)> {
     // A design file is hostile input: the command checks the list, a file may not.
     if overrides.len() > MAX_MEMBERS {
         return Err(DocError::Invalid(format!("at most {MAX_MEMBERS} corner overrides in one feature")));
@@ -228,7 +235,52 @@ fn corner_ends(
         let cuts = frame_corners::corner_cuts(kind, flip, c, segments, placed, regions, sketch_x, drawn)?;
         add_corner(&mut out, c, kind.flips(), cuts, segments, regions, placed)?;
     }
-    Ok(out)
+    // None leaves every point as it is. No override names a point of three or more ends (Auto's alone).
+    let (crowded, fits) = if finish.0.is_none() { (Vec::new(), Vec::new()) } else { crowded(segments, planes, drawn) };
+    for c in &crowded {
+        let cuts = frame_corners::corner_cuts(finish.0, finish.1, c, segments, placed, regions, sketch_x, drawn)?;
+        add_corner(&mut out, c, finish.0.flips(), cuts, segments, regions, placed)?;
+    }
+    for f in &fits {
+        if let Some(e) = out.0.get_mut(f.member).and_then(|e| e.get_mut(usize::from(!f.at_start)))
+            && e.is_none()
+        {
+            *e = Some((None, 0.0, false));
+        }
+    }
+    Ok((out, fits))
+}
+
+/// Under Mitre, Butt and Coped (#4003), each point where three or more members end and none passes through
+/// ([`frame_corners::find_crowded`]): the two laid first ([`frame_layout::ranks`]: outer tubes first, longest first,
+/// never the pick order) make its corner, its ends by member index as stage 1's, and each other end there is cut to
+/// fit the tubes laid before it there, as Auto fits the third end at a point. The corners, and the fits in laying
+/// order.
+fn crowded(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: &[usize]) -> (Vec<Corner>, Vec<Fit>) {
+    let points = frame_corners::find_crowded(segments);
+    if points.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut laid = vec![usize::MAX; segments.len()];
+    for (i, r) in frame_layout::ranks(segments, planes, drawn).iter().enumerate() {
+        if let Some(p) = laid.get_mut(r.member) {
+            *p = i;
+        }
+    }
+    let place = |m: usize| (laid.get(m).copied().unwrap_or(usize::MAX), m);
+    let (mut corners, mut fits) = (Vec::new(), Vec::new());
+    for (point, mut ends) in points {
+        ends.sort_by_key(|e| place(e.0));
+        let [a, b, rest @ ..] = ends.as_slice() else { continue };
+        let mut pair = [*a, *b];
+        pair.sort_unstable();
+        corners.push(Corner { point, ends: pair });
+        for (j, e) in rest.iter().enumerate() {
+            fits.push(Fit { member: e.0, at_start: e.1, against: ends.iter().take(j + 2).map(|e| e.0).collect() });
+        }
+    }
+    fits.sort_by_key(|f| place(f.member));
+    (corners, fits)
 }
 
 /// A corner's cuts as [`frame_corners::corner_cuts`] gives them, put into `ends` (each cut end with how far past
@@ -727,18 +779,35 @@ pub(crate) fn auto_members(
     let mut dropped = vec![false; segments.len()];
     let ((ends, copes), fits) = auto_ends(segments, regions, placed, plan, tie)?;
     let mut out = cut_members(segments, regions, (placed, unreversed), &ends, copes)?;
+    fit_members(segments, regions, placed, &ends, &fits, (&mut out, &crossed, &mut dropped))?;
+    Ok((out, dropped))
+}
+
+/// Each end of `fits` (in laying order) of `out` (each member as built) cut to fit the members it meets as their plane
+/// cuts (`ends`) build them (each member's cutting tool, [`member_tool`], made once). A fitted face is named for the
+/// end it finishes and the id of the member it fits, `corner_start:<member>:face:<k>` (`corner_end:…`). A piece cut
+/// where tubes cross (`crossed`) keeps what lies past them ([`frame_fit::fit_piece_end`]); with nothing left it has
+/// no body, and `dropped` says so.
+fn fit_members(
+    segments: &[(String, Vec3, Vec3)],
+    regions: &[Region2],
+    placed: &dyn Fn(usize, Vec3) -> Plane,
+    ends: &[[Option<CutEnd>; 2]],
+    fits: &[Fit],
+    (out, crossed, dropped): (&mut [Option<Traced>], &[bool], &mut [bool]),
+) -> Result<()> {
     let no_member = |m: usize| DocError::Invalid(format!("no member {m}"));
     let mut tools: Vec<Option<kernel::Body>> = (0..segments.len()).map(|_| None).collect();
     for &t in fits.iter().flat_map(|f| &f.against) {
         if let Some(slot) = tools.get_mut(t)
             && slot.is_none()
         {
-            *slot = Some(member_tool(segments, regions, placed, &ends, t)?.body);
+            *slot = Some(member_tool(segments, regions, placed, ends, t)?.body);
         }
     }
     // A point in the section's material (a tube's wall, not its bore).
     let inside = regions.first().map(|r| r.interior_point()).ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;
-    for f in &fits {
+    for f in fits {
         if dropped.get(f.member) == Some(&true) {
             continue;
         }
@@ -767,7 +836,7 @@ pub(crate) fn auto_members(
             *slot = Some(frame_fit::fit_end(&member, end, toward, middle, &against, id)?);
         }
     }
-    Ok((out, dropped))
+    Ok(())
 }
 
 /// Member m's cutting tool ([`frame_fit::fit_tool`]) as its plane cuts (`ends`) build it: a fitted or coped end stops
@@ -796,7 +865,7 @@ fn frame_ends(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
     placed: &dyn Fn(usize, Vec3) -> Plane,
-    plan: Option<Plan>,
+    (plan, planes): (Option<Plan>, &[MemberPlane]),
     tie: Tie,
 ) -> Result<Vec<[Option<CutEnd>; 2]>> {
     let FeatureKind::FrameMember { corner, flip, corners, .. } = f else {
@@ -807,7 +876,7 @@ fn frame_ends(
     } else if corner.is_none() && corners.is_empty() {
         Vec::new()
     } else {
-        corner_ends(segments, regions, placed, (*corner, *flip), corners, tie)?.0
+        corner_ends(segments, regions, placed, (*corner, *flip), corners, (planes, tie.0, tie.1))?.0.0
     })
 }
 
@@ -899,8 +968,14 @@ fn holds<'a>(p: Vec3, tools: impl IntoIterator<Item = &'a kernel::Body>) -> bool
 /// (claude_fusion `fit`: `pool, more = tubes, mine`). Under Auto (`plan`): every end but those of a jointed corner or
 /// a chained one; the ends fitted to this frame's own tubes (`plan.fits`: T-junctions, the third and later ends at a
 /// point) are not free, as Auto fits them to their own; lone ends and a Free corner's are. Under Mitre, Butt and
-/// Coped: the ends at no corner, free. Under None: none. (member, at_start, free).
-fn unjointed_ends(f: &FeatureKind, segments: &[(String, Vec3, Vec3)], plan: Option<&Plan>) -> Vec<(usize, bool, bool)> {
+/// Coped: the ends at no corner, free, and those fitted where three or more end ([`crowded`]), not free. Under None:
+/// none. (member, at_start, free).
+fn unjointed_ends(
+    f: &FeatureKind,
+    segments: &[(String, Vec3, Vec3)],
+    plan: Option<&Plan>,
+    (planes, drawn): (&[MemberPlane], &[usize]),
+) -> Vec<(usize, bool, bool)> {
     let FeatureKind::FrameMember { corner, .. } = f else { return Vec::new() };
     let (jointed, fitted): (HashSet<(usize, bool)>, HashSet<(usize, bool)>) = match plan {
         Some(plan) => (
@@ -913,7 +988,11 @@ fn unjointed_ends(f: &FeatureKind, segments: &[(String, Vec3, Vec3)], plan: Opti
             plan.fits.iter().map(|f| (f.member, f.at_start)).collect(),
         ),
         None if *corner == CornerType::None => return Vec::new(),
-        None => (frame_corners::find_corners(segments).iter().flat_map(|c| c.ends).collect(), HashSet::new()),
+        None => {
+            let (crowded, fits) = crowded(segments, planes, drawn);
+            let corners = frame_corners::find_corners(segments).into_iter().chain(crowded);
+            (corners.flat_map(|c| c.ends).collect(), fits.iter().map(|f| (f.member, f.at_start)).collect())
+        }
     };
     (0..segments.len())
         .flat_map(|m| [(m, true), (m, false)])
@@ -1128,7 +1207,7 @@ pub(crate) fn member_section(
     // Cap refuses it from the face itself).
     // ponytail: a corner or chain corner Fit Ends turns Free (inside a tube) is read here as jointed, as is an end
     // fitted to a tube as open; finding them builds every earlier tool, which End Cap would pay on every pick.
-    let ends = frame_ends(&f.kind, &segments, &regions, &placed, plan, (sketch_x, &drawn))?;
+    let ends = frame_ends(&f.kind, &segments, &regions, &placed, (plan, &planes), (sketch_x, &drawn))?;
     let dir = (b - a).normalized().ok_or_else(|| DocError::Invalid(format!("line `{line}` has no length")))?;
     let [start, end] = ends.get(m).copied().unwrap_or([None, None]);
     let square = |e: Option<CutEnd>, p: Vec3| match e {

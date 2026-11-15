@@ -53,11 +53,17 @@ fn a_rectangle_has_four_corners() {
 fn three_ends_at_a_point_or_an_end_on_a_middle_is_no_corner() {
     let tee = vec![seg("a", (0.0, 0.0), (100.0, 0.0)), seg("b", (0.0, 0.0), (0.0, 100.0)), seg("c", (0.0, 0.0), (-100.0, 0.0))];
     assert!(find_corners(&tee).is_empty());
+    // Three ends at a point: crowded, every end by member index.
+    assert_eq!(find_crowded(&tee), vec![(Vec3::new(0.0, 0.0, 0.0), vec![(0, true), (1, true), (2, true)])]);
     let on_middle = vec![seg("a", (-100.0, 0.0), (100.0, 0.0)), seg("b", (0.0, 0.0), (0.0, 100.0))];
     assert!(find_corners(&on_middle).is_empty());
     // Two ends meet, but a third line passes through the point.
     let crossed = vec![seg("a", (0.0, 0.0), (100.0, 0.0)), seg("b", (0.0, 0.0), (0.0, 100.0)), seg("c", (-50.0, -50.0), (50.0, 50.0))];
     assert!(find_corners(&crossed).is_empty());
+    // Three ends meet, and a fourth line passes through: neither.
+    let mut crowded = tee.clone();
+    crowded.push(seg("d", (-50.0, -50.0), (50.0, 50.0)));
+    assert!(find_corners(&crowded).is_empty() && find_crowded(&crowded).is_empty());
 }
 
 #[test]

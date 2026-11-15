@@ -51,9 +51,15 @@ the selected body (or the last body of the active component).
 overlap as before), `mitre`, `butt`, `coped_butt` or `auto` (shown as **Auto**, **None**, **Mitre**,
 **Butt** and **Coped**). **Auto** is described in its own section below.
 
-A **corner** is a point where exactly two of the feature's members end, within 0.001 mm: sketch-line
-members and members between two points (`pairs`) alike. Where three or more members end, where a
-member ends on the middle of another, and where lines cross, nothing is cut: those stay as before. Two members in line (within 0.01 degrees) stay square whatever the type.
+A **corner** is a point where two or more of the feature's members end, within 0.001 mm, and no
+other member passes through: sketch-line members and members between two points (`pairs`) alike.
+Where exactly two end, they make the corner. Where three or more end (a rectangle with a brace from
+corner to corner), the two that come first in Auto's laying order (see Auto below: outer tubes first,
+longest first, never the pick order) make the corner, finished with the frame's type and flip
+exactly as if they were alone there, and every other tube ending there is cut to fit the tubes laid
+before it there, as Auto fits it, whatever Fit Ends to Earlier Frames says: a brace fits into a
+rectangle's mitre or butt. Where a member ends on the middle of another, and where lines cross,
+nothing is cut: those stay as before. Two members in line (within 0.01 degrees) stay square whatever the type.
 A corner sharper than 5 degrees inside is refused: "Corner at (x, y, z) is too sharp to finish".
 
 - **Mitre**: both members are cut on the plane that bisects the corner.
@@ -71,7 +77,8 @@ A corner sharper than 5 degrees inside is refused: "Corner at (x, y, z) is too s
   through member is refused.
 
 **Corner Overrides** (`corners`) give single corners their own type and flip. Each is saved by the
-ids of the two members that meet there (a line's id, or a pair's `pair1`, `pair2`…), not by the
+ids of the two members that meet there (a line's id, or a pair's `pair1`, `pair2`…; a point where
+three or more end takes an override only under Auto), not by the
 point, so it survives a dimension change while the members still meet. If they no longer do, the
 feature fails with "A corner override is not at a corner of the frame", and Edit Feature still opens
 with that override listed so it can be removed. Changing the
@@ -82,7 +89,8 @@ its corners cut into pieces with "the member on line `id` is cut into pieces by 
 
 An **End Cap** goes on an uncut end, or on the through member's square cut end of a Butt or Coped
 corner at a 90° corner, which is cut square to its own line. It refuses every other end: a mitre, the butting member's end of a
-Butt (it lies against the through member), and the cope face of a Coped corner.
+Butt (it lies against the through member), the cope face of a Coped corner, and the end of a tube fitted
+where three or more end.
 
 In the dialog, a box drag in the view picks the frame sketch's straight lines (not construction,
 projected lines or arcs), and the corner points when Corner Overrides is active (Shift adds). Each
@@ -112,8 +120,8 @@ one, or list them in `lines`.
 
 **Corner Type Auto** (`corner: "auto"`) works out every joint of the frame for you. It is first in the
 Corner Type list and a new dialog starts on it; the command's default stays `none`. Where the other
-types finish only points where two members end, Auto also handles T-junctions and points where three
-or more members end.
+types finish only points where members end, Auto also handles T-junctions, crossings, and a different
+joint for each corner by its angle.
 
 **Laying order.** Tubes are laid in this order, and each is fitted to the ones before it: outer
 tubes (the outline of the frame), longest first; then inner tubes that span the frame, squarest
