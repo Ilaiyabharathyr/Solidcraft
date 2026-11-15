@@ -193,9 +193,10 @@ miss. The later of the two in laying order gives way (a piece of a crossing take
 it is cut by the other's filled tube, only where they overlap. One piece left is a notch: the tube
 keeps its name. Two or more is a split: the piece from the line's drawn start keeps the name, and each
 later piece is named `<tube's name> · <name of the tube that cut it>`, its id `L>X` (L the tube's
-line or pair id, X the cutting tube's). A piece wholly inside the cutting tube is dropped; one that
-sticks out is kept. With Fit Ends to Earlier Frames, every tube also gives way where it overlaps an
-earlier Frame Member's tube or a copy of one, which never changes. X is then `<feature id>:<member
+line or pair id, X the cutting tube's; where the cutting tube is a piece of a crossing, X and the
+name are its line's, so a crossing elsewhere on that line renames nothing). A piece wholly inside the
+cutting tube is dropped; one that sticks out is kept. With Fit Ends to Earlier Frames, every tube
+also gives way where it overlaps an earlier Frame Member's tube or a copy of one, which never changes. X is then `<feature id>:<member
 id>` for an earlier Frame Member's own tube, so renaming that tube keeps the piece's id, or the body
 name of a Move, Mirror or Pattern copy; the piece's name uses the tube's body name either way.
 None leaves overlaps as they are. Split pieces behave like crossing pieces: their names are pinned
@@ -230,13 +231,16 @@ no sketch point to pick, so the dialog has no row for them. A tube passing throu
 shallow angle is cut along the whole of their overlap, so it may lose a long sliver, as cut to fit
 does elsewhere. A piece cut by a copy of an earlier tube has that copy's body name in its id, so
 renaming the copy unpins the piece's name. One tube cut into three or more pieces by a single other
-(a tube through both flanges of a channel or an I section) gives those pieces the same id, so their
-names can't all be pinned. A piece is found from its name, and the longest tube name it starts with
-wins, so where tube names themselves hold ` · ` a piece can be matched to the wrong line. A name
-pinned to a piece stays in `names` when only the tube that cut it is removed; it is simply unused.
+(a tube through both flanges of a channel or an I section), or by two pieces of one crossing line, gives
+its later pieces the same id: only the first one's name is pinned, and the others keep theirs unpinned.
+Under Auto, a tube ending on the middle of a tube its plan doesn't fit it to (a sketch tube ending on a
+pair's middle, say) touches it end on middle and keeps overlapping it, as Auto always built it. A
+piece is found from its name, and the longest tube name it starts with wins, so where tube names
+themselves hold ` · ` a piece can be matched to the wrong line. A name pinned to a piece stays in
+`names` when only the tube that cut it is removed; it is simply unused.
 When
-a crossing first cuts a line, references to that line's far end (an End Cap, a face pick) stay on the
-line's first piece, which no longer has that end, and fail with an error. A short piece past a
+a crossing or an overlap first cuts a line, references to that line's far end (an End Cap, a face pick)
+stay on the line's first piece, which no longer has that end, and fail with an error. A short piece past a
 crossing keeps only what lies past the tube that stays whole: a stub wholly inside that tube is
 dropped (it has no body, and its pinned name is simply unused), and a stub that comes out past it is
 kept, fitted to that tube's face. Typical X braces have no sketch point where the diagonals cross, so

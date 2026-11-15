@@ -4597,11 +4597,27 @@ fn exactly(s: &mut Session) -> Vec<String> {
     out
 }
 
+/// Every body's name and sorted face names ([`built`]), as one FNV-1a digest and the number of faces: exact, and
+/// short enough to record.
+fn face_digest(s: &mut Session) -> String {
+    let (_, faces) = built(s);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for (body, names) in &faces {
+        for part in std::iter::once(body).chain(names) {
+            for b in part.bytes().chain([0]) {
+                h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+    }
+    format!("{h:016x} {}", faces.values().map(Vec::len).sum::<usize>())
+}
+
 #[test]
 fn frames_without_overlaps_are_unchanged() {
     // Built before overlaps were resolved (frame-crossings c522549e9), and recorded: an Auto X brace, a Mitre
     // cross-member with Fit Ends, two pairs mitred at a point, a later frame fitted to an earlier one, a None X
-    // brace (which keeps its overlaps) and an Auto 3D sketch.
+    // brace (which keeps its overlaps) and an Auto 3D sketch. Their face names too (a fitted end cut again would keep
+    // its volume and box but rename its faces), as digests ([`face_digest`]) recorded at c522549e9.
     let mut designs: Vec<(&str, Session)> = Vec::new();
     let mut s = Session::default();
     x_brace_frame(&mut s);
@@ -4630,7 +4646,15 @@ fn frames_without_overlaps_are_unchanged() {
     run(&mut s, "sketch.finish", json!({}));
     run(&mut s, "frame.member", json!({"sketch": "Tower", "profile": tube(), "corner": "auto"}));
     designs.push(("auto 3d sketch", s));
-    let got: Vec<(&str, Vec<String>)> = designs.into_iter().map(|(what, mut s)| (what, exactly(&mut s))).collect();
+    let got: Vec<(&str, Vec<String>, String)> = designs.into_iter().map(|(what, mut s)| (what, exactly(&mut s), face_digest(&mut s))).collect();
+    let faces = [
+        ("auto x brace", "244e5f6024b03c47 74"),
+        ("mitre cross-member", "9f808806e6399040 90"),
+        ("mitred pairs", "68889f4fe43671b7 42"),
+        ("fitted to an earlier frame", "90810e5c064aefa0 90"),
+        ("none x brace", "582487ac99a6847a 108"),
+        ("auto 3d sketch", "d5435c6b5cc36dc5 36"),
+    ];
     let want: &[(&str, &[&str])] = &[
         (
             "auto x brace",
@@ -4692,9 +4716,10 @@ fn frames_without_overlaps_are_unchanged() {
         ),
     ];
     assert_eq!(got.len(), want.len(), "{got:#?}");
-    for ((what, g), (w_what, w)) in got.iter().zip(want) {
-        assert_eq!(what, w_what);
+    for (((what, g, digest), (w_what, w)), (f_what, f)) in got.iter().zip(want).zip(faces) {
+        assert_eq!((what, what), (w_what, &f_what));
         assert_eq!(g, &w.iter().map(|l| l.to_string()).collect::<Vec<_>>(), "{what}");
+        assert_eq!(digest, f, "{what}: face names");
     }
 }
 
@@ -4878,6 +4903,148 @@ fn fit_ends_fits_a_later_frame_to_an_earlier_frames_overlap_pieces() {
     assert!(bs.iter().any(|b| b.0.ends_with(" · T (2) · T")), "{bs:?}");
     let o = overlap_all(&mut s);
     assert!(o < 1e-3, "the tubes overlap by {o} mm³: {bs:?}");
+}
+
+#[test]
+fn a_corner_override_at_the_far_end_of_a_crossed_line_is_kept() {
+    // Overrides name lines (crossings, "Decided after the builder check" 2). An open U on a Mitre frame, l (0, 400)…(0, 0),
+    // b (0, 0)…(600, 0) and r (600, 0)…(600, 400), and a rail x (200, −300)…(200, 400), the longest, laid first: b is
+    // cut at x = 200, and its far piece `b>x` meets r. A Butt override of b and r butts that corner: b (600, by its
+    // line) runs through to r's outer face, x = 620, and R stops on its top face, y = 20. Mitred, R reaches y = −20.
+    let build = |corners: Value| {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Lines"}));
+        for (id, points) in [("l", [[0, 400], [0, 0]]), ("b", [[0, 0], [600, 0]]), ("r", [[600, 0], [600, 400]]), ("x", [[200, -300], [200, 400]])] {
+            run(&mut s, "sketch.line", json!({"points": points, "ids": [id]}));
+        }
+        run(&mut s, "sketch.finish", json!({}));
+        let names = json!({"l": "L", "b": "B", "r": "R", "x": "X"});
+        run(&mut s, "frame.member", json!({"sketch": "Lines", "profile": square_tube(), "corner": "mitre", "names": names, "corners": corners}));
+        s
+    };
+    let mut s = build(json!([]));
+    assert!((measured(&mut s, "R").2[1] + 20.0).abs() < 1e-6, "{:?}", bodies(&mut s));
+    let mut s = build(json!([{"members": ["b", "r"], "corner": "butt"}]));
+    let (r, far) = (measured(&mut s, "R"), measured(&mut s, "B · X"));
+    assert!(near3(r.2, [580.0, 20.0, -20.0]) && near3(r.3, [620.0, 400.0, 20.0]), "{r:?}");
+    assert!((far.3[0] - 620.0).abs() < 1e-6, "{far:?}");
+}
+
+#[test]
+fn an_overlap_pieces_id_names_its_cutters_line() {
+    // Crossings rule 5, for overlaps too: rail r (0, 0)…(600, 0) is cut at x = 100 by c (100, −400)…(100, 400), longer
+    // and laid first, and a pair brace P (300, −200, 0)…(300, 200, 0) crosses r's piece past c. P's later piece is
+    // `pair1>r`, named `P · R`, after r's line, not its piece: a line d (200, −400)…(200, 400) crossing r too, so that
+    // P is now cut by r's piece past d, leaves that id and name as they were.
+    for with_d in [false, true] {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Lines"}));
+        let mut lines = vec![("r", [[0, 0], [600, 0]]), ("c", [[100, -400], [100, 400]])];
+        if with_d {
+            lines.push(("d", [[200, -400], [200, 400]]));
+        }
+        for (id, points) in lines {
+            run(&mut s, "sketch.line", json!({"points": points, "ids": [id]}));
+        }
+        run(&mut s, "sketch.finish", json!({}));
+        points(&mut s, &[("P0", [300.0, -200.0, 0.0]), ("P1", [300.0, 200.0, 0.0])]);
+        let names = json!({"r": "R", "c": "C", "d": "D", "pair1": "P"});
+        run(
+            &mut s,
+            "frame.member",
+            json!({"sketch": "Lines", "pairs": [pair("P0", "P1")], "profile": square_tube(), "corner": "mitre", "names": names}),
+        );
+        let fid = first_frame(&s);
+        let made: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+        assert!(made.contains(&"P · R".to_string()), "{with_d}: {made:?}");
+        assert_eq!(member_of(&s, fid, "P · R").as_deref(), Some("pair1>r"), "{with_d}");
+    }
+}
+
+#[test]
+fn a_tube_cut_in_three_by_one_other_keeps_its_pins() {
+    // An earlier I-beam rail along X (100 high in Z, flanges 50 wide in Y) and a later Fit Ends brace, 10 square,
+    // upright at y = 15, through both flanges beside the web: three pieces, z −100…−50, −42…42 and 50…100. Its two later
+    // pieces have one id, `pair1>…`; the second is passed over, not the whole frame unpinned (#4003 final review I2).
+    let mut s = Session::default();
+    points(&mut s, &[("R0", [0.0, 0.0, 0.0]), ("R1", [600.0, 0.0, 0.0]), ("B0", [300.0, 15.0, -100.0]), ("B1", [300.0, 15.0, 100.0])]);
+    let beam = json!({"kind": "i_beam", "height": 100, "width": 50, "web": 6, "flange": 8, "root_radius": 0});
+    run(&mut s, "frame.member", json!({"pairs": [pair("R0", "R1")], "profile": beam, "body_name": "Rail"}));
+    run(
+        &mut s,
+        "frame.member",
+        json!({"pairs": [pair("B0", "B1")], "profile": square_of(10.0), "corner": "auto", "fit_ends": true, "body_name": "B"}),
+    );
+    let mut made: Vec<String> = named(&mut s, "B").into_iter().map(|b| b.0).collect();
+    made.sort();
+    assert_eq!(made, ["B", "B · Rail", "B · Rail (2)"]);
+    let b = s.doc.features.iter().rev().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().id;
+    let pins = crate::cmd::browser::member_pins(&s, b).expect("pinned");
+    assert_eq!(pins.get("pair1").map(String::as_str), Some("B"), "{pins:?}");
+    assert_eq!(pins.values().filter(|n| n.starts_with("B · Rail")).count(), 1, "{pins:?}");
+}
+
+#[test]
+fn member_pins_pass_over_a_body_they_cant_place() {
+    // The brace split by the rail, its pieces pinned. Pins that no longer agree with the bodies made (the brace's
+    // changed, not yet built): `Brace` is found for no member and keeps its name unpinned, and the rest stay pinned.
+    let names = json!({"names": {"pair1": "Rail", "pair2": "Brace", "pair2>pair1": "Upper"}});
+    let mut s = rail_and_brace(0.0, "auto", names);
+    let fid = first_frame(&s);
+    change_pins(&mut s, &json!(fid), |names| {
+        names.insert("pair2".into(), "Other".into());
+    });
+    let pins = crate::cmd::browser::member_pins(&s, fid).expect("pinned");
+    let want: std::collections::BTreeMap<String, String> =
+        [("pair1", "Rail"), ("pair2", "Other"), ("pair2>pair1", "Upper")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    assert_eq!(pins, want);
+}
+
+#[test]
+fn member_pins_pair_by_name_when_a_piece_evens_the_count() {
+    // Ruling O5 (M1): a stub s (300, −10)…(300, 200) crosses the rail a (0, 0)…(600, 0) inside its tube, so its first
+    // piece is dropped (C4) and `s>a` kept, and a pair brace (450, ∓200, 0) crossing a is split by it: four members
+    // (a, s, s>a, pair1) and four bodies, one of them the overlap piece `pair1>a`. Pins pair them by name, never by
+    // position.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Lines"}));
+    for (id, points) in [("a", [[0, 0], [600, 0]]), ("s", [[300, -10], [300, 200]])] {
+        run(&mut s, "sketch.line", json!({"points": points, "ids": [id]}));
+    }
+    run(&mut s, "sketch.finish", json!({}));
+    points(&mut s, &[("P0", [450.0, -200.0, 0.0]), ("P1", [450.0, 200.0, 0.0])]);
+    let names = json!({"a": "A", "s": "S", "pair1": "P"});
+    run(&mut s, "frame.member", json!({"sketch": "Lines", "pairs": [pair("P0", "P1")], "profile": square_tube(), "corner": "auto", "names": names}));
+    let fid = first_frame(&s);
+    let mut made: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
+    made.sort();
+    assert_eq!(made, ["A", "P", "P · A", "S · A"]);
+    let lines = solidcraft_doc::frame::member_line_ids(&s.model.state(), &s.doc.feature(fid).unwrap().kind).unwrap();
+    assert_eq!(lines, ["a", "s", "s>a", "pair1"]);
+    let pins = crate::cmd::browser::member_pins(&s, fid).expect("pinned");
+    for (id, name) in [("a", "A"), ("s>a", "S · A"), ("pair1", "P"), ("pair1>a", "P · A")] {
+        assert_eq!(pins.get(id).map(String::as_str), Some(name), "{pins:?}");
+    }
+}
+
+#[test]
+fn a_join_after_a_frame_leaves_its_members_found() {
+    // Two None frames named `T`: A's crossing pairs `T` and `T (2)`, then B's pairs `T (3)` and `T (4)`, unpinned (a
+    // frame saved before names were pinned). A later join takes `T (2)` into `T`, freeing its name: B's bodies are still
+    // its members in their order, as named when B was built (#4003 final review (a)).
+    let mut s = Session::default();
+    points(&mut s, &[("A0", [0.0, 0.0, 0.0]), ("A1", [600.0, 0.0, 0.0]), ("A2", [300.0, -200.0, 0.0]), ("A3", [300.0, 200.0, 0.0])]);
+    run(&mut s, "frame.member", json!({"pairs": [pair("A0", "A1"), pair("A2", "A3")], "profile": tube(), "body_name": "T"}));
+    points(&mut s, &[("B0", [0.0, 1000.0, 0.0]), ("B1", [600.0, 1000.0, 0.0]), ("B2", [0.0, 1200.0, 0.0]), ("B3", [600.0, 1200.0, 0.0])]);
+    run(&mut s, "frame.member", json!({"pairs": [pair("B0", "B1"), pair("B2", "B3")], "profile": tube(), "body_name": "T"}));
+    let b = s.doc.features.iter().rev().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().id;
+    change_pins(&mut s, &json!(b), std::collections::BTreeMap::clear);
+    s.refresh();
+    run(&mut s, "solid.combine", json!({"target": "T", "tools": ["T (2)"], "operation": "join"}));
+    let made: Vec<String> = bodies(&mut s).into_iter().map(|x| x.0).collect();
+    assert!(!made.contains(&"T (2)".to_string()) && made.contains(&"T (3)".to_string()), "{made:?}");
+    assert_eq!(member_of(&s, b, "T (3)").as_deref(), Some("pair1"));
+    assert_eq!(member_of(&s, b, "T (4)").as_deref(), Some("pair2"));
 }
 
 /// A Locost-sized design (about 60 tubes over four Frame Members, and point-pair braces crossing them, all Auto with

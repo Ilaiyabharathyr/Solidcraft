@@ -53,3 +53,39 @@ fn each_earlier_tool_is_built_once() {
         assert!((bb.min.y - 20.0).abs() < 1e-6 && (bb.max.y - 300.0).abs() < 1e-6, "{}: {bb:?}", b.name);
     }
 }
+
+#[test]
+fn a_long_chain_of_overlap_pieces_is_followed_back_only_so_far() {
+    // A staircase of 19 Frame Members, 10 square: F0 a line up x = 100, then F1, F2… with Fit Ends, each split by the
+    // piece past the crossing of the one before (horizontals at y = 0, 100, 200…, uprights at x = 250, 350, 450…), so
+    // each later piece's id names a piece of the frame before, back to F0. Working the ids out follows that chain
+    // back at most 16 frames (past that a cutter is named by its body name), never deep enough to overflow the stack.
+    let mut doc = Document::new("chain");
+    let a = doc.add_feature(lines_sketch(&[[[100.0, -100.0], [100.0, 100.0]]]), None).unwrap();
+    doc.add_feature(member(a, 10.0, serde_json::json!({"body_name": "F0"})), None).unwrap();
+    for k in 1..=18u32 {
+        let n = f64::from((k - 1) / 2);
+        let line = if k % 2 == 1 {
+            let y = 100.0 * n;
+            if k == 1 { [[0.0, 0.0], [300.0, 0.0]] } else { [[50.0 + 100.0 * n, y], [300.0 + 100.0 * n, y]] }
+        } else {
+            let x = 150.0 + 100.0 * f64::from(k / 2);
+            [[x, -250.0 + 100.0 * f64::from(k / 2)], [x, 50.0 + 100.0 * f64::from(k / 2)]]
+        };
+        let sk = doc.add_feature(lines_sketch(&[line]), None).unwrap();
+        doc.add_feature(member(sk, 10.0, serde_json::json!({"corner": "auto", "fit_ends": true, "body_name": format!("F{k}")})), None).unwrap();
+    }
+    let mut model = Model::new();
+    super::super::NAME_DEPTH.set(0);
+    model.evaluate(&doc);
+    assert!(model.results.iter().all(|r| r.error.is_none()), "{:?}", model.results.iter().find(|r| r.error.is_some()));
+    let st = model.state();
+    // Every frame past F0 is split: the last frame's later piece names the whole chain.
+    let last = st.bodies.iter().filter(|b| b.name.starts_with("F18 · ")).map(|b| b.name.clone()).collect::<Vec<_>>();
+    assert_eq!(last.len(), 1, "{:?}", st.bodies.iter().map(|b| &b.name).collect::<Vec<_>>());
+    assert!(last[0].ends_with("F2 · F1 · F0"), "{last:?}");
+    assert!(super::super::NAME_DEPTH.get() <= super::super::MAX_NAME_DEPTH, "{}", super::super::NAME_DEPTH.get());
+    let f18 = doc.features.iter().rev().find(|f| matches!(f.kind, FeatureKind::FrameMember { .. })).unwrap();
+    let id = crate::frame::member_of_body(&doc, &st, f18, &last[0]).unwrap().unwrap();
+    assert!(id.contains('>'), "{id}");
+}

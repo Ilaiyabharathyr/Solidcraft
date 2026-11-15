@@ -45,8 +45,8 @@ use solidcraft_kernel::{self as kernel, PointClass};
 
 use super::super::{ModelState, mirror_matrix, pattern_transforms, point, val};
 use super::{
-    Axes, CutEnd, Layout, frame_ends, frame_member_id, layout, member_line_ids, member_tool, members_of_bodies, overlap_parent, pieced, placer,
-    plans, section_axes,
+    Axes, CutEnd, Layout, Reach, frame_ends, frame_member_id, layout, member_line_ids, member_tool, members_at, overlap_overrides, overlap_parent,
+    pieced, placer, plans, section_axes, section_reach,
 };
 use crate::expr::{Kind, Value};
 use crate::frame::MAX_MEMBERS;
@@ -66,8 +66,14 @@ type Pose = (u64, Mat, Option<usize>);
 /// Every tube made before feature `f` by a FrameMember feature, and every moved / mirrored / patterned copy of
 /// one, as a cutting tool placed where that body is now: (body name, tool), and each one's id as an overlap piece's id
 /// names it (ruling O4): a Frame Member's own tube `<feature id>:<member id>` ([`frame_member_id`]), a copy (or a tube
-/// whose member isn't found) its body name. Tools are built once per call.
-pub fn earlier_tools(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &ModelState) -> Result<(Vec<(String, Traced)>, Vec<String>)> {
+/// whose member isn't found) its body name; and each one's [`Reach`], its member's line placed where the tool is.
+/// Tools are built once per call.
+pub fn earlier_tools(
+    doc: &Document,
+    vals: &BTreeMap<String, Value>,
+    f: &Feature,
+    st: &ModelState,
+) -> Result<(Vec<(String, Traced)>, Vec<String>, Vec<Reach>)> {
     let Some(here) = doc.features.iter().position(|g| g.id == f.id) else { return Ok(Default::default()) };
     // Each Frame Member's own tube's id.
     let mut ids_of: HashMap<String, String> = HashMap::new();
@@ -82,7 +88,8 @@ pub fn earlier_tools(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature
                 let ids = member_line_ids(st, &g.kind).unwrap_or_default();
                 // Each body's member: an overlap piece `L>X` is a piece of L.
                 let refs: Vec<&str> = made.iter().map(String::as_str).collect();
-                let found = members_of_bodies(doc, st, g, &refs).unwrap_or_else(|_| vec![None; made.len()]);
+                // One frame back from `f`, as [`super::member_of_body`] of `f`'s pieces finds them.
+                let found = members_at(doc, st, g, &refs, 1).unwrap_or_else(|_| vec![None; made.len()]);
                 let lines: Vec<(String, Option<String>, bool)> = made
                     .into_iter()
                     .zip(found)
@@ -155,6 +162,7 @@ pub fn earlier_tools(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature
     let mut placed: HashMap<(u64, usize, [u64; 16]), Traced> = HashMap::new();
     let mut out = Vec::new();
     let mut ids = Vec::new();
+    let mut reach = Vec::new();
     for b in &st.bodies {
         let Some((_, poses)) = tracked.get(&b.name) else { continue };
         let (Some(to_f), false, Ok(bounds)) = (into_f(b.component), b.body.is_mesh(), b.body.exact_bounds()) else { continue };
@@ -223,11 +231,21 @@ pub fn earlier_tools(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature
                 };
                 out.push((b.name.clone(), tool));
                 ids.push(ids_of.get(&b.name).cloned().unwrap_or_else(|| b.name.clone()));
+                reach.push((crate::apply_point(&at, a), crate::apply_point(&at, z), source.reach(k) * stretch(&at)));
                 break 'body;
             }
         }
     }
-    Ok((out, ids))
+    Ok((out, ids, reach))
+}
+
+/// How much `m` may lengthen a distance: 1 for a rigid move or a mirror, else infinite (no pair is then ruled out by
+/// distance).
+fn stretch(m: &Mat) -> f64 {
+    let [x, y, z] = [Vec3::X, Vec3::Y, Vec3::Z].map(|v| crate::apply_vector(m, v));
+    let unit = [x, y, z].iter().all(|v| (v.len() - 1.0).abs() < 1e-9);
+    let square = x.dot(y).abs() < 1e-9 && y.dot(z).abs() < 1e-9 && z.dot(x).abs() < 1e-9;
+    if unit && square { 1.0 } else { f64::INFINITY }
 }
 
 /// How far along the line `a`…`b` the box `piece` begins and ends, its corners placed by `to`.
@@ -303,18 +321,25 @@ impl Members {
         // (finding it would build the tools of the frames before that one too); the tool then reaches on inside the
         // tube that corner lies in, which the fitted end is cut by anyway.
         let (plan, crossing) = plans(*corner, &segments, &planes, corners, &drawn)?;
+        let overlaps = overlap_overrides(*corner, &segments, &planes, corners);
         // Where crossings cut its lines its members are their pieces, as `member_line_ids` lists them.
         let (segments, planes, drawn) = pieced(segments, planes, drawn, plan.as_ref().or(crossing.as_ref()))?;
         let (axes, _) = section_axes(&segments, &planes, plan.as_ref(), turn)?;
         let inside = regions.first().map(|r| r.interior_point()).ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;
         let (ends, points) = {
             let placed = placer(&axes, at);
-            let ends = frame_ends(&g.kind, &segments, &regions, &placed, (plan.or(crossing), &planes), (sketch_x, &drawn))?;
+            let ends = frame_ends(&g.kind, &segments, &regions, &placed, (plan.or(crossing), &planes, &overlaps), (sketch_x, &drawn))?;
             let along = |m: usize, a: Vec3, b: Vec3, t: f64| placed(m, a + (b - a) * t).to_world(inside);
             (ends, segments.iter().enumerate().map(|(m, (_, a, b))| [0.25, 0.5, 0.75].map(|t| along(m, *a, *b, t))).collect())
         };
         let tools = vec![None; segments.len()];
         Ok(Members { segments, regions, axes, at, ends, points, tools })
+    }
+
+    /// How far member m's tool reaches from its line: its section, and its ends built past the line's.
+    fn reach(&self, m: usize) -> f64 {
+        let ext = self.ends.get(m).map_or(0.0, |e| e.iter().flatten().map(|c| c.1).fold(0.0, f64::max));
+        section_reach(&self.regions, self.at) + ext
     }
 
     /// Member m's tool, built the first time it is asked for.

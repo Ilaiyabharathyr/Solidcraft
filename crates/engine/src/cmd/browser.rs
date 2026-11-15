@@ -1398,11 +1398,11 @@ pub(super) fn member_pins(s: &Session, fid: u64) -> Option<BTreeMap<String, Stri
         }
         let mut pinned: BTreeMap<String, String> = lines.iter().filter_map(|l| Some((l.clone(), names.get(l)?.clone()))).collect();
         for (n, id) in made.iter().zip(found) {
-            // A body no member is found for keeps its name unpinned, rather than unpinning the frame.
-            let Some(id) = id.filter(|_| !pinned.values().any(|v| v == n)) else { continue };
-            if pinned.insert(id, n.clone()).is_some() {
-                return None;
-            }
+            // A body no member is found for, or found for a member already pinned (one tube cut in three or more
+            // pieces by a single other gives its later pieces one id), keeps its name unpinned, rather than unpinning
+            // the frame.
+            let Some(id) = id.filter(|id| !pinned.contains_key(id) && !pinned.values().any(|v| v == n)) else { continue };
+            pinned.insert(id, n.clone());
         }
         let once = made.iter().all(|n| pinned.values().filter(|v| *v == n).count() <= 1);
         return once.then_some(pinned);
