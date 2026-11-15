@@ -441,8 +441,12 @@ fn a_crossing_override_with_flip_keeps_the_other_whole() {
     let (d1, d1b, d2) = (piece(&p, "d1"), piece(&p, "d1>d2"), piece(&p, "d2"));
     assert!(p.fits.contains(&Fit { member: d1, at_start: false, against: vec![d2] }), "{:?}", p.fits);
     assert!(p.fits.contains(&Fit { member: d1b, at_start: true, against: vec![d2] }), "{:?}", p.fits);
-    // Without Flip it matches and changes nothing.
-    assert_eq!(planned(&segs, &[auto(&["d2", "d1"], false)]).unwrap(), planned(&segs, &[]).unwrap());
+    assert_eq!(p.crossing_overrides, [0]);
+    // Without Flip it matches (a crossing's override) and changes nothing else.
+    let mut plain = planned(&segs, &[auto(&["d2", "d1"], false)]).unwrap();
+    assert_eq!(plain.crossing_overrides, [0]);
+    plain.crossing_overrides.clear();
+    assert_eq!(plain, planned(&segs, &[]).unwrap());
 }
 
 #[test]

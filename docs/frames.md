@@ -58,8 +58,10 @@ corner to corner), the two that come first in Auto's laying order (see Auto belo
 longest first, never the pick order) make the corner, finished with the frame's type and flip
 exactly as if they were alone there, and every other tube ending there is cut to fit the tubes laid
 before it there, as Auto fits it, whatever Fit Ends to Earlier Frames says: a brace fits into a
-rectangle's mitre or butt. Where a member ends on the middle of another, and where lines cross,
-nothing is cut: those stay as before. Two members in line (within 0.01 degrees) stay square whatever the type.
+rectangle's mitre or butt. Where a member ends on the middle of another, nothing is cut: it stays as
+before. Where sketch lines cross, Mitre, Butt and Coped split the tubes exactly as Auto does (see
+Crossings under Auto below: one stays whole, the others are cut into pieces fitted to it, with the same
+piece names, Crossing overrides and Remove Tube); None leaves crossing tubes overlapping. Two members in line (within 0.01 degrees) stay square whatever the type.
 A corner sharper than 5 degrees inside is refused: "Corner at (x, y, z) is too sharp to finish".
 
 - **Mitre**: both members are cut on the plane that bisects the corner.
@@ -163,7 +165,8 @@ and the outer tubes run round the outline anticlockwise, so square and rectangul
 to wall in any plane. A tube drawn against that direction is reversed; its face names stay the same.
 The section line-up limit under Corners (Known limits) applies only outside Auto.
 
-**Crossings.** Tubes of the sketch that cross are split at the crossing. The earliest in laying order
+**Crossings.** Tubes of the sketch that cross are split at the crossing, under Auto and equally under
+Mitre, Butt and Coped (None leaves them overlapping). The earliest in laying order
 stays whole; each other tube is cut into pieces, each fitted to the tube that stays whole, so nothing
 overlaps. Where more than two tubes pass through a point, or tubes also end there, the earliest stays
 whole and the rest are cut and fitted in laying order. A crossing override (**Crossing** row, picked
@@ -195,7 +198,8 @@ lives on each override row.
 {"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "rect_tube", "width": 25, "height": 25, "wall": 2}, "corner": "auto", "fit_ends": true}}
 ```
 
-**Known limits of Auto.** Crossings that involve point-to-point or 3D-sketch tubes still overlap. When
+**Known limits of Auto** (and of crossings under Mitre, Butt and Coped). Crossings that involve
+point-to-point or 3D-sketch tubes still overlap. When
 a crossing first cuts a line, references to that line's far end (an End Cap, a face pick) stay on the
 line's first piece, which no longer has that end, and fail with an error. A short piece past a
 crossing keeps only what lies past the tube that stays whole: a stub wholly inside that tube is

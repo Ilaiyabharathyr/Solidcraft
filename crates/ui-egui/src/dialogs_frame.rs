@@ -48,6 +48,12 @@ fn flips(index: usize) -> bool {
     matches!(CORNER_TYPES.get(index), Some(("butt" | "coped_butt", _)))
 }
 
+/// Whether a frame of type `frame` cuts tubes where they cross (every type but None, #4003): a
+/// crossing is then a corner an override may name, by Auto's rules.
+fn splits(frame: usize) -> bool {
+    frame != NONE
+}
+
 /// Whether an override row's Flip means anything for its type `index`: Auto's flip swaps the two
 /// tubes' roles at its corner.
 fn override_flips(index: usize) -> bool {
@@ -933,7 +939,9 @@ pub(crate) fn refused_corner(s: &Session, m: &Member, inputs: &[SelInput], pick:
         return None;
     }
     let Sel::ExternalSketchPoint { sketch, id } = pick else { return None };
-    frame::corner_at_point(&s.model.state(), *sketch, &path_lines(m, inputs, *sketch), id, m.corner == AUTO).err().map(|e| e.to_string())
+    let (st, lines) = (s.model.state(), path_lines(m, inputs, *sketch));
+    let crossed = splits(m.corner) && frame::is_crossing(&st, *sketch, &lines, id);
+    frame::corner_at_point(&st, *sketch, &lines, id, m.corner == AUTO || crossed).err().map(|e| e.to_string())
 }
 
 /// The path's lines of sketch `sketch`, among which a corner is looked for: none (every line) under All Lines.
@@ -951,18 +959,18 @@ fn path_lines(m: &Member, inputs: &[SelInput], sketch: u64) -> Vec<String> {
         .collect()
 }
 
-/// Whether the corner picked as `pick` is a crossing of the frame's lines under Auto: its row reads
-/// Crossing.
+/// Whether the corner picked as `pick` is a crossing of the frame's lines on a frame that cuts
+/// crossings ([`splits`]): its row reads Crossing.
 fn crossing(s: &Session, kind: &Kind, inputs: &[SelInput], pick: &Sel) -> bool {
     let (Kind::Frame(m), Sel::ExternalSketchPoint { sketch, id }) = (kind, pick) else { return false };
-    m.corner == AUTO && frame::is_crossing(&s.model.state(), *sketch, &path_lines(m, inputs, *sketch), id)
+    splits(m.corner) && frame::is_crossing(&s.model.state(), *sketch, &path_lines(m, inputs, *sketch), id)
 }
 
-/// For each override an edit keeps ([`kept_corner_text`]), whether it is an Auto frame's override
-/// of lines of its path crossing where no sketch point is.
+/// For each override an edit keeps ([`kept_corner_text`]), whether it is the override of a frame
+/// that cuts crossings ([`splits`]) of lines of its path crossing where no sketch point is.
 fn kept_crossings(s: &Session, d: &Dialog) -> Vec<bool> {
     let Some(Value::Array(kept)) = d.extra.get("corners") else { return Vec::new() };
-    let auto = matches!(&d.kind, Kind::Frame(m) if m.corner == AUTO);
+    let auto = matches!(&d.kind, Kind::Frame(m) if splits(m.corner));
     let path = d.editing.and_then(|(id, _)| s.doc.feature(id)).and_then(|f| match &f.kind {
         FeatureKind::FrameMember { path_sketch, .. } => *path_sketch,
         _ => None,
@@ -1134,9 +1142,9 @@ pub fn commands(app: &SolveApp, m: &Member, inputs: &[SelInput], extra: &Map<Str
         for pick in picks {
             let Sel::ExternalSketchPoint { sketch: at, id } = pick else { continue };
             let sketch = sketch.filter(|s| s == at).ok_or("the corner overrides must be corners of the frame sketch")?;
-            let mut ends = frame::corner_at_point(&st, sketch, members, id, m.corner == AUTO).map_err(|e| e.to_string())?;
             // A crossing is named by the lines crossing there alone (a pair's tube is never cut).
-            let crossed = m.corner == AUTO && frame::is_crossing(&st, sketch, members, id);
+            let crossed = splits(m.corner) && frame::is_crossing(&st, sketch, members, id);
+            let mut ends = frame::corner_at_point(&st, sketch, members, id, m.corner == AUTO || crossed).map_err(|e| e.to_string())?;
             // Under Auto the build counts every member ending at the corner, the pairs' too (ruling A16).
             if m.corner == AUTO
                 && !crossed
@@ -1147,7 +1155,8 @@ pub fn commands(app: &SolveApp, m: &Member, inputs: &[SelInput], extra: &Map<Str
             }
             let (corner, flip) = m.overrides.iter().find(|o| o.0 == *pick).map_or((m.corner, false), |o| (o.1, o.2));
             let corner = override_type(corner, m.corner);
-            corners.push(json!({"members": ends, "corner": corner_name(corner), "flip": flip && override_flips(corner)}));
+            // A crossing's Flip keeps the other tube whole, whatever the type.
+            corners.push(json!({"members": ends, "corner": corner_name(corner), "flip": flip && (crossed || override_flips(corner))}));
         }
     }
     // Overrides whose corner has gone stay until removed (the feature then says so).
@@ -1286,7 +1295,8 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
     let auto = m.corner == AUTO;
     let matched = |ps: u64, members: &[String]| {
         let id = frame::corner_point(&st, ps, members)?;
-        let ends = frame::corner_at_point(&st, ps, &path_lines, &id, auto).ok()?;
+        let crossed = splits(m.corner) && frame::is_crossing(&st, ps, &path_lines, &id);
+        let ends = frame::corner_at_point(&st, ps, &path_lines, &id, auto || crossed).ok()?;
         (ends.len() == members.len() && ends.iter().all(|e| members.contains(e))).then_some((ps, id))
     };
     let mut missing = Vec::new();

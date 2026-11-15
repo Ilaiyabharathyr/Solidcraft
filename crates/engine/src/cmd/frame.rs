@@ -483,7 +483,7 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
     // line later leaves the other members' names alone.
     let st = s.model.state();
     let (ids, later) = frame::member_parts(&st, &kind).map_err(|e| bad(cmd, e.to_string()))?;
-    if let FeatureKind::FrameMember { corners, .. } = &kind {
+    if let FeatureKind::FrameMember { corners, path_sketch, .. } = &kind {
         let mut pairs = std::collections::HashSet::new();
         // An override names a corner by its lines and pairs, never by a piece of a line cut where tubes cross. A
         // piece is told by where it is, not by its id: a sketch id may hold `>` itself.
@@ -499,7 +499,9 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
             sorted.sort();
             sorted.dedup();
             let n = c.members.len();
-            if n > 2 && corner != CornerType::Auto {
+            // A crossing's override names every line through it, under every type that cuts crossings.
+            let crossing = || path_sketch.is_some_and(|ps| frame::members_cross(&st, ps.0, &c.members));
+            if n > 2 && corner != CornerType::Auto && !crossing() {
                 return Err(bad(cmd, "`corners`: an override of three or more members needs `corner` auto"));
             }
             if !(2..=frame::MAX_MEMBERS).contains(&n) || sorted.len() != n || !sorted.iter().all(|m| ids.contains(*m)) {

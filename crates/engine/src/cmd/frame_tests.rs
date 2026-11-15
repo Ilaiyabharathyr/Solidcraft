@@ -2970,34 +2970,107 @@ fn a_diagonal_into_a_butted_or_coped_rectangle_fits_the_corners() {
     }
 }
 
-#[test]
-fn a_mitre_x_brace_fits_its_diagonals_into_the_corners() {
-    // Only Auto cuts crossings: on a Mitre frame the diagonals stay whole and pass through each other. At each corner
-    // two sides and a diagonal end: the sides mitre as the plain rectangle's, and the diagonal is fitted to them,
-    // FITTED_DIAGONAL each (d2 is d1 mirrored), boxes x 20…580, y 20…380. Only the diagonals overlap.
+/// The X brace (`x_brace_frame`) in square tube finished `corner` (Mitre, Butt or Coped), d1 named `D1`, d2 `D2`,
+/// crossings split as Auto splits them (#4003): the sides as the plain rectangle's (the diagonals' ends there are fitted
+/// to them, the 3+-end rule), d1 whole and fitted into its corners, FITTED_DIAGONAL, box x 20…580, y 20…380, and d2 cut
+/// at (300, 200) into `D2` and `D2 · D1`, each fitted to its corner and to d1, as worked by hand in
+/// `an_auto_x_brace_keeps_one_diagonal_whole`: A·(360.555 − 21.667) − C = 130237.44, boxes x 20…300, y 200…380 and
+/// x 300…580, y 20…200. No tube overlaps another.
+fn assert_x_brace_split(corner: &str) {
     let mut s = Session::default();
     x_brace_frame(&mut s);
-    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": "mitre", "names": {"d1": "D1", "d2": "D2"}}));
-    assert_eq!(bodies(&mut s).len(), 6);
-    assert_same_tubes(&volumes_and_boxes(&mut s, &["D1", "D2"]), &plain_rectangle(square_tube(), "mitre"), "sides");
-    for name in ["D1", "D2"] {
-        let d = measured(&mut s, name);
-        assert!(rel(d.1, FITTED_DIAGONAL) < 1e-6, "{d:?}");
-        assert!(near3(d.2, [20.0, 20.0, -20.0]) && near3(d.3, [580.0, 380.0, 20.0]), "{d:?}");
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": corner, "names": {"d1": "D1", "d2": "D2"}}));
+    assert_eq!(bodies(&mut s).len(), 7, "{corner}: {:?}", bodies(&mut s));
+    assert_same_tubes(&volumes_and_boxes(&mut s, &["D1", "D2", "D2 · D1"]), &plain_rectangle(square_tube(), corner), corner);
+    let d1 = measured(&mut s, "D1");
+    assert!(rel(d1.1, FITTED_DIAGONAL) < 1e-6, "{corner}: {d1:?}");
+    assert!(near3(d1.2, [20.0, 20.0, -20.0]) && near3(d1.3, [580.0, 380.0, 20.0]), "{corner}: {d1:?}");
+    for (name, lo, hi) in [("D2", [20.0, 200.0, -20.0], [300.0, 380.0, 20.0]), ("D2 · D1", [300.0, 20.0, -20.0], [580.0, 200.0, 20.0])] {
+        let piece = measured(&mut s, name);
+        assert!(rel(piece.1, 130_237.436_911) < 1e-6, "{corner}: {piece:?}");
+        assert!(near3(piece.2, lo) && near3(piece.3, hi), "{corner}: {piece:?}");
     }
-    let names: Vec<String> = bodies(&mut s).into_iter().map(|b| b.0).collect();
-    let i = run(&mut s, "inspect.interference", json!({"bodies": names}));
-    let mut diagonals = 0.0;
-    for x in i["interferences"].as_array().unwrap() {
-        let pair = [x["a"].as_str().unwrap(), x["b"].as_str().unwrap()];
-        let v = f(&x["volume_mm3"]);
-        if pair.contains(&"D1") && pair.contains(&"D2") {
-            diagonals = v;
-        } else {
-            assert!(v < 1e-3, "{pair:?} overlap by {v} mm³");
+    let o = overlap_all(&mut s);
+    assert!(o < 1e-3, "{corner}: the frame overlaps by {o} mm³");
+}
+
+#[test]
+fn a_mitre_x_brace_splits_one_diagonal() {
+    assert_x_brace_split("mitre");
+}
+
+#[test]
+fn a_butt_x_brace_splits_one_diagonal() {
+    assert_x_brace_split("butt");
+}
+
+#[test]
+fn a_coped_butt_x_brace_splits_one_diagonal() {
+    assert_x_brace_split("coped_butt");
+}
+
+#[test]
+fn a_crossing_override_with_flip_keeps_the_other_diagonal_whole_on_a_mitre_frame() {
+    // A crossing override names the lines through the point; on a Mitre frame too only its Flip counts: d2 stays
+    // whole and d1 is cut, `D1` and `D1 · D2`, the X brace turned over (d2 is d1 mirrored across x = 300): the same
+    // volumes, d2's box x 20…580, y 20…380, d1's pieces x 20…300, y 20…200 and x 300…580, y 200…380.
+    let mut s = Session::default();
+    x_brace_frame(&mut s);
+    let corners = json!([{"members": ["d1", "d2"], "corner": "mitre", "flip": true}]);
+    let p = json!({"sketch": "Frame", "profile": square_tube(), "corner": "mitre", "corners": corners, "names": {"d1": "D1", "d2": "D2"}});
+    run(&mut s, "frame.member", p);
+    assert_eq!(bodies(&mut s).len(), 7, "{:?}", bodies(&mut s));
+    let d2 = measured(&mut s, "D2");
+    assert!(rel(d2.1, FITTED_DIAGONAL) < 1e-6 && near3(d2.2, [20.0, 20.0, -20.0]) && near3(d2.3, [580.0, 380.0, 20.0]), "{d2:?}");
+    for (name, lo, hi) in [("D1", [20.0, 20.0, -20.0], [300.0, 200.0, 20.0]), ("D1 · D2", [300.0, 200.0, -20.0], [580.0, 380.0, 20.0])] {
+        let piece = measured(&mut s, name);
+        assert!(rel(piece.1, 130_237.436_911) < 1e-6 && near3(piece.2, lo) && near3(piece.3, hi), "{piece:?}");
+    }
+    let o = overlap_all(&mut s);
+    assert!(o < 1e-3, "the frame overlaps by {o} mm³");
+}
+
+#[test]
+fn mitre_crossings_are_the_same_whatever_the_pick_order() {
+    let build = |reverse: bool| {
+        let mut s = Session::default();
+        x_brace_frame(&mut s);
+        let mut lines: Vec<String> = sketch_lines(&s, "Frame").into_iter().map(|l| l.0).collect();
+        assert_eq!(lines.len(), 6);
+        if reverse {
+            lines.reverse();
         }
+        let names: serde_json::Map<String, Value> = lines.iter().map(|l| (l.clone(), json!(l))).collect();
+        run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": "mitre", "lines": lines, "names": names}));
+        built(&mut s)
+    };
+    let ((drawn, drawn_faces), (picked, picked_faces)) = (build(false), build(true));
+    // d1 stays whole and d2 is cut in two whichever way the lines are picked.
+    assert!(drawn.len() == 7 && drawn.contains_key("d1") && drawn.contains_key("d2 · d1"), "{drawn:?}");
+    assert_eq!(drawn.keys().collect::<Vec<_>>(), picked.keys().collect::<Vec<_>>());
+    for (line, (v, lo, hi)) in &drawn {
+        let (pv, plo, phi) = picked[line];
+        assert!(rel(pv, *v) < 1e-9 && near3(plo, *lo) && near3(phi, *hi), "{line}: drawn {drawn:?} picked {picked:?}");
     }
-    assert!(diagonals > 1000.0, "the diagonals overlap by {diagonals} mm³");
+    assert_eq!(drawn_faces, picked_faces);
+}
+
+#[test]
+fn a_none_x_brace_keeps_its_crossings_overlapping() {
+    // None finishes nothing and cuts no crossing: six square tubes, each A·L. The diagonals (L = √(600² + 400²)) are
+    // whole, each box its line ± (11.094, 16.641) across it (20 × (2, 3)/√13), and overlap where they cross.
+    let mut s = Session::default();
+    x_brace_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": square_tube(), "corner": "none", "names": {"d1": "D1", "d2": "D2"}}));
+    assert_eq!(bodies(&mut s).len(), 6, "{:?}", bodies(&mut s));
+    let (h, w) = (11.094_003_924_504_584, 16.641_005_886_756_876);
+    let l = 721.110_255_092_797_8;
+    for (name, lo, hi) in [("D1", [-h, -w, -20.0], [600.0 + h, 400.0 + w, 20.0]), ("D2", [-h, -w, -20.0], [600.0 + h, 400.0 + w, 20.0])] {
+        let d = measured(&mut s, name);
+        assert!(rel(d.1, SQUARE_TUBE_AREA * l) < 1e-6 && near3(d.2, lo) && near3(d.3, hi), "{d:?}");
+    }
+    assert_same_tubes(&volumes_and_boxes(&mut s, &["D1", "D2"]), &plain_rectangle(square_tube(), "none"), "sides");
+    assert!(overlap_all(&mut s) > 1000.0);
 }
 
 #[test]

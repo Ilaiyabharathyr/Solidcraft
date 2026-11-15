@@ -1877,7 +1877,7 @@ fn hovering_an_overridden_corner_lights_its_row() {
 
 /// Under Auto a sketch point where two of the frame's lines cross (none ending there) is an
 /// override, saved by the lines crossing there. Its row reads Crossing, with Flip and no Type
-/// list, and an edit brings it back. Under Mitre the same pick is refused.
+/// list, and an edit brings it back. Under None, which cuts no crossing, the same pick is refused.
 #[test]
 fn a_crossing_point_override_is_a_crossing_row_with_flip() {
     let mut h = tall_harness();
@@ -1924,12 +1924,62 @@ fn a_crossing_point_override_is_a_crossing_row_with_flip() {
     assert_eq!(member(&mut e).overrides.iter().map(|o| o.2).collect::<Vec<_>>(), [true]);
     h.app.dialog = None;
     let mut d = dialog_on(&mut h.app, &lines);
-    member(&mut d).corner = corner_type("mitre");
+    member(&mut d).corner = corner_type("none");
     d.active = 2;
     d.pick(&h.app.session, x);
     assert!(d.inputs[2].items.is_empty());
     let e = d.error.clone().unwrap_or_default();
     assert!(e.contains("exactly two members end"), "{e}");
+}
+
+/// Mitre, Butt and Coped frames split crossings as Auto does: on a Mitre frame a sketch point where
+/// the diagonals cross is taken as an override, saved by the lines crossing there with its Flip, its
+/// row reads Crossing with an enabled Flip, and Flip keeps the other diagonal whole.
+#[test]
+fn a_crossing_point_on_a_mitre_frame_is_a_crossing_override() {
+    let mut h = tall_harness();
+    for (id, p) in [
+        ("sketch.create", json!({"plane": "XY", "name": "Frame"})),
+        ("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [600, 400]})),
+        ("sketch.line", json!({"points": [[0, 0], [600, 400]], "ids": ["d1"]})),
+        ("sketch.line", json!({"points": [[0, 400], [600, 0]], "ids": ["d2"]})),
+        ("sketch.point", json!({"point": [300, 200], "id": "x"})),
+        ("sketch.finish", json!({})),
+    ] {
+        h.app.run(id, p).unwrap();
+    }
+    let frame = sketch_id(&h.app, "Frame");
+    let lines = frame_lines(&h.app);
+    let x = Sel::ExternalSketchPoint { sketch: frame, id: "x".into() };
+    let mut d = dialog_on(&mut h.app, &lines);
+    member(&mut d).corner = corner_type("mitre");
+    d.active = 2;
+    d.pick(&h.app.session, x.clone());
+    assert_eq!(d.inputs[2].items, std::slice::from_ref(&x), "{:?}", d.error);
+    h.app.dialog = Some(d);
+    h.frames(2);
+    assert!(h.widget_near("Crossing", "Corner 1").is_some(), "the row reads Crossing");
+    let [_, y] = h.widget("Corner 1").unwrap();
+    let tree = h.output.accesskit_update.as_ref().unwrap();
+    let on_row: Vec<_> = tree
+        .nodes
+        .iter()
+        .filter(|(_, n)| n.bounds().is_some_and(|b| b.x1 > b.x0 && (f64::midpoint(b.y0, b.y1) - y).abs() < 2.0))
+        .map(|(_, n)| n.clone())
+        .collect();
+    assert!(on_row.iter().any(|n| n.label() == Some("Flip") && !n.is_disabled()), "an enabled Flip on the row");
+    member(h.app.dialog.as_mut().unwrap()).overrides[0].2 = true;
+    let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+    assert_eq!(c[0].1["corners"], json!([{"members": ["d1", "d2"], "corner": "mitre", "flip": true}]), "{}", c[0].1);
+    run_all(&mut h.app, c);
+    let f = h.app.session.doc.features.last().unwrap();
+    let ids = frame::member_line_ids(&h.app.session.model.state(), &f.kind).unwrap();
+    assert!(ids.iter().any(|i| i == "d1>d2") && !ids.iter().any(|i| i == "d2>d1"), "{ids:?}");
+    // An edit brings the override back as the picked point, flipped.
+    let f = f.id;
+    let mut e = edit_dialog(&h.app, f, None).unwrap();
+    assert_eq!(e.inputs[2].items, std::slice::from_ref(&x), "{:?}", e.extra);
+    assert_eq!(member(&mut e).overrides.iter().map(|o| o.2).collect::<Vec<_>>(), [true]);
 }
 
 /// A crossing where another tube also ends (the two diagonals, and a post from the bottom ending

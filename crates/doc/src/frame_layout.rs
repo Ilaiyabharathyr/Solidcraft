@@ -484,6 +484,8 @@ pub struct Plan {
     pub pieces: Vec<Piece>,
     /// The points where a line was cut in two.
     pub crossings: Vec<Vec3>,
+    /// The overrides (indices into `overrides`) that match a crossing: only their Flip counts.
+    pub crossing_overrides: Vec<usize>,
     pub ranks: Vec<Rank>,
     pub corners: Vec<AutoCorner>,
     /// In laying order.
@@ -544,7 +546,7 @@ pub fn pieces(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: 
 }
 
 /// [`plan`], and whether every override matched.
-fn planned(
+pub(crate) fn planned(
     segments: &[(String, Vec3, Vec3)],
     planes: &[MemberPlane],
     drawn: &[usize],
@@ -572,12 +574,12 @@ fn planned(
     let lines = graph(segments, &valid, &mut points);
     let wanted: Vec<BTreeSet<&str>> = overrides.iter().map(|o| o.members.iter().map(String::as_str).collect()).collect();
     let mut used = vec![false; overrides.len()];
-    let mut matched = |ids: &BTreeSet<&str>| {
+    let mut matching = |ids: &BTreeSet<&str>| {
         let o = wanted.iter().position(|w| w == ids)?;
         if let Some(u) = used.get_mut(o) {
             *u = true;
         }
-        overrides.get(o)
+        Some(o)
     };
 
     // Crossings (A4, A6): each line's cuts, as node → the line staying whole there.
@@ -588,7 +590,7 @@ fn planned(
         }
     }
     let mut cuts: Vec<HashMap<usize, usize>> = vec![HashMap::new(); segments.len()];
-    let mut crossings = Vec::new();
+    let (mut crossings, mut crossing_overrides) = (Vec::new(), Vec::new());
     for (&n, ms) in &through {
         // Only a group's own lines are cut, and only by each other.
         let mut sets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -604,7 +606,9 @@ fn planned(
             if set.len() < 2 {
                 continue;
             }
-            let flip = matched(&set.iter().map(|&m| id(m)).collect()).is_some_and(|o| o.flip);
+            let o = matching(&set.iter().map(|&m| id(m)).collect());
+            crossing_overrides.extend(o);
+            let flip = o.and_then(|o| overrides.get(o)).is_some_and(|o| o.flip);
             let Some(&whole) = set.get(usize::from(flip)) else { continue };
             for &m in set.iter().filter(|&&m| m != whole) {
                 if let Some(c) = cuts.get_mut(m) {
@@ -701,7 +705,7 @@ fn planned(
                 ((off.unwrap_or(90.0) * 100.0).round() as i64, key(m))
             };
             let a_long = longest_first(vec![a.1, b.1], |k| length(parent(k)), tie).first() == Some(&a.1);
-            let o = matched(&ids);
+            let o = matching(&ids).and_then(|o| overrides.get(o));
             let swap = o.is_some_and(|o| o.flip && o.corner.flips());
             let (long, short) = if a_long != swap { ((a.1, a.2), (b.1, b.2)) } else { ((b.1, b.2), (a.1, a.2)) };
             // A piece runs the way its line does.
@@ -728,7 +732,7 @@ fn planned(
         if let ([a, b, ..], true) = (rest.as_slice(), group_whole.is_empty() && group.is_empty()) {
             done = 2;
             // An Auto override at a chain's corner is its own joint, a mitre.
-            let o = matched(&ids);
+            let o = matching(&ids).and_then(|o| overrides.get(o));
             let (kind, flip) = o.map_or((CornerType::Mitre, false), |o| (o.corner, o.flip));
             let kind = if kind == CornerType::Auto { CornerType::Mitre } else { kind };
             chained.push(ChainCorner { a: (a.1, a.2), b: (b.1, b.2), kind, flip, overridden: o.is_some() });
@@ -739,7 +743,7 @@ fn planned(
         }
     }
     fits.sort_by_key(|f| (at(f.member), f.member));
-    (Plan { pieces, crossings, ranks, corners, fits, chained }, !used.contains(&false))
+    (Plan { pieces, crossings, crossing_overrides, ranks, corners, fits, chained }, !used.contains(&false))
 }
 
 #[cfg(test)]
