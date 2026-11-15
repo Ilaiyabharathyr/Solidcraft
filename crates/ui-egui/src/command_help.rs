@@ -97,6 +97,7 @@ pub const DOCUMENTED: &[&str] = &[
     "joint.rigid_group",
     "joint.screw",
     "layout.apply",
+    "layout.delete",
     "layout.get",
     "layout.reset",
     "layout.save",
