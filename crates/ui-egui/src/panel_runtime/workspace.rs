@@ -376,10 +376,10 @@ impl WorkspacePanelHost {
         self.window_card.as_ref()
     }
 
-    /// The host showed that window at `shown` this frame.
+    /// The host showed the window for the landing at `requested` at `shown` this frame.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn confirm_window_shown(&mut self, shown: LogicalRect) {
-        self.interaction.confirm_window_shown(shown);
+    pub(crate) fn confirm_window_shown(&mut self, requested: Point, shown: LogicalRect) {
+        self.interaction.confirm_window_shown(requested, shown);
     }
 
     /// Where the last drag past the edge of the app popped a panel out.
@@ -740,6 +740,9 @@ impl WorkspacePanelHost {
     pub(crate) fn invalidate_context(&mut self) {
         self.drag_paint.clear();
         self.invalidate_geometry();
+        // A grip drag from another context must not start in this one.
+        self.window_drag_events.clear();
+        self.window_drag.cancel();
         self.content_focus = None;
         self.content_bookmarks.clear();
         self.content_reports.clear();

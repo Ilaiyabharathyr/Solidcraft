@@ -1007,11 +1007,12 @@ impl HostInteraction {
         Some((self.move_source()?, preview.window?))
     }
 
-    /// The host showed the desktop window at `shown`; ignored unless it is the
-    /// current Window landing.
+    /// The host showed the desktop window for the landing at `requested`, at
+    /// `shown`: kept on its monitor, or where the OS has put it so far. Ignored
+    /// unless `requested` is the current Window landing.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn confirm_window_shown(&mut self, shown: LogicalRect) {
-        if self.window_landing().is_some_and(|(_, origin)| origin == shown.origin) && shown.validate().is_ok() {
+    pub(crate) fn confirm_window_shown(&mut self, requested: Point, shown: LogicalRect) {
+        if self.window_landing().is_some_and(|(_, origin)| origin == requested) && shown.validate().is_ok() {
             self.window_shown = Some(shown);
         }
     }

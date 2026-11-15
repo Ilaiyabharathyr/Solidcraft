@@ -14256,7 +14256,7 @@ fn drag_out_targets_a_desktop_window_only_outside_the_app_and_opens_it_where_it_
     fixture_press(&service, &host, &mut interaction, header.clone());
     fixture_move(&service, &host, &mut interaction, outside);
     let shown = LogicalRect { origin: corner, size: Size { width: 376.0, height: 488.0 } };
-    interaction.confirm_window_shown(shown);
+    interaction.confirm_window_shown(corner, shown);
     let inside = middle(host.sections.iter().find(|card| card.instance == id("one")).unwrap().outer);
     assert!(fixture_move(&service, &host, &mut interaction, inside).window.is_none());
     fixture_move(&service, &host, &mut interaction, outside);
@@ -14265,27 +14265,33 @@ fn drag_out_targets_a_desktop_window_only_outside_the_app_and_opens_it_where_it_
     // Escape cancels a shown Window target.
     fixture_press(&service, &host, &mut interaction, header.clone());
     fixture_move(&service, &host, &mut interaction, outside);
-    interaction.confirm_window_shown(shown);
+    interaction.confirm_window_shown(corner, shown);
     interaction.update(&service, &scope, &host, HostPointerEvent::Escape);
     assert!(release(&mut interaction, &service, outside).candidate.is_none());
     assert_eq!(service.inspect(), before);
 
-    // A confirmation for another place is ignored; after a real one, moving on
-    // still opens the window where it was shown, not under the release.
+    // A confirmation for another landing is ignored.
+    fixture_press(&service, &host, &mut interaction, header.clone());
+    fixture_move(&service, &host, &mut interaction, outside);
+    interaction.confirm_window_shown(Point { x: 0.0, y: 0.0 }, shown);
+    assert!(release(&mut interaction, &service, outside).candidate.is_none());
+    // After a real one, moving on still opens the window where it was shown, not under the release.
     fixture_press(&service, &host, &mut interaction, header);
     fixture_move(&service, &host, &mut interaction, outside);
-    interaction.confirm_window_shown(LogicalRect { origin: Point { x: 0.0, y: 0.0 }, ..shown });
-    interaction.confirm_window_shown(shown);
+    interaction.confirm_window_shown(corner, shown);
     let further = Point { x: outside.x + 30.0, y: outside.y + 20.0 };
     assert_ne!(fixture_move(&service, &host, &mut interaction, further).window, Some(corner));
     // Released back over the app, the Window target does not apply.
     assert!(release(&mut interaction, &service, Point { x: 700.0, y: 400.0 }).candidate.is_none());
+    // Near a screen edge the window is kept on its monitor, away from the corner
+    // the drag asked for: it opens where it was shown.
     fixture_press(&service, &host, &mut interaction, HostPointerTarget::Header { instance: id("moving") });
     fixture_move(&service, &host, &mut interaction, outside);
-    interaction.confirm_window_shown(shown);
+    let kept = LogicalRect { origin: Point { x: corner.x - 40.0, y: corner.y - 60.0 }, ..shown };
+    interaction.confirm_window_shown(corner, kept);
     fixture_move(&service, &host, &mut interaction, further);
     let candidate = release(&mut interaction, &service, further).candidate.expect("the shown Window target commits");
-    assert_eq!(candidate.window_landing(), Some(&(id("moving"), shown)));
+    assert_eq!(candidate.window_landing(), Some(&(id("moving"), kept)));
     fixture_commit(&mut service, &host, candidate);
     let popped = service.layout().containing(&id("moving")).unwrap();
     let SectionLocation::Window { return_to, .. } = &popped.location else { panic!("{popped:?}") };
@@ -14400,6 +14406,18 @@ fn a_dropped_window_opens_at_the_shown_place_kept_on_its_monitor() {
     assert_eq!((window.mouse_passthrough, window.window_level, window.active), (Some(true), Some(egui::WindowLevel::AlwaysOnTop), Some(false)));
     assert_eq!((window.fullsize_content_view, window.title_shown), (Some(true), Some(false)));
     assert_eq!(adapter.drop_window(&other, "Other".into(), landing).0, dropped, "one window for the whole drag");
+    // It is drawn only once the OS has created it, hidden first.
+    assert!(adapter.drop_ready(&ctx, &window).is_err(), "no OS windows where viewports are embedded");
+    let desktop = egui::Context::default();
+    desktop.set_embed_viewports(false);
+    let mut waiting = false;
+    let output = desktop.run_ui(egui::RawInput::default(), |ui| waiting = adapter.drop_ready(ui.ctx(), &window) == Ok(false));
+    assert!(waiting);
+    assert_eq!(output.viewport_output.get(&dropped).map(|viewport| viewport.builder.visible), Some(Some(false)));
+    let mut created = egui::RawInput::default();
+    created.viewports.entry(dropped).or_default().native_pixels_per_point = Some(2.0);
+    let _ = desktop.run_ui(created, |ui| assert_eq!(adapter.drop_ready(ui.ctx(), &window), Ok(true)));
+    assert_eq!(window.visible, Some(true));
     let opened = HostId::new("drop-opened").unwrap();
     let create = [HostEffect::CreateNative { host: opened.clone(), section: SectionId::new("opened-section").unwrap() }];
     adapter.prepare(&create).unwrap();
@@ -14454,7 +14472,7 @@ fn raw_host_drags_a_panel_out_to_a_desktop_window_and_back_by_its_grip_keeping_i
     let title = raw.content.runtime.instance_presentation(&id("editor")).unwrap().title;
     assert!(!painted.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == title)), "{painted:?}");
     let shown = LogicalRect { origin: corner, size: Size { width: 376.0, height: 488.0 } };
-    raw.host.confirm_window_shown(shown);
+    raw.host.confirm_window_shown(corner, shown);
     raw.frame(
         vec![egui::Event::PointerButton { pos: outside, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }],
         false,
@@ -14466,8 +14484,14 @@ fn raw_host_drags_a_panel_out_to_a_desktop_window_and_back_by_its_grip_keeping_i
     let state = raw.content.probe.state(&key).unwrap();
     assert_eq!((state.draft.as_str(), state.transaction_live), ("torn-off draft", true));
 
-    // Back: the grip's screen positions become this host's drop target; release docks.
+    // A grip drag queued before the host's context changes never starts in the new one.
     let target = egui::pos2(200.0 + 20.0, 100.0 + 500.0);
+    raw.host.queue_window_drag(WindowDragEvent::Begin { instance: id("editor"), at: Point { x: target.x, y: target.y } });
+    raw.host.invalidate_context();
+    raw.frame(Vec::new(), false);
+    assert!(raw.host.frame().unwrap().preview.is_none());
+
+    // Back: the grip's screen positions become this host's drop target; release docks.
     raw.host.queue_window_drag(WindowDragEvent::Begin { instance: id("editor"), at: Point { x: target.x, y: target.y } });
     raw.frame(Vec::new(), false);
     let preview = raw.host.frame().unwrap().preview.clone().expect("the app shows where the panel would dock");

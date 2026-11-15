@@ -657,7 +657,10 @@ impl AppPanelRuntime {
                 ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
             }
         }
-        let Some((instance, corner)) = host.window_landing_preview() else { return };
+        let Some((instance, corner)) = host.window_landing_preview() else {
+            desktop.end_drop();
+            return;
+        };
         // The window keeps the size the panel has in the app.
         let in_app = host.frame().and_then(|frame| frame.layout.sections.iter().find(|card| card.instance == instance)).map(|card| card.outer.size);
         let layout = self.runtime.layout();
@@ -670,15 +673,23 @@ impl AppPanelRuntime {
         let title = self.runtime.instance_presentation(&instance).map(|presentation| presentation.title).unwrap_or_default();
         let rtl = self.runtime.environment().direction == Direction::Rtl;
         let (viewport, builder) = desktop.drop_window(&instance, title.clone(), outer);
+        // Drawing needs the OS window: until it exists, nothing is shown.
+        if !desktop.drop_ready(ctx, &builder).unwrap_or(false) {
+            return;
+        }
         let title_bar = desktop.title_bar();
         let shown = ctx.show_viewport_immediate(viewport, builder, |ui, class| {
             super::native_ui::paint_drop(ui, title_bar, &instance, &title, rtl, host.window_card());
-            class != egui::ViewportClass::EmbeddedWindow && ui.input(|input| input.viewport().native_pixels_per_point.is_some())
+            let (scale, observed) = ui.input(|input| (input.viewport().native_pixels_per_point, input.viewport().outer_rect));
+            (class != egui::ViewportClass::EmbeddedWindow && scale.is_some()).then_some(observed)
         });
-        if shown {
-            host.confirm_window_shown(super::workspace::logical_rect(outer));
-        } else {
-            ctx.request_repaint();
+        match shown {
+            // Where the OS shows the window, which may lag the requested place.
+            Some(observed) => {
+                let origin = observed.filter(|rect| rect.is_finite()).map_or(outer.min, |rect| rect.min);
+                host.confirm_window_shown(corner, super::workspace::logical_rect(egui::Rect::from_min_size(origin, outer.size())));
+            }
+            None => ctx.request_repaint(),
         }
     }
 

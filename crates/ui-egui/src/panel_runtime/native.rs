@@ -58,6 +58,8 @@ struct DesktopState {
     title_bar: Option<TitleBar>,
     /// The window a drag shows for a panel; the panel's window keeps it on release.
     drop: Option<(InstanceId, egui::ViewportId)>,
+    /// When this drag started asking the OS for that window.
+    drop_startup: Option<Instant>,
 }
 
 /// Both the layout runtime and the UI use the same desktop registration table.
@@ -179,10 +181,7 @@ impl DesktopNativeAdapter {
         let mut state = self.0.borrow_mut();
         let registration = state.hosts.get_mut(host).ok_or_else(|| error(Rule::MissingTarget, "native host absent"))?;
         let viewport = registration.viewport;
-        let ready = ctx.input(|input| {
-            input.raw.viewports.get(&viewport).and_then(|info| info.native_pixels_per_point).is_some_and(|scale| scale.is_finite() && scale > 0.0)
-        });
-        if ready {
+        if has_os_window(ctx, viewport) {
             registration.ready = true;
             registration.startup = None;
             return Ok(true);
@@ -271,17 +270,48 @@ impl DesktopNativeAdapter {
         let mut state = self.0.borrow_mut();
         let viewport = match &state.drop {
             Some((shown, viewport)) if shown == instance => *viewport,
-            _ => next_viewport_id(("solidcraft-panel-drop", instance)),
+            _ => {
+                state.drop_startup = None;
+                next_viewport_id(("solidcraft-panel-drop", instance))
+            }
         };
         state.drop = Some((instance.clone(), viewport));
         let builder = state
             .chrome(egui::ViewportBuilder::default().with_title(title))
             .with_position(outer.min)
             .with_inner_size(outer.size() - state.decoration(instance))
+            .with_visible(true)
             .with_mouse_passthrough(true)
             .with_window_level(egui::WindowLevel::AlwaysOnTop)
             .with_active(false);
         (viewport, builder)
+    }
+
+    /// Like `ready`, for the window a drag shows: it is created hidden first.
+    /// Until it exists it is not shown, so release keeps the panel in the app;
+    /// after the startup time this drag stops asking for it.
+    pub fn drop_ready(&self, ctx: &egui::Context, builder: &egui::ViewportBuilder) -> PanelResult<bool> {
+        if ctx.embed_viewports() {
+            return Err(error(Rule::Capability, "native viewports unavailable"));
+        }
+        let mut state = self.0.borrow_mut();
+        let viewport = state.drop.as_ref().ok_or_else(|| error(Rule::MissingTarget, "no window is being dragged"))?.1;
+        if has_os_window(ctx, viewport) {
+            state.drop_startup = None;
+            return Ok(true);
+        }
+        if state.drop_startup.get_or_insert_with(Instant::now).elapsed() >= STARTUP_TIMEOUT {
+            return Err(error(Rule::Lifecycle, "desktop panel window did not open"));
+        }
+        drop(state);
+        ctx.show_viewport_deferred(viewport, builder.clone().with_visible(false), |_, _| {});
+        ctx.request_repaint_after(Duration::from_millis(30));
+        Ok(false)
+    }
+
+    /// No drag shows a window now: the next one asks the OS afresh.
+    pub fn end_drop(&self) {
+        self.0.borrow_mut().drop_startup = None;
     }
 
     /// The panel dropped as `instance` opened as `host`: that host keeps the
@@ -294,6 +324,7 @@ impl DesktopNativeAdapter {
         registration.startup = None;
         registration.ready = false;
         state.drop = None;
+        state.drop_startup = None;
         Some(viewport)
     }
 }
@@ -428,6 +459,13 @@ impl NativeHostAdapter for DesktopNativeAdapter {
             state.monitors_updated = None;
         }
     }
+}
+
+/// Egui knows the viewport's OS window: an immediate viewport can draw in it.
+fn has_os_window(ctx: &egui::Context, viewport: egui::ViewportId) -> bool {
+    ctx.input(|input| {
+        input.raw.viewports.get(&viewport).and_then(|info| info.native_pixels_per_point).is_some_and(|scale| scale.is_finite() && scale > 0.0)
+    })
 }
 
 fn next_viewport_id(seed: impl std::hash::Hash + std::fmt::Debug) -> egui::ViewportId {
