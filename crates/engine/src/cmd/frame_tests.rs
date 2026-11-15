@@ -4774,6 +4774,42 @@ fn an_overlap_piece_rename_is_kept() {
     assert_eq!(member_of(&s, fid, "Upper brace").as_deref(), Some("pair2>pair1"));
 }
 
+#[test]
+fn an_auto_stem_ending_on_a_pair_tubes_middle_leaves_it_whole() {
+    // Ruling O2: a sketch line (300, 200)…(300, 0) ends on the middle of a point-pair rail (0, 0, 0)…(600, 0, 0). Auto's
+    // plan doesn't fit that end, so the two touch end on middle as they always did: the rail, laid after the sketch's
+    // tube, is not notched by it and stays one whole A·600 tube.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Frame"}));
+    run(&mut s, "sketch.line", json!({"points": [[300, 200], [300, 0]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    points(&mut s, &[("R0", [0.0, 0.0, 0.0]), ("R1", [600.0, 0.0, 0.0])]);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "pairs": [pair("R0", "R1")], "profile": tube(), "corner": "auto", "body_name": "T"}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 2, "{bs:?}");
+    let rail = bs.iter().find(|b| b.3[0] - b.2[0] > 500.0).unwrap_or_else(|| panic!("no rail in {bs:?}"));
+    assert_tube(rail, [0.0, -20.0, -20.0], [600.0, 20.0, 20.0], 600.0);
+}
+
+#[test]
+fn fit_ends_fits_a_later_frame_to_an_earlier_frames_overlap_pieces() {
+    // The brace split by the rail (`a_point_pair_brace_crossing_a_rail_is_split`): `T (2)` y −200…−20 and `T (2) · T`
+    // y 20…200, x 280…320. A later Fit Ends frame's lines y = ∓110, x 200…400, in 25 square tube, cross one piece each
+    // mid-span: each is split by that piece's tool, x 200…280 and 320…400, 80 of its 200 each, and overlaps nothing.
+    let mut s = rail_and_brace(0.0, "auto", json!({}));
+    later_frame(&mut s, 0.0, &[[[200.0, -110.0], [400.0, -110.0]], [[200.0, 110.0], [400.0, 110.0]]], 25.0, true);
+    let bs = named(&mut s, "B");
+    assert_eq!(bs.len(), 4, "{bs:?}");
+    for b in &bs {
+        let (lo, hi) = (b.2[0], b.3[0]);
+        let cut = ((lo - 200.0).abs() < 1e-6 && (hi - 280.0).abs() < 1e-6) || ((lo - 320.0).abs() < 1e-6 && (hi - 400.0).abs() < 1e-6);
+        assert!(cut && rel(b.1, bs[0].1) < 1e-6, "{b:?}: {bs:?}");
+    }
+    assert!(bs.iter().any(|b| b.0.ends_with(" · T (2) · T")), "{bs:?}");
+    let o = overlap_all(&mut s);
+    assert!(o < 1e-3, "the tubes overlap by {o} mm³: {bs:?}");
+}
+
 /// A Locost-sized design (about 60 tubes over four Frame Members, and point-pair braces crossing them, all Auto with
 /// fit_ends), timed through a full evaluation, which it prints (no time is asserted). Run on demand: `cargo test ...
 /// locost_sized_design_timing -- --ignored --nocapture`.

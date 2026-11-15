@@ -529,7 +529,9 @@ fn crowded(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: &[u
 fn stage_fits(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: &[usize], crossing: Option<&Plan>) -> (Vec<Corner>, Vec<Fit>) {
     let (corners, mut fits) = crowded(segments, planes, drawn, crossing);
     fits.extend(crossing.into_iter().flat_map(|p| crossing_fits(p, segments)).cloned());
-    let fitted: HashSet<(usize, bool)> = fits.iter().map(|f| (f.member, f.at_start)).collect();
+    // An end at a corner (stage 1's, or where three or more end) is finished there, never fitted again as a tee.
+    let at_corners = frame_corners::find_corners(segments).into_iter().map(|c| c.ends).chain(corners.iter().map(|c| c.ends)).flatten();
+    let fitted: HashSet<(usize, bool)> = fits.iter().map(|f| (f.member, f.at_start)).chain(at_corners).collect();
     fits.extend(tees(segments, planes, drawn, crossing, &fitted));
     (corners, fits)
 }
@@ -582,8 +584,10 @@ fn tees(
 }
 
 /// The pairs of members (lower index first) a corner, chain corner, crossing or fit joins (#4003 ruling O1): under
-/// Auto, its `plan`'s; else stage 1's corners and [`stage_fits`] over `crossing`'s pieces. Two members only touching
-/// (an end on the other's line with nothing jointing them) are not joined.
+/// Auto, its `plan`'s, and every pair where an end of one lies on the other's line ([`ends_meet`], ruling O2: Auto's
+/// T-junctions its plan leaves unfitted overlap as they always did); else stage 1's corners and [`stage_fits`] over
+/// `crossing`'s pieces, where two members only touching (an end on the other's line with nothing jointing them) are
+/// not joined.
 fn joints(
     segments: &[(String, Vec3, Vec3)],
     planes: &[MemberPlane],
@@ -596,7 +600,9 @@ fn joints(
     match plan {
         Some(p) => {
             let corners = p.corners.iter().map(|c| pair(c.long.0, c.short.0));
-            corners.chain(p.chained.iter().map(|c| pair(c.a.0, c.b.0))).chain(fitted(&p.fits)).collect()
+            let n = segments.len();
+            let touching = (0..n).flat_map(|i| (i + 1..n).filter(move |&j| ends_meet(segments, i, j)).map(move |j| (i, j)));
+            corners.chain(p.chained.iter().map(|c| pair(c.a.0, c.b.0))).chain(fitted(&p.fits)).chain(touching).collect()
         }
         None => {
             let (crowded, fits) = stage_fits(segments, planes, drawn, crossing);
