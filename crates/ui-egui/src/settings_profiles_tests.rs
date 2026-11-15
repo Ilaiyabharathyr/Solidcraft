@@ -37,12 +37,13 @@ fn panel_arrow_bindings_and_cleared_defaults_survive_profile_export_import_and_a
 #[test]
 fn a_profile_holds_input_and_interface_settings_but_not_the_machine() {
     let keys: Vec<&str> = keys().collect();
-    assert_eq!(keys.len(), 104, "include the live panel drag preference and the selected bodies' hidden edges among the current portable settings");
+    assert_eq!(keys.len(), 105, "include the custom radial menu tools among the portable settings");
     for key in [
         "nav",
         "maya_horizontal_zoom",
         "mouse_gestures",
         "radial_context_menu",
+        "radial_tools",
         "zoom_reverse",
         "theme",
         "theme_day",
@@ -853,6 +854,7 @@ fn profile_keys_cover_the_current_portable_preferences() {
         "project_options_dialog",
         "quick_measure",
         "radial_context_menu",
+        "radial_tools",
         "ribbon_click_ends_tool",
         "ribbon_icon_grid",
         "ribbon_labels",
@@ -908,7 +910,7 @@ fn profile_keys_cover_the_current_portable_preferences() {
     ];
     let mut actual: Vec<_> = keys().collect();
     actual.sort_unstable();
-    assert_eq!(expected.len(), 104);
+    assert_eq!(expected.len(), 105);
     assert_eq!(actual, expected);
 }
 
