@@ -14284,10 +14284,10 @@ fn drag_out_targets_a_desktop_window_only_outside_the_app_and_opens_it_where_it_
     // Released back over the app, the Window target does not apply.
     assert!(release(&mut interaction, &service, Point { x: 700.0, y: 400.0 }).candidate.is_none());
     // Near a screen edge the window is kept on its monitor, away from the corner
-    // the drag asked for: it opens where it was shown.
+    // the drag asked for, or the OS is still resizing it: it opens as it was shown.
     fixture_press(&service, &host, &mut interaction, HostPointerTarget::Header { instance: id("moving") });
     fixture_move(&service, &host, &mut interaction, outside);
-    let kept = LogicalRect { origin: Point { x: corner.x - 40.0, y: corner.y - 60.0 }, ..shown };
+    let kept = LogicalRect { origin: Point { x: corner.x - 40.0, y: corner.y - 60.0 }, size: Size { width: 300.0, height: 400.0 } };
     interaction.confirm_window_shown(corner, kept);
     fixture_move(&service, &host, &mut interaction, further);
     let candidate = release(&mut interaction, &service, further).candidate.expect("the shown Window target commits");
@@ -14432,6 +14432,14 @@ fn a_dropped_window_opens_at_the_shown_place_kept_on_its_monitor() {
         (Some(false), Some(egui::WindowLevel::Normal), Some(true))
     );
     assert_eq!((window.position, window.inner_size), (Some(landing.min), Some(landing.size())));
+    // Released before the OS finished resizing it, the window opens at the size it was shown;
+    // where the OS reports no rectangle (Wayland), at the requested one.
+    let resizing = egui::Rect::from_min_size(egui::pos2(120.0, 90.0), egui::vec2(300.0, 380.0));
+    assert_eq!(super::app::drop_window_shown(None, landing), landing);
+    assert_eq!(super::app::drop_window_shown(Some(egui::Rect::NOTHING), landing), landing);
+    adapter.place(&ctx, &other, super::app::drop_window_shown(Some(resizing), landing));
+    let window = adapter.builder(&ctx, &opened, &other, "Other".into(), preferred, bounds).unwrap();
+    assert_eq!((window.position, window.inner_size), (Some(resizing.min), Some(resizing.size())));
     assert_ne!(adapter.drop_window(&other, "Other".into(), landing).0, dropped, "the next drag shows a new window");
 }
 

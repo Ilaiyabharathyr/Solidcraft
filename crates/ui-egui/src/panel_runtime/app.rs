@@ -684,11 +684,7 @@ impl AppPanelRuntime {
             (class != egui::ViewportClass::EmbeddedWindow && scale.is_some()).then_some(observed)
         });
         match shown {
-            // The window as the OS shows it, which may lag the requested place and size.
-            Some(observed) => {
-                let shown = observed.filter(|rect| rect.is_finite() && rect.is_positive()).unwrap_or(outer);
-                host.confirm_window_shown(corner, super::workspace::logical_rect(shown));
-            }
+            Some(observed) => host.confirm_window_shown(corner, super::workspace::logical_rect(drop_window_shown(observed, outer))),
             None => ctx.request_repaint(),
         }
     }
@@ -1271,6 +1267,13 @@ pub(super) fn ensure_production(app: &mut crate::SolveApp) -> PanelResult<()> {
         super::production::enable_production(app)?;
     }
     Ok(())
+}
+
+/// Where a drag's window was shown: the rectangle the OS reports for it, which
+/// may still lag a move or resize, else the requested one (Wayland reports none).
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn drop_window_shown(observed: Option<egui::Rect>, requested: egui::Rect) -> egui::Rect {
+    observed.filter(|rect| rect.is_finite() && rect.is_positive()).unwrap_or(requested)
 }
 
 /// A panel window's first inner size: its dock size, at least a usable window.
