@@ -680,12 +680,14 @@ impl AppPanelRuntime {
         let title_bar = desktop.title_bar();
         let shown = ctx.show_viewport_immediate(viewport, builder, |ui, class| {
             super::native_ui::paint_drop(ui, title_bar, &instance, &title, rtl, host.window_card());
-            let (scale, observed) = ui.input(|input| (input.viewport().native_pixels_per_point, input.viewport().outer_rect));
-            (class != egui::ViewportClass::EmbeddedWindow && scale.is_some()).then_some(observed)
+            class != egui::ViewportClass::EmbeddedWindow && ui.input(|input| input.viewport().native_pixels_per_point.is_some())
         });
-        match shown {
-            Some(observed) => host.confirm_window_shown(corner, super::workspace::logical_rect(drop_window_shown(observed, outer))),
-            None => ctx.request_repaint(),
+        // The OS reports the window where it was before this frame's move, so
+        // release keeps the rectangle requested for it: where it is now shown.
+        if shown {
+            host.confirm_window_shown(corner, super::workspace::logical_rect(outer));
+        } else {
+            ctx.request_repaint();
         }
     }
 
@@ -1267,13 +1269,6 @@ pub(super) fn ensure_production(app: &mut crate::SolveApp) -> PanelResult<()> {
         super::production::enable_production(app)?;
     }
     Ok(())
-}
-
-/// Where a drag's window was shown: the rectangle the OS reports for it, which
-/// may still lag a move or resize, else the requested one (Wayland reports none).
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) fn drop_window_shown(observed: Option<egui::Rect>, requested: egui::Rect) -> egui::Rect {
-    observed.filter(|rect| rect.is_finite() && rect.is_positive()).unwrap_or(requested)
 }
 
 /// A panel window's first inner size: its dock size, at least a usable window.
