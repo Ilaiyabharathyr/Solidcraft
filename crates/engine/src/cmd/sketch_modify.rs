@@ -4061,12 +4061,15 @@ fn move_copy(s: &mut Session, p: &Value) -> Result<Value> {
             let (mut m, map) = copy_through(sk, &cs, &ps, &f, false, &|_| false, 1.0)?;
             m.extend(text_curves);
             let copies: Vec<usize> = own.iter().filter_map(|q| map.iter().find(|(old, _)| old == q).map(|(_, new)| *new)).collect();
-            let mut ids = ids_of(sk, &m);
+            let ids = ids_of(sk, &m);
+            // Drawn copies are already 3D: they go `z` up along the normal, and their ids are
+            // returned apart from the plane ids (which lift turns into drawn curves).
+            let mut drawn_ids = Vec::new();
             for (wire, plane) in &drawn {
-                let fit: Vec<_> = wire.fit.iter().map(|&q| plane.to_world(f(plane.to_local(q))) + plane.normal() * plane.height(q)).collect();
-                ids.push(if wire.arc.is_some() { sk.add_drawn_arc_in(&fit, wire.space)? } else { sk.add_drawn_wire_in(&fit, wire.space)? });
+                let fit: Vec<_> = wire.fit.iter().map(|&q| plane.to_world(f(plane.to_local(q))) + plane.normal() * (plane.height(q) + z)).collect();
+                drawn_ids.push(if wire.arc.is_some() { sk.add_drawn_arc_in(&fit, wire.space)? } else { sk.add_drawn_wire_in(&fit, wire.space)? });
             }
-            return Ok((ids, point_ids(sk, &copies)));
+            return Ok((ids, point_ids(sk, &copies), drawn_ids));
         }
         with_ellipse_axes(sk, &mut cs);
         let held = holding(sk, &involved_points(sk, &cs, &ps));
@@ -4078,18 +4081,20 @@ fn move_copy(s: &mut Session, p: &Value) -> Result<Value> {
             added = rotate_axis_constraints(sk, doc, &moved, ang)?;
         }
         cs.extend(text_curves);
-        Ok((ids_of(sk, &cs), point_ids(sk, &own)))
+        Ok((ids_of(sk, &cs), point_ids(sk, &own), Vec::new()))
     })?;
-    let (out, moved_points) = out;
+    let (out, moved_points, drawn_copies) = out;
     s.doc_mut().prune_model_params();
     if z != 0.0 {
         // Off the plane: what moved (or its copy) becomes drawn 3D curves `z` along the normal.
         let id = sketch_store::target(s, p, cmd)?;
         let n = s.world_state()?.sketch(id).map(|ss| ss.plane.normal()).ok_or_else(|| bad(cmd, "the sketch has no plane"))?;
-        let (wires, info) = super::sketch_3d::lift(s, p, cmd, &out, &moved_points, n * z)?;
+        let (mut wires, info) = super::sketch_3d::lift(s, p, cmd, &out, &moved_points, n * z)?;
+        wires.extend(drawn_copies);
         return reply(cmd, MoveResult { curves: wires, released, added, sketch: info, created: None, param_warnings: Vec::new() });
     }
-    reply(cmd, MoveResult { curves: out, released, added, sketch: info, created: None, param_warnings: Vec::new() })
+    let curves: Vec<String> = out.into_iter().chain(drawn_copies).collect();
+    reply(cmd, MoveResult { curves, released, added, sketch: info, created: None, param_warnings: Vec::new() })
 }
 
 /// Scale, turn and move the entities in one step: scaled about `center`, then turned about it,
