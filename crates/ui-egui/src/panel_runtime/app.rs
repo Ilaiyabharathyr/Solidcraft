@@ -684,10 +684,10 @@ impl AppPanelRuntime {
             (class != egui::ViewportClass::EmbeddedWindow && scale.is_some()).then_some(observed)
         });
         match shown {
-            // Where the OS shows the window, which may lag the requested place.
+            // The window as the OS shows it, which may lag the requested place and size.
             Some(observed) => {
-                let origin = observed.filter(|rect| rect.is_finite()).map_or(outer.min, |rect| rect.min);
-                host.confirm_window_shown(corner, super::workspace::logical_rect(egui::Rect::from_min_size(origin, outer.size())));
+                let shown = observed.filter(|rect| rect.is_finite() && rect.is_positive()).unwrap_or(outer);
+                host.confirm_window_shown(corner, super::workspace::logical_rect(shown));
             }
             None => ctx.request_repaint(),
         }
