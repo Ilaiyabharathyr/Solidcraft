@@ -6372,7 +6372,8 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             let (o, d) = proj.ray(p);
             ss.plane.intersect_ray(o, d).map(|w| ss.plane.to_local(w))
         };
-        // What a drag starts on: the 3D triad, then a dimension's text, then sketch geometry
+        // What a drag starts on: a drawn 3D point (its arrows under the classic move handles
+        // preference), then a dimension's text, then sketch geometry
         // (before the dimension's lines, which end on the geometry they measure), as for clicks.
         let grabbed = resp
             .drag_started_by(egui::PointerButton::Primary)
