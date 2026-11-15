@@ -521,9 +521,11 @@ fn move_mixed_plane_and_drawn_picks_move_together() {
     let plane = s.world_state().unwrap().sketch(sketch).unwrap().plane;
     let y = plane.y;
     let undo = s.undo.len();
-    run(&mut s, "sketch.move", json!({"entities":[format!("{point}@0"), plane_line.clone()],"translate":[0,2]}));
+    let r = run(&mut s, "sketch.move", json!({"entities":[format!("{point}@0"), plane_line.clone()],"translate":[0,2]}));
     assert_eq!(s.undo.len(), undo + 1, "one undo step");
     let shown = s.world_state().unwrap().sketch(sketch).unwrap().sketch.wires.iter().find(|q| q.id == point).unwrap().fit.clone();
     near(shown[0], Vec3::new(17.0, 32.0, 45.0) + y * 2.0);
+    let curves: Vec<&str> = r["curves"].as_array().unwrap().iter().filter_map(|c| c.as_str()).collect();
+    assert!(curves.contains(&point.as_str()), "the moved drawn curve is listed: {curves:?}");
     assert!(s.doc.sketch(sketch).unwrap().curve_index(&plane_line).is_some(), "the plane line stays");
 }
