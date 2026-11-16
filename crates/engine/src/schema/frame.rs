@@ -26,7 +26,7 @@ use solidcraft_doc::Expr;
 use solidcraft_doc::frame::sizes::Family;
 use solidcraft_doc::frame::{self, Anchor, MAX_MEMBERS, Profile, ProfileSpec};
 
-use super::check::{keyed, located, whole};
+use super::check::{keyed, located, parse_issue, whole};
 use super::motion::require;
 use super::sketch_ends::SketchTarget;
 use super::types::{AngleExpr, Point2, ProfilesParam, SketchRef, StringList, not_blank_pattern, present};
@@ -589,6 +589,90 @@ impl JsonSchema for MemberAngle {
     }
 }
 
+/// A group's located profile point, with the same bounds and errors as the member handler.
+fn member_locate<'de, D: Deserializer<'de>>(d: D) -> Result<Option<[f64; 2]>, D::Error> {
+    let value = Value::deserialize(d)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some([x, y]) = value.as_array().map(Vec::as_slice) else {
+        return Err(D::Error::custom(whole("`locate` must be [x, y] in the profile's own coordinates")));
+    };
+    let x = x.as_f64().filter(|v| v.is_finite()).ok_or_else(|| D::Error::custom(whole("`locate` x must be a finite length")))?;
+    let y = y.as_f64().filter(|v| v.is_finite()).ok_or_else(|| D::Error::custom(whole("`locate` y must be a finite length")))?;
+    if x.abs() > frame::MAX_PROFILE_SIZE || y.abs() > frame::MAX_PROFILE_SIZE {
+        return Err(D::Error::custom(whole("`locate` is outside the largest profile")));
+    }
+    Ok(Some([x, y]))
+}
+
+/// One group's explicit lines and independent placement, in the feature's shared section.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct MemberGroupParams {
+    /// The frame sketch's line ids, each once; a group must list its lines.
+    pub lines: LineIds,
+    /// The profile point on each line. Default: origin.
+    #[serde(default)]
+    pub anchor: Option<AnchorParam>,
+    /// The profile point on each line, [x, y] in mm from the profile's own origin. Takes
+    /// precedence over `anchor`.
+    #[serde(default, deserialize_with = "member_locate")]
+    #[schemars(with = "Option<[f64; 2]>")]
+    pub locate: Option<[f64; 2]>,
+    /// The profile's rotation about each line. Default: zero.
+    #[serde(default)]
+    pub angle: Option<MemberAngle>,
+    /// Mirror the section before turning it. Default: false.
+    #[serde(default)]
+    pub mirror: Option<bool>,
+    /// The base name of this group's members. Default: the profile's description.
+    #[serde(default)]
+    pub body_name: Option<MemberName>,
+}
+
+/// A bounded list of groups. Cross-group line ownership and the total member limit are checked
+/// by the handler, along with sketch references and angle expressions.
+#[derive(Debug)]
+pub struct MemberGroups(pub Vec<MemberGroupParams>);
+
+impl<'de> Deserialize<'de> for MemberGroups {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(d)?;
+        let groups = match value.as_array() {
+            Some(groups) if !groups.is_empty() && groups.len() <= MAX_MEMBERS && groups.iter().all(Value::is_object) => groups,
+            _ => {
+                return Err(D::Error::custom(whole(format!(
+                    "`groups` must list 1…{MAX_MEMBERS} groups, each {{lines, anchor?, locate?, angle?, mirror?, body_name?}}"
+                ))));
+            }
+        };
+        groups
+            .iter()
+            .enumerate()
+            .map(|(k, group)| {
+                if group.get("lines").is_none_or(Value::is_null) {
+                    return Err(D::Error::custom(whole(format!("group {}: `lines` must list 1…{MAX_MEMBERS} curve ids", k + 1))));
+                }
+                serde_path_to_error::deserialize(group).map_err(|e| D::Error::custom(whole(format!("group {}: {}", k + 1, parse_issue(&e).message))))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(MemberGroups)
+    }
+}
+
+impl JsonSchema for MemberGroups {
+    fn schema_name() -> Cow<'static, str> {
+        "MemberGroups".into()
+    }
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let mut schema = Vec::<MemberGroupParams>::json_schema(generator);
+        schema.insert("minItems".into(), json!(1));
+        schema.insert("maxItems".into(), json!(MAX_MEMBERS));
+        schema
+    }
+}
+
 /// `participants`, read as `features::add_feature` reads it: a name or a list of names, with the
 /// message of `params::string_list`.
 #[derive(Clone, Debug, PartialEq)]
@@ -622,6 +706,17 @@ fn member_required(schema: &mut Schema) {
     require(schema, "sketch");
     let only = |key: &str, other: &str| json!({"required": [key], "not": {"required": [other]}});
     schema.insert("anyOf".into(), json!([only("profile", "profile_sketch"), only("profile_sketch", "profile")]));
+    // Without groups the flat placement applies. With groups those keys may only be absent or null.
+    schema.insert(
+        "allOf".into(),
+        json!([{"anyOf": [
+            {"properties": {"groups": {"type": "null"}}},
+            {"properties": {
+                "lines": {"type": "null"}, "anchor": {"type": "null"}, "locate": {"type": "null"}, "angle": {"type": "null"},
+                "mirror": {"type": "null"}, "body_name": {"type": "null"}
+            }}
+        ]}]),
+    );
 }
 
 /// Lay structural members along the lines of a frame sketch: one body per line, from its start
@@ -641,6 +736,10 @@ pub struct FrameMemberKeys {
     /// length.
     #[serde(default)]
     pub lines: Option<LineIds>,
+    /// Groups sharing the profile, each with its own explicit lines, placement and base name.
+    /// A line belongs to one group only. Give placement keys in each group, not beside `groups`.
+    #[serde(default)]
+    pub groups: Option<MemberGroups>,
     /// The section as a built-in profile. Give it or `profile_sketch`, not both.
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     #[schemars(with = "ProfileParam")]
@@ -705,6 +804,12 @@ impl<'de> Deserialize<'de> for FrameMemberParams {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut value = Value::deserialize(d)?;
         if let Some(keys) = value.as_object_mut() {
+            if keys.get("groups").is_some_and(|groups| !groups.is_null())
+                && let Some(key) =
+                    ["lines", "anchor", "locate", "angle", "mirror", "body_name"].iter().find(|key| keys.get(**key).is_some_and(|v| !v.is_null()))
+            {
+                return Err(D::Error::custom(whole(format!("give `{key}` in each of `groups`, not beside them"))));
+            }
             // A key counts as given when it is there, `null` included, as the handler tests it.
             match (keys.contains_key("profile"), keys.contains_key("profile_sketch")) {
                 // A built-in profile: the sketch's profile picks are never read.
