@@ -224,6 +224,10 @@ pub enum BarAction {
     Version,
 }
 
+/// Where the app keeps the width of the offer pill it drew in `BarOut::offer` last frame (its
+/// egui temp data, an `f32`; none while nothing is offered), so the link pills leave it room.
+pub const OFFER_WIDTH: &str = "sc_app_bar_offer_width";
+
 /// The bar drawn: what was chosen, and the places it leaves to the app.
 #[derive(Debug)]
 pub struct BarOut {
@@ -531,7 +535,9 @@ pub fn show(ui: &mut egui::Ui, data: &AppBar, bar: Rect, content: Rect) -> BarOu
     // in `offer`, and its width is last frame's) or, with none, of the assistant. They are left out
     // where the tabs would keep less than one tab's room (216) beside them, so a narrow bar looks as
     // it did without them.
-    let offered = solidcraft_ui_registry::rect_of("titlebar:update").map_or(0.0, |u| u.width() + 4.0);
+    // The registry is cleared as each frame starts and the offer is drawn after the bar, so its
+    // width this frame is not known yet: the app keeps last frame's under `OFFER_WIDTH` (#17829).
+    let offered = ui.ctx().data(|d| d.get_temp::<f32>(egui::Id::unique(OFFER_WIDTH))).map_or(0.0, |w| w + 4.0);
     let pills_w = pills_width(ui, &data.pills);
     let pills_shown = !data.pills.is_empty() && controls_left - offered - pills_w - tabs_start >= 216.0;
     let pills_right = controls_left - 4.0 - offered;
