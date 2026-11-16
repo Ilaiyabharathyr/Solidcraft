@@ -5617,14 +5617,19 @@ impl SheetBody {
         if leg < 0.0 {
             return Err(DocError::Invalid("the hem is shorter than its bend".into()));
         }
+        // `edge_at` sees the panel's outline, not its cut-outs: the hem runs along what they
+        // leave of the edge (the stretch nearest the pick), as an edge flange does.
+        let (s0, s1) = self
+            .edge_left(panel, a, b, pick, &self.cut_outs())
+            .ok_or_else(|| DocError::Invalid("a cut-out has taken that edge away; pick an edge the sheet still has".into()))?;
         // A hem folds back over the face it starts from (toward the bottom unless flipped).
         let up = top != flip;
         let up = !up;
         self.flanges.push(SheetFlange {
             parent: panel,
-            p: a,
+            p: a + d * s0,
             d,
-            len: a.dist(b),
+            len: s1 - s0,
             n: outward,
             angle: if up { std::f64::consts::PI } else { -std::f64::consts::PI },
             radius: gap,
