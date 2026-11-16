@@ -7,14 +7,12 @@ render.aging.describe
 render.backends
 render.effects.describe
 render.scene
-solid.draft
 solid.hole
 solid.loft
 solid.mirror
 solid.offset_face
 solid.pattern.path
 solid.pattern.rectangular
-solid.shell
 solid.thread
 surface.extrude
 surface.revolve
