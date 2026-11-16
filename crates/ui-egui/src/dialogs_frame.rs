@@ -36,8 +36,7 @@ const ANCHORS: &[(&str, &str)] = &[
 ];
 
 /// The corner types as `frame.member` names them, and their labels.
-pub(crate) const CORNER_TYPES: [(&str, &str); 5] =
-    [("auto", "Auto"), ("none", "None"), ("mitre", "Mitre"), ("butt", "Butt"), ("coped_butt", "Coped")];
+pub(crate) const CORNER_TYPES: [(&str, &str); 4] = [("auto", "Auto"), ("none", "None"), ("mitre", "Mitre"), ("butt", "Butt")];
 /// [`CORNER_TYPES`]' Auto and None.
 const AUTO: usize = 0;
 const NONE: usize = 1;
@@ -45,7 +44,7 @@ const NONE: usize = 1;
 /// Whether the frame's Flip means anything for the corner type `index`: which member runs through.
 /// Not under Auto, which has no one corner to act on.
 fn flips(index: usize) -> bool {
-    matches!(CORNER_TYPES.get(index), Some(("butt" | "coped_butt", _)))
+    matches!(CORNER_TYPES.get(index), Some(("butt", _)))
 }
 
 /// Whether a frame of type `frame` cuts tubes where they cross (every type but None, #4003): a
@@ -114,13 +113,15 @@ pub struct Member {
     pub ghost: bool,
     /// The tubes clicked in the view (their centrelines' ids, [`Centreline::id`]), for Remove Tube.
     pub picked_tubes: Vec<String>,
-    /// How the corners are finished (an index into [`CORNER_TYPES`]), and for Butt and Coped
-    /// whether the other member runs through.
+    /// How the corners are finished (an index into [`CORNER_TYPES`]), and for Butt whether the
+    /// other member runs through.
     pub corner: usize,
     pub flip: bool,
     /// Fit Ends to Earlier Frames: fit this Frame Member's free ends to earlier Frame Members' tubes
     /// (under every corner type but None).
     pub fit_ends: bool,
+    /// Coped (#17854): every butt joint of the frame cut to the other tube's real shape (under every type but None).
+    pub coped: bool,
     /// Each corner picked in Corner Overrides with its own type and flip.
     pub overrides: Vec<(Sel, usize, bool)>,
     /// The feature's `next_pair` (0 for a new one): the number its next new pair's id takes, at the least.
@@ -370,6 +371,7 @@ impl Member {
             corner: AUTO,
             flip: false,
             fit_ends: true,
+            coped: false,
             overrides: Vec::new(),
             next_pair: 0,
             overrides_open: true,
@@ -750,9 +752,21 @@ pub fn rows(app: &SolveApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
     if flips(m.corner) {
         form_row(ui, "Flip", |ui| check(ui, &mut m.flip));
     }
-    if m.corner != NONE {
-        form_row(ui, "Fit Ends to Earlier Frames", |ui| check(ui, &mut m.fit_ends));
-    }
+    // Fit Ends to Earlier Frames, and Coped to the right of its box. None fits and copes nothing: no Fit Ends, and
+    // Coped greyed.
+    let none = m.corner == NONE;
+    form_row(ui, if none { "" } else { "Fit Ends to Earlier Frames" }, |ui| {
+        if !none {
+            check(ui, &mut m.fit_ends);
+        }
+        ui.add_enabled_ui(!none, |ui| {
+            let mut on = m.coped && !none;
+            crate::ui_kit::checkbox(ui, tr("Coped"), &mut on);
+            if !none {
+                m.coped = on;
+            }
+        });
+    });
     // The overridden corner under the pointer in the view lights its row, or the Corner Overrides
     // line while the rows are folded.
     let hovered = match &app.viewport.hover {
@@ -1129,6 +1143,9 @@ pub fn commands(app: &SolveApp, m: &Member, inputs: &[SelInput], extra: &Map<Str
         if m.fit_ends {
             p["fit_ends"] = json!(true);
         }
+        if m.coped {
+            p["coped"] = json!(true);
+        }
     }
     if m.flip && flips(m.corner) {
         p["flip"] = json!(true);
@@ -1220,6 +1237,7 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
         flip,
         corners,
         fit_ends,
+        coped,
         next_pair,
         ..
     } = kind
@@ -1286,6 +1304,7 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
     m.corner = corner_index(corner);
     m.flip = *flip;
     m.fit_ends = *fit_ends;
+    m.coped = *coped;
     m.next_pair = *next_pair;
     // Each override shows as the point of its corner; one whose lines no longer end there alone
     // (one has gone, or another now ends there too), or one of a corner where a point-to-point

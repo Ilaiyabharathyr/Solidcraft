@@ -1,6 +1,7 @@
 //! Cut to fit (#4003): a tube end cut to the tubes it meets, as a fabricator fits it. The tool is the other tube
 //! with its hole filled and its corner radii squared off, built from its section ([`squared_outline`]): a fitted
-//! end stops flat on a flat side, and is an exact fishmouth on a round tube. Exact geometry only, never a mesh.
+//! end stops flat on a flat side, and is an exact fishmouth on a round tube. A Coped frame (#17854) cuts to the
+//! other tube's real shape instead, its radii kept ([`coped_tool`]). Exact geometry only, never a mesh.
 
 use solidcore_record::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
 use solidcraft_geom::prelude::*;
@@ -9,6 +10,11 @@ use solidcraft_kernel::{self as kernel, BoolOp, PointClass};
 use crate::frame_corners::Cut;
 use crate::lineage::{Lineage, Traced, numbered_tool};
 use crate::{DocError, Result};
+
+/// The section's outer outlines as they are, radii kept; holes dropped: the tube filled.
+pub fn filled_outline(regions: &[Region2]) -> Vec<Region2> {
+    regions.iter().map(|r| Region2 { outer: r.outer.clone(), holes: Vec::new() }).collect()
+}
 
 /// The section's outer outlines with every corner arc that sits between two straight sides replaced by the
 /// corner they meet at; holes dropped. A round section (no straight sides) keeps its arcs.
@@ -59,7 +65,17 @@ fn meet((a, b): (Vec2, Vec2), (c, d): (Vec2, Vec2)) -> Option<Vec2> {
 /// A tube's cutting tool: the squared outline extruded on `plane` from `start` to `end` (as the tube is), then
 /// the same plane cuts as the tube (stage 1 Cut list), traced as a numbered tool.
 pub fn fit_tool(plane: &Plane, regions: &[Region2], start: f64, end: f64, cuts: &[Cut]) -> Result<Traced> {
-    let mut bodies = kernel::extrude(plane, &squared_outline(regions), start, end)?;
+    tool(plane, &squared_outline(regions), start, end, cuts)
+}
+
+/// [`fit_tool`] of the tube's real shape ([`filled_outline`]): what a Coped frame (#17854) cuts a tube to.
+pub fn coped_tool(plane: &Plane, regions: &[Region2], start: f64, end: f64, cuts: &[Cut]) -> Result<Traced> {
+    tool(plane, &filled_outline(regions), start, end, cuts)
+}
+
+/// `outline` extruded on `plane` from `start` to `end`, then cut by `cuts`, traced as a numbered tool.
+fn tool(plane: &Plane, outline: &[Region2], start: f64, end: f64, cuts: &[Cut]) -> Result<Traced> {
+    let mut bodies = kernel::extrude(plane, outline, start, end)?;
     let (Some(mut body), true) = (bodies.pop(), bodies.is_empty()) else {
         return Err(DocError::Invalid("a tube's fitting tool is not one solid".into()));
     };

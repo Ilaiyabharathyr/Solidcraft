@@ -48,8 +48,20 @@ the selected body (or the last body of the active component).
 ## Corners
 
 **Corner Type** (`corner`) cuts the members where two of them meet: `none` (the default, members
-overlap as before), `mitre`, `butt`, `coped_butt` or `auto` (shown as **Auto**, **None**, **Mitre**,
-**Butt** and **Coped**). **Auto** is described in its own section below.
+overlap as before), `mitre`, `butt` or `auto` (shown as **Auto**, **None**, **Mitre** and **Butt**).
+**Auto** is described in its own section below.
+
+**Coped** (`coped`, a tick box to the right of Fit Ends to Earlier Frames, unticked by default) copes
+every butt joint of the frame: the tube that gives way is cut to the other tube's real outer shape
+(its outline with its radii, hole filled), not flat to its face or to its squared outline. That is a
+Butt corner's butting member and the butts Auto chooses (each coped as below), a tube ending on the
+middle of another, the tubes fitted where three or more end, the pieces where tubes cross, the
+notches and splits where tubes overlap, and with Fit Ends to Earlier Frames the ends fitted to earlier
+frames' tubes. Mitres stay mitres (a Mitre frame's corners, Auto's mitres and Mitre overrides). A
+round tube's squared outline is already its real one, so there Coped changes only the butt corners.
+The box is greyed under None, which cuts nothing. A
+design or script from an older build that says `coped_butt`, as the frame's type or an override's,
+is read as `butt` with `coped` ticked.
 
 A **corner** is a point where two or more of the feature's members end, within 0.001 mm, and no
 other member passes through: sketch-line members and members between two points (`pairs`) alike.
@@ -58,7 +70,7 @@ corner to corner), the two that come first in Auto's laying order (see Auto belo
 longest first, never the pick order) make the corner, finished with the frame's type and flip
 exactly as if they were alone there, and every other tube ending there is cut to fit the tubes laid
 before it there, as Auto fits it, whatever Fit Ends to Earlier Frames says: a brace fits into a
-rectangle's mitre or butt. Where sketch lines cross, Mitre, Butt and Coped split the tubes exactly as
+rectangle's mitre or butt. Where sketch lines cross, Mitre and Butt split the tubes exactly as
 Auto does (see Crossings under Auto below: one stays whole, the others are cut into pieces fitted to
 it, with the same piece names, Crossing overrides and Remove Tube), and a tube ending where they cross
 (a post up to the middle of an X brace) is fitted there to the tubes laid before it, as under Auto.
@@ -80,7 +92,7 @@ A corner sharper than 5 degrees inside is refused: "Corner at (x, y, z) is too s
   through member ends flush with the outside of the other, and the other is cut flat on the near
   face of the through member. A butt whose through member would run past the far end of the other
   member is refused: "Corner at (x, y, z) is too flat to butt".
-- **Coped** (`coped_butt`): the through member is as for Butt. The butting member is cut to the
+- **Butt** with **Coped**: the through member is as for Butt. The butting member is cut to the
   through member's full outer shape, so it fits exactly (a fishmouth on round tube). It keeps its
   largest piece on its own side of the through member, and a member that lies wholly inside the
   through member is refused.
@@ -96,9 +108,9 @@ feature's Corner Type leaves existing overrides alone; a new override starts as 
 A member cut away completely fails with "the member on line `id` was cut away completely", and one
 its corners cut into pieces with "the member on line `id` is cut into pieces by its corners".
 
-An **End Cap** goes on an uncut end, or on the through member's square cut end of a Butt or Coped
-corner at a 90° corner, which is cut square to its own line. It refuses every other end: a mitre, the butting member's end of a
-Butt (it lies against the through member), the cope face of a Coped corner, and the end of a tube fitted
+An **End Cap** goes on an uncut end, or on the through member's square cut end of a Butt corner
+(coped or not) at a 90° corner, which is cut square to its own line. It refuses every other end: a mitre, the butting member's end of a
+Butt (it lies against the through member), the cope face of a coped Butt, and the end of a tube fitted
 where three or more end.
 
 In the dialog, a box drag in the view picks the frame sketch's straight lines (not construction,
@@ -109,7 +121,7 @@ away; picking another corner opens them again. Pointing at an overridden corner 
 its row (or the Corner Overrides line while the rows are folded).
 
 ```json
-{"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "round_tube", "diameter": 40, "wall": 3}, "corner": "coped_butt"}}
+{"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "round_tube", "diameter": 40, "wall": 3}, "corner": "butt", "coped": true}}
 {"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "rect_tube", "width": 40, "height": 40, "wall": 3}, "corner": "mitre", "corners": [{"members": ["l1", "l2"], "corner": "butt", "flip": true}]}}
 ```
 
@@ -173,7 +185,7 @@ to wall in any plane. A tube drawn against that direction is reversed; its face 
 The section line-up limit under Corners (Known limits) applies only outside Auto.
 
 **Crossings.** Tubes of the sketch that cross are split at the crossing, under Auto and equally under
-Mitre, Butt and Coped (None leaves them overlapping). The earliest in laying order
+Mitre and Butt (None leaves them overlapping). The earliest in laying order
 stays whole; each other tube is cut into pieces, each fitted to the tube that stays whole, so nothing
 overlaps. Where more than two tubes pass through a point, or tubes also end there, the earliest stays
 whole and the rest are cut and fitted in laying order. A crossing override (**Crossing** row, picked
@@ -186,7 +198,7 @@ Each piece is a tube of its own. The first piece keeps its line's name; a later 
 sticks. **Remove Tube** on a piece removes its whole line. Overrides name lines, never pieces: a
 `corners` entry naming a piece is refused. End Cap and `names` accept pieces.
 
-**Overlaps.** Under Auto, Mitre, Butt and Coped, two tubes of the frame whose solids still overlap
+**Overlaps.** Under Auto, Mitre and Butt, two tubes of the frame whose solids still overlap
 where no corner, crossing or fit joins them are resolved too: tubes in no sketch plane (pairs, 3D-sketch
 lines) crossing each other or sketch tubes, and tubes that only clip each other where their lines
 miss. The later of the two in laying order gives way (a piece of a crossing takes its line's place);
@@ -211,7 +223,7 @@ fits the tubes' free ends to the tubes of Frame Members made earlier in the time
 Mirror and Pattern copies of those, and to this frame's own tubes laid before them. A corner that lies
 inside an earlier tube, or on two of them, is fitted rather than jointed, and braces ending at such a
 corner are fitted to each other. So is a corner of tubes in no sketch plane that lies inside an earlier
-tube or one of this frame's own sketch tubes. On a Mitre, Butt or Coped frame only free ends (ends at
+tube or one of this frame's own sketch tubes. On a Mitre or Butt frame only free ends (ends at
 no corner) are fitted, to this frame's tubes before them in drawing order too, whether or not an
 earlier Frame Member exists; None never fits. Earlier tubes are never changed.
 
@@ -225,7 +237,7 @@ lives on each override row.
 {"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "rect_tube", "width": 25, "height": 25, "wall": 2}, "corner": "auto", "fit_ends": true}}
 ```
 
-**Known limits of Auto** (and of crossings and overlaps under Mitre, Butt and Coped). Which tube
+**Known limits of Auto** (and of crossings and overlaps under Mitre and Butt). Which tube
 gives way at an overlap can be set only through the command's `corners`: these overlaps usually have
 no sketch point to pick, so the dialog has no row for them. A tube passing through another at a very
 shallow angle is cut along the whole of their overlap, so it may lose a long sliver, as cut to fit
@@ -297,7 +309,7 @@ vendor's aluminium extrusion for example, comes from a sketch: draw it or insert
 **End Cap** (WELDMENTS › CREATE, `frame.end_cap`) closes open ends of members with plates, one
 separate body per end, named after the member (`Post End Cap`). Pick the end faces in the view:
 each must be a flat open end of a frame member, square to its line: an uncut end, or the through
-member's end of a Butt or Coped corner. The butting member's end and a cope face are refused ("not
+member's end of a Butt corner, coped or not. The butting member's end and a cope face are refused ("not
 an open end of the member"), as is a mitre ("not square to the member's line").
 
 - The plate covers the outside of the profile: on a closed section (a square or rectangular

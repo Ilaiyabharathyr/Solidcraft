@@ -479,7 +479,7 @@ impl<'de> Deserialize<'de> for CornerParam {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         serde_json::from_value::<CornerType>(Value::deserialize(d)?)
             .map(CornerParam)
-            .map_err(|_| D::Error::custom(whole("`corner` must be auto, none, mitre, butt or coped_butt")))
+            .map_err(|_| D::Error::custom(whole("`corner` must be auto, none, mitre or butt")))
     }
 }
 
@@ -491,7 +491,7 @@ impl JsonSchema for CornerParam {
         json_schema!({
             "description": "How members ending at one point are cut.",
             "type": "string",
-            "enum": ["auto", "none", "mitre", "butt", "coped_butt"]
+            "enum": ["auto", "none", "mitre", "butt"]
         })
     }
 }
@@ -525,7 +525,7 @@ impl JsonSchema for CornersParam {
                 "type": "object",
                 "properties": {
                     "members": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": MAX_MEMBERS},
-                    "corner": {"type": "string", "enum": ["auto", "none", "mitre", "butt", "coped_butt"]},
+                    "corner": {"type": "string", "enum": ["auto", "none", "mitre", "butt"]},
                     "flip": {"type": "boolean"}
                 },
                 "required": ["members", "corner"]
@@ -819,15 +819,21 @@ pub struct FrameMemberKeys {
     #[serde(default)]
     pub locate: Option<[f64; 2]>,
     /// How two members ending at one point are cut: `none` (ends square to their lines),
-    /// `mitre`, `butt`, `coped_butt` or `auto` (each corner by its angle). Default: none.
+    /// `mitre`, `butt` or `auto` (each corner by its angle). Default: none. An older script's
+    /// `coped_butt` reads as `butt` with `coped`.
     #[serde(default)]
     pub corner: Option<CornerParam>,
-    /// With a butt or coped butt: the other member runs through. Default: false.
+    /// With a butt: the other member runs through. Default: false.
     #[serde(default)]
     pub flip: Option<bool>,
     /// Free ends are fitted to the tubes of earlier Frame Members. Default: false.
     #[serde(default)]
     pub fit_ends: Option<bool>,
+    /// Every butt joint cut to the other tube's real shape (its outline, radii kept, hole filled):
+    /// butts, ends on a tube's middle, crossings, overlaps and fitted ends. Mitres stay mitres; not
+    /// under `none`. Default: false.
+    #[serde(default)]
+    pub coped: Option<bool>,
     /// Corners finished their own way, each named by its members' (2 to 1000) line or pair ids.
     #[serde(default)]
     pub corners: Option<CornersParam>,

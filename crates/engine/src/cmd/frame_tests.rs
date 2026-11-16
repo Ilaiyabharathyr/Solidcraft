@@ -910,7 +910,7 @@ fn which_member_runs_through_follows_drawing_order_not_pick_order() {
 fn a_coped_box_tube_keeps_slivers_in_the_through_member_radii() {
     let mut s = Session::default();
     rectangle_frame(&mut s);
-    let r = run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "coped_butt"}));
+    let r = run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "butt", "coped": true}));
     let (bottom, left) = bottom_and_left(&mut s);
     // T as in Butt; U's slivers fill T's outer radius (6), down to 20 − 6.
     assert!((bottom.2[0] + 20.0).abs() < 1e-6 && (bottom.3[0] - 620.0).abs() < 1e-6, "{r} {bottom:?}");
@@ -924,7 +924,7 @@ fn a_coped_round_tube_is_fishmouthed() {
     let mut s = Session::default();
     rectangle_frame(&mut s);
     let profile = json!({"kind": "round_tube", "diameter": 40, "wall": 3});
-    let r = run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": profile, "corner": "coped_butt"}));
+    let r = run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": profile, "corner": "butt", "coped": true}));
     let (bottom, left) = bottom_and_left(&mut s);
     assert!((bottom.2[0] + 20.0).abs() < 1e-6 && (bottom.3[0] - 620.0).abs() < 1e-6, "{r} {bottom:?}");
     // U's tips reach T's centreline at its sides.
@@ -968,11 +968,153 @@ fn a_short_coped_round_tube_keeps_its_fishmouth() {
     run(&mut s, "sketch.line", json!({"points": [[400, 0], [0, 0], [0, 25]]}));
     run(&mut s, "sketch.finish", json!({}));
     let profile = json!({"kind": "round_tube", "diameter": 40, "wall": 3});
-    run(&mut s, "frame.member", json!({"sketch": "V", "profile": profile, "corner": "coped_butt"}));
+    run(&mut s, "frame.member", json!({"sketch": "V", "profile": profile, "corner": "butt", "coped": true}));
     let bs = bodies(&mut s);
     assert_eq!(bs.len(), 2, "{bs:?}");
     let u = bs.iter().find(|b| b.3[0] - b.2[0] < 300.0).unwrap_or_else(|| panic!("{bs:?}"));
     assert!(u.2[1].abs() < 1e-3 && (u.3[1] - 25.0).abs() < 1e-3, "{u:?}");
+}
+
+#[test]
+fn a_coped_butt_frame_matches_the_old_coped_corner_type() {
+    // Coped (#17854) on a Butt rectangle: the bodies the old Coped corner type (`coped_butt`) made, recorded at
+    // 4f4304424. The 600s run through to the 400s' outer faces; the 400s are coped to them, their slivers filling the
+    // 600s' outer radii (6), down to y = 14 and up to 386.
+    let base = [
+        ("Rect Tube 40x40x3", 269_326.722_128_267, [-20.0, -20.0, -20.0], [620.0, 20.0, 20.0]),
+        ("Rect Tube 40x40x3 (2)", 152_468.289_152_276, [580.0, 14.0, -20.0], [620.0, 386.0, 20.0]),
+        ("Rect Tube 40x40x3 (3)", 269_326.722_128_268, [-20.0, 380.0, -20.0], [620.0, 420.0, 20.0]),
+        ("Rect Tube 40x40x3 (4)", 152_468.289_152_276, [-20.0, 14.0, -20.0], [20.0, 386.0, 20.0]),
+    ];
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "butt", "coped": true}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), base.len(), "{bs:?}");
+    for (b, (name, volume, lo, hi)) in bs.iter().zip(base) {
+        assert!(b.0 == name && rel(b.1, volume) < 1e-9 && near3(b.2, lo) && near3(b.3, hi), "{b:?} vs {name} {volume} {lo:?} {hi:?}");
+    }
+}
+
+/// A plus `Plus`: h (0, 0)…(400, 0) and v (200, −100)…(200, 100), or with `tee` only v's top half, ending on h's
+/// middle; in 40 tube (outer radius 6) finished Butt, with Coped or not, h named `H` and v `V`.
+fn coped_or_not(tee: bool, coped: bool) -> Session {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Plus"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [400, 0]], "ids": ["h"]}));
+    run(&mut s, "sketch.line", json!({"points": [[200, if tee { 0 } else { -100 }], [200, 100]], "ids": ["v"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let p = json!({"sketch": "Plus", "profile": tube(), "corner": "butt", "coped": coped, "names": {"h": "H", "v": "V"}});
+    run(&mut s, "frame.member", p);
+    s
+}
+
+#[test]
+fn coped_fits_a_tee_to_the_through_tubes_shape() {
+    // v ends on h's middle (ruling O1): Butt fits it to h's squared tool, flat on h's face at y = 20; Coped to h's
+    // real shape, so v keeps what lies in h's outer radii, down to y = 14 where they are.
+    let mut fitted = Vec::new();
+    for coped in [false, true] {
+        let mut s = coped_or_not(true, coped);
+        let v = measured(&mut s, "V");
+        let o = overlap_all(&mut s);
+        assert!(o < 1e-3, "coped {coped}: the frame overlaps by {o} mm³");
+        fitted.push(v);
+    }
+    let (butt, coped) = (&fitted[0], &fitted[1]);
+    assert!((butt.2[1] - 20.0).abs() < 1e-6 && (coped.2[1] - 14.0).abs() < 1e-3, "{butt:?} {coped:?}");
+    assert!(coped.1 > butt.1 + 1.0, "{butt:?} {coped:?}");
+}
+
+#[test]
+fn coped_cuts_a_crossing_and_an_overlap_to_the_tubes_shape() {
+    // v crosses h and is cut there into `V` and `V · H`, each fitted to h: under Coped to h's real shape, each
+    // keeping what lies in h's outer radii, 6 nearer h's line.
+    let pieces = |coped: bool| {
+        let mut s = coped_or_not(false, coped);
+        let o = overlap_all(&mut s);
+        assert!(o < 1e-3, "coped {coped}: the frame overlaps by {o} mm³");
+        ["V", "V · H"].map(|n| measured(&mut s, n))
+    };
+    let (butt, coped) = (pieces(false), pieces(true));
+    for (b, c) in butt.iter().zip(&coped) {
+        let near_h = |m: &Measured| m.2[1].abs().min(m.3[1].abs());
+        assert!(c.1 > b.1 + 1.0 && (near_h(b) - 20.0).abs() < 1e-6 && (near_h(c) - 14.0).abs() < 1e-3, "{b:?} {c:?}");
+    }
+    // The brace 30 above the rail, pairs in no sketch plane: notched by the rail's real shape, it keeps what lies in
+    // the rail's outer radii.
+    let notched = |coped: bool| {
+        let mut s = rail_and_brace(30.0, "butt", json!({"coped": coped}));
+        let bs = bodies(&mut s);
+        assert_eq!(bs.len(), 2, "{bs:?}");
+        let o = overlap_all(&mut s);
+        assert!(o < 1e-3, "coped {coped}: the tubes overlap by {o} mm³: {bs:?}");
+        body_named(&bs, "T (2)").1
+    };
+    let (butt, coped) = (notched(false), notched(true));
+    assert!(coped > butt + 1.0, "{butt} {coped}");
+}
+
+#[test]
+fn coped_leaves_mitres_alone() {
+    // A Mitre frame with Coped builds exactly as without: its tubes, volumes, boxes and face names.
+    let build = |coped: bool| {
+        let mut s = Session::default();
+        rectangle_frame(&mut s);
+        run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "coped": coped}));
+        let faces: Vec<Vec<String>> = s.model.state().bodies.iter().map(|b| solidcraft_doc::naming::face_names(b).to_vec()).collect();
+        (bodies(&mut s), faces)
+    };
+    let ((plain, plain_faces), (coped, coped_faces)) = (build(false), build(true));
+    assert_eq!(plain.len(), 4);
+    assert_eq!(plain, coped);
+    assert_eq!(plain_faces, coped_faces);
+}
+
+#[test]
+fn an_old_coped_butt_design_reads_as_butt_with_coped() {
+    use solidcraft_doc::FeatureKind;
+    use solidcraft_doc::frame::CornerType;
+    // What the frame says: its type, Coped, and its override's type.
+    fn read(doc: &solidcraft_doc::Document) -> (CornerType, bool, Vec<CornerType>) {
+        let f = doc.features.iter().find(|f| matches!(f.kind, FeatureKind::FrameMember { .. })).unwrap();
+        let FeatureKind::FrameMember { corner, coped, corners, .. } = &f.kind else { panic!("not a frame member") };
+        (*corner, *coped, corners.iter().map(|o| o.corner).collect())
+    }
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let (l1, l2) = two_lines(&s);
+    // A script: the frame's and an override's `coped_butt`.
+    let corners = json!([{"members": [l1, l2], "corner": "coped_butt"}]);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "coped_butt", "corners": corners}));
+    assert_eq!(read(&s.doc), (CornerType::Butt, true, vec![CornerType::Butt]));
+    let saved = s.doc.to_json();
+    assert!(!saved.contains("coped_butt") && saved.contains("\"coped\": true"), "{saved}");
+    // A saved design: a Mitre frame with a Butt override, either of them `coped_butt`.
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let corners = json!([{"members": [l1, l2], "corner": "butt"}]);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "corners": corners}));
+    let json = s.doc.to_json();
+    for (old, want) in
+        [("\"butt\"", (CornerType::Mitre, true, vec![CornerType::Butt])), ("\"mitre\"", (CornerType::Butt, true, vec![CornerType::Butt]))]
+    {
+        assert!(json.contains(old), "{json}");
+        let mut reopened = Session::new(solidcraft_doc::Document::from_json(&json.replace(old, "\"coped_butt\"")).unwrap());
+        assert_eq!(read(&reopened.doc), want, "{old}");
+        assert_eq!(bodies(&mut reopened).len(), 4, "{old}");
+    }
+}
+
+#[test]
+fn a_coped_that_is_not_true_or_false_is_refused() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    for bad in [json!("yes"), json!(1), json!([true]), json!({"on": true})] {
+        let e = s.execute("frame.member", &json!({"sketch": "Frame", "profile": tube(), "corner": "butt", "coped": bad})).unwrap_err().to_string();
+        assert!(e.contains("`coped` must be true or false"), "{bad}: {e}");
+    }
+    assert!(s.doc.features.iter().all(|f| !matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })));
 }
 
 #[test]
@@ -2807,8 +2949,8 @@ fn an_error_about_a_piece_names_its_line() {
     run(&mut s, "sketch.line", json!({"points": [[200, -100], [200, 15]], "ids": ["v"]}));
     run(&mut s, "sketch.line", json!({"points": [[200, 15], [400, 15]], "ids": ["w"]}));
     run(&mut s, "sketch.finish", json!({}));
-    let corners = json!([{"members": ["v", "w"], "corner": "coped_butt"}]);
-    let p = json!({"sketch": "Plus", "profile": tube(), "corner": "auto", "corners": corners});
+    let corners = json!([{"members": ["v", "w"], "corner": "butt"}]);
+    let p = json!({"sketch": "Plus", "profile": tube(), "corner": "auto", "coped": true, "corners": corners});
     let e = s.execute("frame.member", &p).unwrap_err().to_string();
     assert!(e.contains("the piece of `v` past `h` was cut away completely") && !e.contains("v>h"), "{e}");
 }
@@ -2956,15 +3098,16 @@ fn a_diagonal_into_a_mitred_rectangle_fits_the_corners() {
 fn a_diagonal_into_a_butted_or_coped_rectangle_fits_the_corners() {
     // As the mitre: the sides make the corner exactly as the plain rectangle's; d is fitted to them. The butted (or
     // coped) sides fill y ≤ 20 or x ≤ 20 round the corner too (a coped tube's tool runs to its line's end), so d's
-    // box is x 20…580, y 20…380.
-    for corner in ["butt", "coped_butt"] {
+    // box is x 20…580, y 20…380. An older `coped_butt` is Butt with Coped (#17854), which fits d to the sides' real
+    // shape: d keeps what lies in their outer radii (6), its box x 14…586, y 14…386.
+    for (corner, lo, hi) in [("butt", 20.0, 380.0), ("coped_butt", 14.0, 386.0)] {
         let plain = plain_rectangle(tube(), corner);
         let mut s = Session::default();
         diagonal_frame(&mut s);
         run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": corner, "names": {"d": "D"}}));
         assert_same_tubes(&volumes_and_boxes(&mut s, &["D"]), &plain, corner);
         let d = measured(&mut s, "D");
-        assert!(near3(d.2, [20.0, 20.0, -20.0]) && near3(d.3, [580.0, 380.0, 20.0]), "{corner}: {d:?}");
+        assert!(near3(d.2, [lo, lo, -20.0]) && near3(d.3, [600.0 - lo, hi, 20.0]), "{corner}: {d:?}");
         let o = overlap_all(&mut s);
         assert!(o < 1e-3, "{corner}: the frame overlaps by {o} mm³");
     }

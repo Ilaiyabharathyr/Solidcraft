@@ -1396,6 +1396,10 @@ pub enum FeatureKind {
         /// Free ends are fitted to the tubes of earlier Frame Members.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         fit_ends: bool,
+        /// Coped (#17854): under every type but None, each butt joint's butting tube is cut to the other tube's real
+        /// shape (its outline, radii kept, hole filled); mitres stay mitres.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        coped: bool,
         /// Corners finished their own way, each named by the lines of its members.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         corners: Vec<crate::frame::CornerOverride>,
@@ -4537,6 +4541,12 @@ impl Document {
         let mut d = crate::format::read(s)?;
         if d.features.len() > MAX_FEATURES || d.params.len() > MAX_PARAMS {
             return Err(DocError::Invalid("document too large".into()));
+        }
+        // A test build's Coped corner type is Butt with Coped (#17854).
+        for f in &mut d.features {
+            if let FeatureKind::FrameMember { corner, corners, coped, .. } = &mut f.kind {
+                crate::frame_corners::read_coped(corner, corners, coped);
+            }
         }
         // A design from elsewhere may nest groups too deep, loop, or name things that are gone.
         if let Some((groups, order)) = d.browser_pruned() {

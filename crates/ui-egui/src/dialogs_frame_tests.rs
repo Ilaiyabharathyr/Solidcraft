@@ -1529,7 +1529,7 @@ fn flip_is_hidden_under_auto() {
 fn override_rows_offer_auto_and_flip_it() {
     let names = |c: &[(&str, &str)]| c.iter().map(|c| c.0.to_string()).collect::<Vec<_>>();
     assert_eq!(names(override_choices(corner_type("auto"))), names(&CORNER_TYPES));
-    assert_eq!(names(override_choices(corner_type("mitre"))), ["none", "mitre", "butt", "coped_butt"]);
+    assert_eq!(names(override_choices(corner_type("mitre"))), ["none", "mitre", "butt"]);
     let (mut h, _) = overrides_dialog("auto");
     assert!(h.widget_near("Auto", "Corner 1").is_some());
     let [_, y] = h.widget("Corner 1").unwrap();
@@ -1822,13 +1822,58 @@ fn a_corner_override_row_shows_flip_in_full_with_the_bin_at_the_right() {
     }
 }
 
-/// Coped Butt reads as "Coped" wherever a person sees it; its value stays `coped_butt`.
+/// Corner Type offers Auto, None, Mitre and Butt, and an override row None, Mitre and Butt: Coped (#17854) is a tick
+/// box of its own on the Fit Ends to Earlier Frames row, to the right of that box, unticked at the start and greyed
+/// under None.
 #[test]
-fn coped_butt_reads_as_coped() {
-    assert_eq!(CORNER_TYPES[corner_type("coped_butt")].1, "Coped");
-    let (mut h, _) = overrides_dialog("coped_butt");
-    h.frames(1);
-    assert!(h.widget_near("Coped", "Corner 1").is_some() && h.widget("Coped Butt").is_none());
+fn coped_is_a_tick_box_beside_fit_ends() {
+    assert_eq!(CORNER_TYPES.map(|c| c.0)[..], ["auto", "none", "mitre", "butt"]);
+    let (mut h, _) = overrides_dialog("butt");
+    assert!(!member(h.app.dialog.as_mut().unwrap()).coped);
+    h.frames(2);
+    // The Coped box: its centre, and whether it is greyed.
+    let coped = |h: &crate::scenario::Harness| {
+        let tree = h.output.accesskit_update.as_ref().unwrap();
+        let boxes: Vec<_> =
+            tree.nodes.iter().filter(|(_, n)| n.label() == Some("Coped")).filter_map(|(_, n)| Some((n.bounds()?, n.is_disabled()))).collect();
+        assert_eq!(boxes.len(), 1, "one Coped: {boxes:?}");
+        let (b, disabled) = boxes[0];
+        ([f64::midpoint(b.x0, b.x1), f64::midpoint(b.y0, b.y1)], disabled)
+    };
+    let fit = h.widgets("Fit Ends to Earlier Frames");
+    let ([x, y], disabled) = coped(&h);
+    assert!(!disabled, "Coped is enabled under Butt");
+    assert!(fit.len() >= 2 && fit.iter().all(|f| (f[1] - y).abs() < 2.0 && f[0] < x), "Coped at {x}, {y}: Fit Ends at {fit:?}");
+    // No override row offers Coped.
+    assert!(h.widget_near("Coped", "Corner 1").is_none_or(|[cx, cy]| (cx, cy) == (x, y)));
+    member(h.app.dialog.as_mut().unwrap()).corner = corner_type("none");
+    h.frames(2);
+    assert!(coped(&h).1, "Coped is greyed under None");
+    assert!(h.widget("Fit Ends to Earlier Frames").is_none());
+}
+
+/// Coped ticked puts `"coped": true` in the command under every type but None (unticked or under None, nothing), and
+/// Edit Feature brings it back ticked.
+#[test]
+fn coped_goes_into_the_command_and_an_edit_brings_it_back() {
+    let mut app = frame_app();
+    let lines = frame_lines(&app);
+    let mut d = dialog_on(&mut app, &lines);
+    member(&mut d).corner = corner_type("butt");
+    assert!(apply_commands(&app, &d).unwrap()[0].1.get("coped").is_none());
+    member(&mut d).coped = true;
+    let c = apply_commands(&app, &d).unwrap();
+    assert_eq!((&c[0].1["corner"], &c[0].1["coped"]), (&json!("butt"), &json!(true)), "{}", c[0].1);
+    member(&mut d).corner = corner_type("none");
+    let p = &apply_commands(&app, &d).unwrap()[0].1;
+    assert!(p.get("corner").is_none() && p.get("coped").is_none(), "{p}");
+    run_all(&mut app, c);
+    let f = app.session.doc.features.last().unwrap().id;
+    let mut e = edit_dialog(&app, f, None).unwrap();
+    let m = member(&mut e);
+    assert_eq!((CORNER_TYPES[m.corner].0, m.coped), ("butt", true));
+    let p = &apply_commands(&app, &e).unwrap()[0].1["params"];
+    assert_eq!((&p["corner"], &p["coped"]), (&json!("butt"), &json!(true)), "{p}");
 }
 
 /// The Corner Overrides line's arrow folds the corner rows away and back; a new pick opens them.

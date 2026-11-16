@@ -352,7 +352,7 @@ pub use crate::eval::frame_member::{
     LaterPieces, corner_at_point, corner_point, is_crossing, is_member_line, member_line_ids, member_names, member_of_body, member_parts,
     member_segments, members_cross, members_of_bodies, overlap_parent,
 };
-pub use crate::frame_corners::{CornerOverride, CornerType};
+pub use crate::frame_corners::{CornerOverride, CornerType, read_coped};
 
 /// A frame member between two points (#15705): its id, which names the member as a line's id
 /// does (`names`, End Caps), and its two ends, found again on every evaluation so the member

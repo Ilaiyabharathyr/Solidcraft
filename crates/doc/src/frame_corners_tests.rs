@@ -216,3 +216,23 @@ fn a_member_not_at_a_corner_has_no_end_there() {
     let e = end_at(&c, 7).unwrap_err().to_string();
     assert!(e.contains("not at the corner"), "{e}");
 }
+
+#[test]
+fn coped_cuts_a_butt_as_coped_butt_and_reads_an_old_coped_butt_as_butt() {
+    // Under Coped (#17854) a Butt is cut as Coped Butt; every other type is cut as it is, and nothing without Coped.
+    for kind in [CornerType::None, CornerType::Auto, CornerType::Mitre, CornerType::Butt] {
+        let want = if kind == CornerType::Butt { CornerType::CopedButt } else { kind };
+        assert_eq!((kind.coped(true), kind.coped(false)), (want, kind));
+    }
+    // An older build's `coped_butt`, the frame's or an override's, is Butt with Coped.
+    let o = |corner| CornerOverride { members: vec!["a".into(), "b".into()], corner, flip: false };
+    for (frame, over, want) in [
+        (CornerType::CopedButt, CornerType::Mitre, (CornerType::Butt, CornerType::Mitre, true)),
+        (CornerType::Mitre, CornerType::CopedButt, (CornerType::Mitre, CornerType::Butt, true)),
+        (CornerType::Butt, CornerType::Mitre, (CornerType::Butt, CornerType::Mitre, false)),
+    ] {
+        let (mut corner, mut corners, mut coped) = (frame, vec![o(over)], false);
+        read_coped(&mut corner, &mut corners, &mut coped);
+        assert_eq!((corner, corners[0].corner, coped), want);
+    }
+}

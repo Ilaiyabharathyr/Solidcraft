@@ -24,6 +24,8 @@ pub enum CornerType {
     Auto,
     Mitre,
     Butt,
+    /// Not offered (#17854): an older build's Coped (`coped_butt`), read as Butt with the frame-wide Coped
+    /// ([`read_coped`]); and inside the build, a Butt of a Coped frame ([`CornerType::coped`]).
     CopedButt,
 }
 
@@ -34,6 +36,22 @@ impl CornerType {
     /// Whether Flip means anything: which member runs through.
     pub fn flips(&self) -> bool {
         matches!(self, CornerType::Auto | CornerType::Butt | CornerType::CopedButt)
+    }
+    /// How a corner of this type is cut on a frame that copes (`coped`, #17854): a Butt as Coped Butt, its butting
+    /// member coped to the through member's shape; any other type as it is.
+    pub fn coped(self, coped: bool) -> CornerType {
+        if coped && self == CornerType::Butt { CornerType::CopedButt } else { self }
+    }
+}
+
+/// An older build's Coped corner type (`coped_butt`, the frame's or an override's) read as Butt with the frame-wide
+/// Coped, which copes every butt joint of the frame (#17854).
+pub fn read_coped(corner: &mut CornerType, corners: &mut [CornerOverride], coped: &mut bool) {
+    for c in std::iter::once(corner).chain(corners.iter_mut().map(|o| &mut o.corner)) {
+        if *c == CornerType::CopedButt {
+            *c = CornerType::Butt;
+            *coped = true;
+        }
     }
 }
 

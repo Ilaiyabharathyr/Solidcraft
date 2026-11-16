@@ -31,7 +31,8 @@
 //! is not fitted to, rather than fitted to in the wrong place.
 //!
 //! The tool is the source member as built ([`super::member_tool`]): its feature's members laid out and its corner
-//! plane cuts made as [`super::member_section`] makes them, then filled and squared ([`frame_fit::fit_tool`]).
+//! plane cuts made as [`super::member_section`] makes them, then filled and squared ([`frame_fit::fit_tool`]); for
+//! a Coped frame (#17854), filled with its radii kept ([`frame_fit::coped_tool`]), whatever the earlier frame says.
 //! Under Auto its members are its pieces (#4003 stage 3, [`super::pieced`]): each piece is a member as above, its
 //! span, quarter points and tool its own, so a copy of a piece is matched to that piece. A piece's end at a crossing
 //! is fitted, so its tool stops at its line's end there, as a T-junction's does.
@@ -45,8 +46,8 @@ use solidcraft_kernel::{self as kernel, PointClass};
 
 use super::super::{ModelState, mirror_matrix, pattern_transforms, point, val};
 use super::{
-    Axes, CutEnd, Layout, Reach, frame_ends, frame_member_id, layout, member_line_ids, member_tool, members_at, overlap_overrides, overlap_parent,
-    pieced, placer, plans, section_axes, section_reach,
+    Axes, CutEnd, Layout, Reach, copes, frame_ends, frame_member_id, layout, member_line_ids, member_tool, members_at, overlap_overrides,
+    overlap_parent, pieced, placer, plans, section_axes, section_reach,
 };
 use crate::expr::{Kind, Value};
 use crate::frame::MAX_MEMBERS;
@@ -67,7 +68,7 @@ type Pose = (u64, Mat, Option<usize>);
 /// one, as a cutting tool placed where that body is now: (body name, tool), and each one's id as an overlap piece's id
 /// names it (ruling O4): a Frame Member's own tube `<feature id>:<member id>` ([`frame_member_id`]), a copy (or a tube
 /// whose member isn't found) its body name; and each one's [`Reach`], its member's line placed where the tool is.
-/// Tools are built once per call.
+/// Tools are built once per call, each the tube's real shape when `f` copes ([`copes`]).
 pub fn earlier_tools(
     doc: &Document,
     vals: &BTreeMap<String, Value>,
@@ -75,6 +76,7 @@ pub fn earlier_tools(
     st: &ModelState,
 ) -> Result<(Vec<(String, Traced)>, Vec<String>, Vec<Reach>)> {
     let Some(here) = doc.features.iter().position(|g| g.id == f.id) else { return Ok(Default::default()) };
+    let coped = copes(&f.kind);
     // Each Frame Member's own tube's id.
     let mut ids_of: HashMap<String, String> = HashMap::new();
     // Each tracked body's feature (a Frame Member, or what copied it) and the poses it may have.
@@ -168,7 +170,8 @@ pub fn earlier_tools(
         let (Some(to_f), false, Ok(bounds)) = (into_f(b.component), b.body.is_mesh(), b.body.exact_bounds()) else { continue };
         'body: for (g, m, known) in poses {
             // An earlier feature that no longer lays out has no tubes to fit to.
-            let Some(source) = members.entry(*g).or_insert_with(|| doc.feature(*g).and_then(|g| Members::of(doc, vals, g, st).ok())).as_mut() else {
+            let Some(source) = members.entry(*g).or_insert_with(|| doc.feature(*g).and_then(|g| Members::of(doc, vals, g, st, coped).ok())).as_mut()
+            else {
                 continue;
             };
             let near = |lo: f64, x: f64, hi: f64| lo - 1e-6 <= x && x <= hi + 1e-6;
@@ -300,7 +303,7 @@ fn bits(m: &Mat) -> [u64; 16] {
 
 /// An earlier Frame Member's members, laid out and cut at their corners as [`super::member_section`] lays them, in
 /// its own frame: points in each one's material a quarter, half and three quarters along it, and each one's tool
-/// once built.
+/// once built, its real shape when `coped` (the frame fitted to it copes).
 struct Members {
     segments: Vec<(String, Vec3, Vec3)>,
     regions: Vec<Region2>,
@@ -309,10 +312,11 @@ struct Members {
     ends: Vec<[Option<CutEnd>; 2]>,
     points: Vec<[Vec3; 3]>,
     tools: Vec<Option<kernel::Body>>,
+    coped: bool,
 }
 
 impl Members {
-    fn of(doc: &Document, vals: &BTreeMap<String, Value>, g: &Feature, st: &ModelState) -> Result<Members> {
+    fn of(doc: &Document, vals: &BTreeMap<String, Value>, g: &Feature, st: &ModelState, coped: bool) -> Result<Members> {
         let FeatureKind::FrameMember { corner, corners, .. } = &g.kind else {
             return Err(DocError::Invalid("not a frame member feature".into()));
         };
@@ -333,7 +337,7 @@ impl Members {
             (ends, segments.iter().enumerate().map(|(m, (_, a, b))| [0.25, 0.5, 0.75].map(|t| along(m, *a, *b, t))).collect())
         };
         let tools = vec![None; segments.len()];
-        Ok(Members { segments, regions, axes, at, ends, points, tools })
+        Ok(Members { segments, regions, axes, at, ends, points, tools, coped })
     }
 
     /// How far member m's tool reaches from its line: its section, and its ends built past the line's.
@@ -349,7 +353,7 @@ impl Members {
             #[cfg(test)]
             TOOL_BUILDS.set(TOOL_BUILDS.get() + 1);
             let placed = placer(&self.axes, self.at);
-            *slot = Some(member_tool(&self.segments, &self.regions, &placed, &self.ends, m)?.body);
+            *slot = Some(member_tool(&self.segments, &self.regions, &placed, &self.ends, m, self.coped)?.body);
         }
         slot.as_ref().ok_or_else(|| DocError::Invalid(format!("no member {m}")))
     }
