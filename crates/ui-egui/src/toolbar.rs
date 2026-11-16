@@ -332,14 +332,20 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
             let update = crate::update::button(app, ui, out.offer, out.offer_labeled);
             // The bar places the link pills by this width next frame (#17829).
             let offer_width = egui::Id::unique(solidcraft_ui_kit::app_bar::OFFER_WIDTH);
-            ui.ctx().data_mut(|d| {
-                if let Some(u) = update {
+            let changed = ui.ctx().data_mut(|d| match update {
+                Some(u) if d.get_temp::<f32>(offer_width) != Some(u.width()) => {
                     d.insert_temp(offer_width, u.width());
-                } else {
-                    d.remove::<f32>(offer_width);
+                    true
                 }
+                Some(_) => false,
+                None => d.remove_temp::<f32>(offer_width).is_some(),
             });
-            let tabs_end = update.map_or(out.controls_left, |u| u.left()) - 8.0;
+            // That next frame is asked for, so the pills move even while nothing else repaints.
+            if changed {
+                ui.ctx().request_repaint();
+            }
+            // The tabs stop before the Update pill and before the link pills left of it.
+            let tabs_end = update.map_or(out.controls_left, |u| u.left().min(out.controls_left)) - 8.0;
             // Narrow title bars can fit only part of the tab strip. Its hit regions must not
             // extend into the persistent report and window controls.
             let tabs_rect = Rect::from_min_max(pos2(out.tabs_start.min(tabs_end), r.top()), pos2(tabs_end, r.bottom()));
