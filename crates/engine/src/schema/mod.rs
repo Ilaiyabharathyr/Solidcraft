@@ -81,6 +81,7 @@ pub mod drawing_scene;
 pub mod drawing_sheet;
 pub mod drawing_symbol;
 pub mod drawing_table;
+pub mod drawing_template_import;
 pub mod drawing_view;
 pub mod edit;
 pub mod end_cap;
