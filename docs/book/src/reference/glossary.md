@@ -70,6 +70,26 @@ An appearance sets colour and surface finish only. It has no effect on mass or s
 - **Elsewhere:** appearance, visual material, colour.
 - **For translators:** not the physical material.
 
+### attractor
+
+A point, edge, face or body whose distance from each copy of a pattern sets how that copy is
+scaled, raised and turned.
+
+Each value goes from its near setting at the near distance to its far setting at the far distance;
+copies nearer or farther than those take the end values. A copy takes the distance to the nearest
+attractor, measured on the exact geometry. With *far attractors* as well, the values blend between
+the two sets instead: the near setting on the near attractors, the far one on the far attractors.
+Two opposite edges of a face, one in each set, make the values run straight across it. The near
+and far distances are then hold zones: within them of their set, a copy takes that set's values
+in full.
+
+- **In SolidCraft:** `solid.pattern.face`'s `attract` (`geometry`, `bodies`, `far_geometry`,
+  `far_bodies`, `near`, `far`, `scale_near`, `scale_far`, `offset_near`, `offset_far`,
+  `turn_near`, `turn_far`, `cutoff`, `falloff`); the Advanced section of Pattern on Face.
+- **Don't use:** magnet, driver, influence point.
+- **Elsewhere:** attractor point, attractor curve.
+- **For translators:** what draws an effect towards it, not a physical force or a magnet.
+
 ### bill of materials
 
 The list of the components placed in a design or in one component, with the quantity of each.
@@ -316,6 +336,25 @@ features are computed.
 - **Elsewhere:** folder, group.
 - **For translators:** not a rigid group (a joint) and not a fixed browser *folder*.
 
+### margin (pattern)
+
+How near a copy of Pattern on Face may come to something before it is left out, measured from the
+copy itself, not its centre.
+
+The *edge margin* keeps copies away from the face's edges, round its holes and the foot of a boss
+too; even at 0, no copy hangs over them. With *Allow overhang* on, only each copy's centre has to
+be on the face, and the edge margin is measured from that centre. The *avoid margin* keeps
+them away from what the Avoid pick holds: points, faces and bodies. With no avoid margin, a copy is
+left out only when it touches or overlaps one of those, or one holds the other. Distances are
+measured on the exact geometry.
+
+- **In SolidCraft:** `solid.pattern.face`'s `margin`, `overhang` and `avoid` (`geometry`, `bodies`,
+  `margin`); the Edge margin and Avoid margin fields, Allow overhang and the Avoid pick of Pattern
+  on Face.
+- **Don't use:** clearance (Inspect's Clearance measures the gaps between bodies), offset, gap.
+- **Elsewhere:** keep-out distance, border, edge distance.
+- **For translators:** a distance kept free round something, not a page margin.
+
 ### material
 
 The physical substance of a body, which sets its density and mechanical properties.
@@ -396,6 +435,21 @@ The maximum number of shaded surfaces in a rendering path, starting with the fir
 
 - **In SolidCraft:** CPU `path.max_depth` is 1–16; longer paths are truncated.
 - **For translators:** a count, not a geometric depth in millimetres or timeline depth.
+
+### noise (pattern)
+
+How a random pattern spreads its instances over a face, named by the colour of the noise that
+places them.
+
+*White* noise places each instance independently, equally likely anywhere on the face's area.
+*Blue* noise is random but evenly spread, with no clumps and no gaps. *Pink* and *brown* noise
+cluster the instances, brown in larger clusters with bare patches between them.
+
+- **In SolidCraft:** `solid.pattern.face`'s `random` (`count`, `seed`, `noise`: `white`, `blue`,
+  `pink`, `brown`); the Random layout of Pattern on Face.
+- **Don't use:** jitter, scatter type.
+- **Elsewhere:** random distribution, Poisson-disk sampling (for blue noise).
+- **For translators:** the colours name noise spectra, not appearance colours.
 
 ### pattern instance
 
