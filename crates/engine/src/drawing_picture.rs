@@ -141,7 +141,7 @@ impl<'a> ViewPictures<'a> {
                 // What the view chooses to show, as its lines do ([`crate::drawing_view::measured`]).
                 let Ok((chosen, extents)) = crate::drawing_view::measured(&shown, &view) else { continue };
                 let parts = view_parts(&chosen, Styles::from(&view));
-                let frame = ortho(&crate::drawing_view::frame(view.basis, view.scale.value, &extents.model, centre, CMD)?);
+                let frame = ortho(&crate::drawing_view::frame(view.drawn(), view.scale.value, &extents.model, centre, CMD)?);
                 let count = parts.len();
                 for (i, parts) in parts.into_iter().enumerate() {
                     spent.entry(id).or_default();
