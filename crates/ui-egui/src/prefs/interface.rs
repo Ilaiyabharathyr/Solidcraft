@@ -395,6 +395,14 @@ pub(super) fn layout(app: &mut SolveApp, ui: &mut egui::Ui) {
             #[cfg(not(target_arch = "wasm32"))]
             layout_check(
                 ui,
+                app.tr("prefs.panel_window_title_bar"),
+                app.tr("prefs.panel_window_title_bar_help"),
+                &mut app.preferences.panel_window_title_bar,
+                "panel_window_title_bar",
+            );
+            #[cfg(not(target_arch = "wasm32"))]
+            layout_check(
+                ui,
                 app.tr("prefs.panel_drag_out"),
                 app.tr("prefs.panel_drag_out_help"),
                 &mut app.preferences.panel_drag_out,

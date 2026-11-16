@@ -14467,6 +14467,33 @@ fn a_dropped_window_opens_at_the_shown_place_kept_on_its_monitor() {
 }
 
 #[test]
+fn panel_windows_keep_the_app_title_bar_and_card_layout_unless_the_preference_restores_the_old_window() {
+    // By default panel windows have the app's own title bar, with its grip and menu;
+    // the preference restores the system's title bar and the earlier layout, except
+    // for windows dragged out of the app, which need the grip.
+    let mut prefs = crate::prefs::Prefs::default();
+    assert!(prefs.panel_window_title_bar && !prefs.panel_drag_out);
+    assert!(super::app::own_title_bar(&prefs));
+    prefs.panel_window_title_bar = false;
+    assert!(!super::app::own_title_bar(&prefs));
+    prefs.panel_drag_out = true;
+    assert!(super::app::own_title_bar(&prefs));
+    // With it, the panel's actions sit as in its docked card's action row: from the
+    // trailing edge, in their declared order, mirrored right to left.
+    let metrics = HostMetrics::default();
+    let row = egui::Rect::from_min_size(egui::pos2(10.0, 50.0), egui::vec2(300.0, metrics.control_extent));
+    let margin = ((metrics.header_height - metrics.control_extent) / 2.0).max(0.0);
+    let ltr = super::native_ui::card_action_row(row, 3, metrics, false);
+    assert_eq!(ltr.len(), 3);
+    assert!((ltr[2].right() - (row.right() - margin)).abs() < 1e-3, "{ltr:?}");
+    assert!(ltr.windows(2).all(|pair| (pair[0].right() - pair[1].left()).abs() < 1e-3), "{ltr:?}");
+    let rtl = super::native_ui::card_action_row(row, 3, metrics, true);
+    assert!((rtl[2].left() - (row.left() + margin)).abs() < 1e-3, "{rtl:?}");
+    assert!(rtl.windows(2).all(|pair| (pair[1].right() - pair[0].left()).abs() < 1e-3), "{rtl:?}");
+    assert!(super::native_ui::card_action_row(row, 0, metrics, false).is_empty());
+}
+
+#[test]
 fn raw_host_paints_a_panel_dragged_out_of_the_bottom_strip_as_a_side_card_for_its_window() {
     let mut h = PanelMountHarness::new(true).unwrap();
     // Another panel already fills the left column.
@@ -14523,6 +14550,7 @@ fn raw_host_drags_a_panel_out_to_a_desktop_window_and_back_by_its_grip_keeping_i
     let mut raw = RawPanelHost::new(h, 1.0);
     raw.inner_origin = Some(egui::pos2(200.0, 100.0));
     raw.host.set_drag_out(true);
+    raw.host.set_window_grip(true);
     // As in the app by default: live paint hides the panel leaving the app.
     raw.host.set_live_drag(true);
     raw.frame(Vec::new(), false);
@@ -14570,7 +14598,21 @@ fn raw_host_drags_a_panel_out_to_a_desktop_window_and_back_by_its_grip_keeping_i
     raw.frame(Vec::new(), false);
     assert!(raw.host.frame().unwrap().preview.is_none());
 
+    // Its window's menu offers the dock places and the app's panels to join, then
+    // Close, each an action the layout accepts.
+    let menu = raw.host.window_menu(&raw.content.runtime, &id("editor"));
+    let labels: Vec<Vec<&str>> = menu.iter().map(|group| group.iter().map(|entry| entry.label.as_str()).collect()).collect();
+    assert_eq!(labels.last(), Some(&vec![solidcraft_ui_text::tr("ui.panel_host.close")]), "{labels:?}");
+    for key in ["ui.panel_host.left", "ui.panel_host.right", "ui.panel_host.floating"] {
+        assert!(labels[0].contains(&solidcraft_ui_text::tr(key)), "{key}: {labels:?}");
+    }
+    for entry in menu.iter().flatten() {
+        assert!(raw.content.runtime.layout().prepare(entry.action.clone()).is_ok(), "{}", entry.label);
+    }
+
     // Back: the grip's screen positions become this host's drop target; release docks.
+    // The grip works whether or not panels can be dragged out of the app.
+    raw.host.set_drag_out(false);
     raw.host.queue_window_drag(WindowDragEvent::Begin { instance: id("editor"), at: Point { x: target.x, y: target.y } });
     raw.frame(Vec::new(), false);
     let preview = raw.host.frame().unwrap().preview.clone().expect("the app shows where the panel would dock");
@@ -14584,8 +14626,8 @@ fn raw_host_drags_a_panel_out_to_a_desktop_window_and_back_by_its_grip_keeping_i
     assert_eq!((state.draft.as_str(), state.transaction_live), ("torn-off draft", true));
     assert_eq!((state.applies, state.cancels), (0, 0));
 
-    // With the preference off, grip drags are ignored.
-    raw.host.set_drag_out(false);
+    // Without the app's own title bar in panel windows there is no grip: its drags are ignored.
+    raw.host.set_window_grip(false);
     let before = raw.content.runtime.layout().inspect();
     raw.host.queue_window_drag(WindowDragEvent::Begin { instance: id("editor"), at: Point { x: target.x, y: target.y } });
     raw.frame(Vec::new(), false);

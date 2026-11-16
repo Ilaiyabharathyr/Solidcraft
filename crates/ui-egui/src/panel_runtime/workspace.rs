@@ -282,6 +282,8 @@ pub struct WorkspacePanelHost {
     preview_started: Option<f64>,
     live_drag: bool,
     drag_out: bool,
+    /// Panel windows' grips drag them back over the app.
+    window_grip: bool,
     /// The panel a drag popped out, and the screen rectangle its window was
     /// shown at; the desktop adapter opens the window there.
     window_landing: Option<(InstanceId, LogicalRect)>,
@@ -360,6 +362,11 @@ impl WorkspacePanelHost {
         if !enabled {
             self.drag_paint.clear();
         }
+    }
+
+    /// Panel windows have the grip in their title bar that drags them back over the app.
+    pub(crate) fn set_window_grip(&mut self, enabled: bool) {
+        self.window_grip = enabled;
     }
 
     /// Dragging a panel out of the app pops it out to a desktop window.
@@ -459,7 +466,7 @@ impl WorkspacePanelHost {
     ) {
         let events = std::mem::take(&mut self.window_drag_events);
         let origin = ui.input(|input| input.viewport().inner_rect).filter(|rect| rect.is_finite()).map(|rect| rect.min);
-        let (Some(origin), false) = (origin, blocked || !self.drag_out) else {
+        let (Some(origin), false) = (origin, blocked || !self.window_grip) else {
             self.window_drag.cancel();
             return;
         };
@@ -535,6 +542,7 @@ impl WorkspacePanelHost {
             preview_started: None,
             live_drag: false,
             drag_out: false,
+            window_grip: false,
             window_landing: None,
             #[cfg(not(target_arch = "wasm32"))]
             window_card: None,
@@ -3077,9 +3085,7 @@ fn render_slot(
     if failure.is_some() || bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
         return;
     }
-    let bounds = egui_rect(bounds);
-    let t = solidcraft_theme::Tokens::get();
-    let inset = bounds.shrink2(egui::vec2(t.space_4.min(bounds.width().max(0.0) / 2.0), t.space_2.min(bounds.height().max(0.0) / 2.0)));
+    let inset = content_inset(egui_rect(bounds));
     let clip = ui.clip_rect().intersect(inset);
     if !clip.is_positive() {
         return;
@@ -3511,6 +3517,70 @@ impl WorkspacePanelHost {
             });
             self.menu_reveal = None;
         });
+    }
+}
+
+/// Where a panel's content draws inside its body, docked or in a window.
+pub(super) fn content_inset(bounds: egui::Rect) -> egui::Rect {
+    let t = solidcraft_theme::Tokens::get();
+    bounds.shrink2(egui::vec2(t.space_4.min(bounds.width().max(0.0) / 2.0), t.space_2.min(bounds.height().max(0.0) / 2.0)))
+}
+
+/// An entry of a panel window's menu: its label, icon and checked layout action.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct WindowMenuEntry {
+    pub label: String,
+    pub icon: ui_kit::Icon<'static>,
+    pub action: LayoutAction,
+}
+
+impl WorkspacePanelHost {
+    /// The menu of `instance`'s desktop window: the dock places and the app's
+    /// panels it can join, then Close, each admitted as the docked panel menu
+    /// admits it. Each inner list is one group of the menu.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn window_menu(&self, runtime: &PanelRuntime, instance: &InstanceId) -> Vec<Vec<WindowMenuEntry>> {
+        let Some(frame) = self.frame() else { return Vec::new() };
+        let locale = solidcraft_ui_text::Locale::for_language(solidcraft_ui_text::language());
+        let metadata: BTreeMap<_, _> = runtime
+            .layout()
+            .layout()
+            .instances
+            .iter()
+            .filter_map(|panel| Some((panel.id.clone(), runtime.instance_presentation(&panel.id).ok()?)))
+            .collect();
+        let mut placement: Vec<_> = [Zone::Left, Zone::Right, Zone::Bottom, Zone::Floating].into_iter().map(HostSharedAction::Move).collect();
+        placement.extend(
+            frame
+                .layout
+                .sections
+                .iter()
+                .filter(|card| !card.peek && intersect_rect(card.outer, frame.layout.capacity).is_some())
+                .map(|card| HostSharedAction::Join(card.section.clone())),
+        );
+        [placement, vec![HostSharedAction::Close]]
+            .into_iter()
+            .map(|group| {
+                group
+                    .into_iter()
+                    .filter_map(|shared| {
+                        let action = shared_action(
+                            runtime,
+                            instance,
+                            &shared,
+                            &self.native_capabilities,
+                            frame.layout.capacity,
+                            &frame.layout.geometry_policy.identity_reservations,
+                        )
+                        .ok()?;
+                        prepare_host_layout(runtime.layout(), &runtime_scope(runtime), &frame.layout, action.clone()).ok()?;
+                        let label = shared_label(&shared, instance, runtime, &metadata, locale);
+                        Some(WindowMenuEntry { label, icon: shared_menu_icon(&shared, false, frame.layout.direction), action })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|group| !group.is_empty())
+            .collect()
     }
 }
 

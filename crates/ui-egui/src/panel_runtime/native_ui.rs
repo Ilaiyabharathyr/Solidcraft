@@ -1,7 +1,7 @@
 use solidcraft_engine::panels::*;
 
 use super::drag_paint::WindowCard;
-use super::workspace::WindowDragEvent;
+use super::workspace::{WindowDragEvent, WindowMenuEntry};
 use super::{ContentServices, ContentSlot, FramePanelContent, PanelContext, PanelController, PanelHost, PanelPresentation, PanelRuntime};
 use crate::ui_kit::{self, BackingTooltipExt as _, Container, Edge, HostChrome, Surface};
 use crate::window_chrome::TitleBar;
@@ -14,10 +14,41 @@ pub(super) enum WindowAction {
     Redock,
     /// The grip is dragging the active panel back towards the app.
     Drag(WindowDragEvent),
+    /// An entry of the window's menu: the panel moves back into the app.
+    Layout(LayoutAction),
 }
 
+/// How the app lays out its panel cards, for a panel window to match: the host's
+/// metrics and the shell's gutter between the app window's edge and its cards.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CardLayout {
+    pub metrics: super::layout::HostMetrics,
+    pub gutter: f32,
+}
+
+impl CardLayout {
+    /// A panel window's height besides its body's content: its title bar, the
+    /// action row when the panel has actions, the content header and footer.
+    pub(super) fn window_chrome(self, actions: bool) -> f32 {
+        let metrics = self.metrics;
+        crate::toolbar::APP_BAR_HEIGHT + if actions { metrics.control_extent } else { 0.0 } + metrics.content_header_height + metrics.footer_height
+    }
+
+    pub(super) fn of(frame: Option<&super::workspace::HostFrame>) -> Self {
+        frame.map_or_else(
+            || Self { metrics: super::layout::HostMetrics::default(), gutter: Tokens::get().space_8 },
+            |frame| Self { metrics: frame.layout.metrics, gutter: frame.layout.capacity.origin.x.max(0.0) },
+        )
+    }
+}
+
+/// The entries of a window's menu for its active panel, asked for only while
+/// the menu is open.
+pub(super) type WindowMenu<'a> = &'a dyn Fn(&PanelRuntime, &InstanceId) -> Vec<Vec<WindowMenuEntry>>;
+
 /// `title_bar`: the window shows the app's own title bar, whose grip drags the
-/// panel back into the app.
+/// panel back into the app and whose menu (`menu`) docks it in the app.
+/// `card`: how the app lays out panel cards, so the window lays out as one.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn paint(
     runtime: &mut PanelRuntime,
@@ -28,7 +59,10 @@ pub(super) fn paint(
     ui: &mut egui::Ui,
     enabled: bool,
     title_bar: Option<TitleBar>,
+    menu: WindowMenu<'_>,
+    card: CardLayout,
 ) -> PanelResult<Option<WindowAction>> {
+    let metrics = card.metrics;
     if ui.input(|input| input.viewport().close_requested()) {
         return Ok(Some(WindowAction::Redock));
     }
@@ -43,8 +77,9 @@ pub(super) fn paint(
         if let Some(active) = presented_tab(section, &availability) {
             let title = runtime.instance_presentation(active)?.title;
             let rtl = runtime.environment().direction == Direction::Rtl;
-            let (drag, caption) = window_bar(ui, bar, host, active, &title, rtl, enabled);
-            action = drag.map(WindowAction::Drag);
+            let entries = || menu(runtime, active);
+            let (bar_action, caption) = window_bar(ui, bar, host, active, &title, rtl, enabled, Some((&entries, card)));
+            action = bar_action;
             if let Some(caption) = caption {
                 caption.send(ui.ctx());
             }
@@ -53,6 +88,10 @@ pub(super) fn paint(
             crate::window_chrome::resize_zones(ui);
         }
     }
+    // With the app's own title bar (the default), the window lays out as the
+    // panel's docked card, so a dragged-out window keeps its look; with the
+    // system's, as before.
+    let as_card = title_bar.is_some();
     let panel = Container::new(ui.ctx(), Surface::Viewport).central();
     let frame = Container::new(ui.ctx(), Surface::Panel).edge_frame(solidcraft_theme::Tokens::get().dialog_body);
     Container::show_central(ui, panel, frame, |ui| {
@@ -66,7 +105,13 @@ pub(super) fn paint(
             let spec = layout.registry().get(&layout.layout().instance(active)?.kind)?;
             let environment = runtime.environment();
             let tabs = section.tabs.iter().filter(|id| availability.get(*id) == Some(&Availability::Available));
-            if section.tabs.len() > 1 || section.collapsed || !presentation.actions.is_empty() {
+            let rtl = environment.direction == Direction::Rtl;
+            let declared: Vec<_> = spec
+                .header_actions
+                .iter()
+                .filter_map(|declared| Some((declared, presentation.actions.iter().find(|entry| entry.id == declared.id)?)))
+                .collect();
+            if section.tabs.len() > 1 || section.collapsed || (!as_card && !presentation.actions.is_empty()) {
                 ui.horizontal_wrapped(|ui| {
                     if section.tabs.len() > 1 {
                         for id in tabs {
@@ -86,42 +131,39 @@ pub(super) fn paint(
                             action = Some(WindowAction::Expand(section.id.clone()));
                         }
                     }
-                    for declared in &spec.header_actions {
-                        let Some(entry) = presentation.actions.iter().find(|entry| entry.id == declared.id) else { continue };
-                        let (_, bounds) = ui.allocate_space(size);
-                        let id = ui.make_persistent_id((active, &entry.id));
-                        let response = ui_kit::panel_host_control(
-                            ui,
-                            id,
-                            bounds,
-                            HostChrome {
-                                label: &entry.label,
-                                icon: Some(&declared.icon),
-                                icon_only: true,
-                                attention: false,
-                                selected: entry.pressed.unwrap_or(false),
-                                enabled: entry.enabled,
-                                drag: false,
-                                title: false,
-                                grip_only: false,
-                                rtl: environment.direction == Direction::Rtl,
-                            },
-                        );
-                        if let Some(pressed) = entry.pressed {
-                            ui.ctx().accesskit_node_builder(response.id, |node| {
-                                node.set_toggled(if pressed { egui::accesskit::Toggled::True } else { egui::accesskit::Toggled::False });
-                            });
-                        }
-                        if let Some(reason) = &entry.disabled_reason {
-                            response.clone().backing_on_hover_text(reason);
-                        }
-                        if response.clicked() {
-                            action = Some(WindowAction::Content(active.clone(), entry.id.clone()));
+                    if !as_card {
+                        for (declared, entry) in &declared {
+                            let (_, bounds) = ui.allocate_space(size);
+                            if action_control(ui, active, declared, entry, bounds, rtl) {
+                                action = Some(WindowAction::Content(active.clone(), entry.id.clone()));
+                            }
                         }
                     }
                 });
             }
-            let body = ui.available_rect_before_wrap();
+            // Rows and body are placed as the card places them, with no spacing between.
+            let area = ui.available_rect_before_wrap();
+            let mut top = area.top();
+            if as_card && !section.collapsed && !declared.is_empty() {
+                // The panel's actions sit as in its docked card's action row: control
+                // squares from the trailing edge, inset as the header's controls are.
+                let row = egui::Rect::from_min_size(area.min, egui::vec2(area.width(), metrics.control_extent.min(area.height()).max(0.0)));
+                top = row.bottom();
+                for ((declared, entry), bounds) in declared.iter().zip(card_action_row(row, declared.len(), metrics, rtl)) {
+                    if action_control(ui, active, declared, entry, bounds, rtl) {
+                        action = Some(WindowAction::Content(active.clone(), entry.id.clone()));
+                    }
+                }
+            }
+            // As in the docked card: the body ends above the footer's reserve.
+            let body = if as_card {
+                egui::Rect::from_min_max(
+                    egui::pos2(area.left(), top + metrics.content_header_height),
+                    egui::pos2(area.right(), area.bottom() - metrics.footer_height),
+                )
+            } else {
+                area
+            };
             let (min, max) = tab_bounds(runtime.layout().layout(), runtime.layout().registry(), section)?;
             if !outer.size.within(min, max) || !body.is_positive() {
                 return runtime.mount_native(host, &ResolvedLayout::default(), &mut super::workspace::EmptyPanelHost, services);
@@ -135,7 +177,12 @@ pub(super) fn paint(
                 painted: vec![outer],
                 input: Vec::new(),
             };
-            runtime.mount_native(host, &ResolvedLayout { panels: vec![geometry], ..Default::default() }, &mut NativeContent { ui, content }, services)
+            runtime.mount_native(
+                host,
+                &ResolvedLayout { panels: vec![geometry], ..Default::default() },
+                &mut NativeContent { ui, content, inset: as_card },
+                services,
+            )
         })
         .inner
     })
@@ -143,18 +190,76 @@ pub(super) fn paint(
     Ok(action)
 }
 
-/// A panel window's height besides its body: its title bar and, when the panel
-/// has actions, their row.
-pub(super) fn window_chrome(ctx: &egui::Context, actions: bool) -> f32 {
-    let row = if actions { Tokens::get().form_close_size + ctx.global_style().spacing.item_spacing.y } else { 0.0 };
-    crate::toolbar::APP_BAR_HEIGHT + row
+/// One of the panel's actions in its window; true when clicked.
+fn action_control(
+    ui: &mut egui::Ui,
+    active: &InstanceId,
+    declared: &HeaderActionSpec,
+    entry: &super::RuntimeAction,
+    bounds: egui::Rect,
+    rtl: bool,
+) -> bool {
+    let id = ui.make_persistent_id((active, &entry.id));
+    let chrome = HostChrome {
+        label: &entry.label,
+        icon: Some(&declared.icon),
+        icon_only: true,
+        attention: false,
+        selected: entry.pressed.unwrap_or(false),
+        enabled: entry.enabled,
+        drag: false,
+        title: false,
+        grip_only: false,
+        rtl,
+    };
+    let response = ui_kit::panel_host_control(ui, id, bounds, chrome);
+    if let Some(pressed) = entry.pressed {
+        ui.ctx().accesskit_node_builder(response.id, |node| {
+            node.set_toggled(if pressed { egui::accesskit::Toggled::True } else { egui::accesskit::Toggled::False });
+        });
+    }
+    if let Some(reason) = &entry.disabled_reason {
+        response.clone().backing_on_hover_text(reason);
+    }
+    response.clicked()
+}
+
+/// Where `count` actions sit in a card's action row `row`, in their declared
+/// order: control squares from the trailing edge, inset as the header's
+/// controls are, mirrored right to left.
+pub(super) fn card_action_row(row: egui::Rect, count: usize, metrics: super::layout::HostMetrics, rtl: bool) -> Vec<egui::Rect> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let margin = ((metrics.header_height - metrics.control_extent) / 2.0).max(0.0).min(row.width() / 2.0);
+    let extent = metrics.control_extent.min(row.height()).min((row.width() - margin) / count as f32).max(0.0);
+    let mut cursor = if rtl { row.left() + margin } else { row.right() - margin };
+    let mut bounds: Vec<_> = (0..count)
+        .map(|_| {
+            let x = if rtl { cursor } else { cursor - extent };
+            cursor = if rtl { cursor + extent } else { cursor - extent };
+            egui::Rect::from_min_size(egui::pos2(x, row.center().y - extent / 2.0), egui::Vec2::splat(extent))
+        })
+        .collect();
+    bounds.reverse();
+    bounds
 }
 
 /// The window a drag shows before the panel opens in it: the same title bar,
-/// and the panel's body as painted this frame where its content will be.
-pub(super) fn paint_drop(ui: &mut egui::Ui, title_bar: Option<TitleBar>, active: &InstanceId, title: &str, rtl: bool, card: Option<&WindowCard>) {
+/// menu button included, and the panel's body as painted this frame where its
+/// content will be.
+pub(super) fn paint_drop(
+    ui: &mut egui::Ui,
+    title_bar: Option<TitleBar>,
+    active: &InstanceId,
+    title: &str,
+    rtl: bool,
+    card: Option<&WindowCard>,
+    layout: CardLayout,
+) {
     if let Some(bar) = title_bar {
-        window_bar(ui, bar, "drop", active, title, rtl, true);
+        // The pointer passes through this window: its menu never opens.
+        window_bar(ui, bar, "drop", active, title, rtl, true, Some((&Vec::new, layout)));
     }
     let panel = Container::new(ui.ctx(), Surface::Viewport).central();
     let frame = Container::new(ui.ctx(), Surface::Panel).edge_frame(Tokens::get().dialog_body);
@@ -166,7 +271,9 @@ pub(super) fn paint_drop(ui: &mut egui::Ui, title_bar: Option<TitleBar>, active:
 }
 
 /// The window's own title bar, as the app window has: the OS's window controls,
-/// and the panel's title with its grip, which drags the panel back over the app.
+/// the panel's title with its grip, which drags the panel back over the app, and
+/// at the trailing end the menu of places in the app the panel can dock.
+#[allow(clippy::too_many_arguments)]
 fn window_bar(
     ui: &mut egui::Ui,
     bar: TitleBar,
@@ -175,7 +282,8 @@ fn window_bar(
     title: &str,
     rtl: bool,
     enabled: bool,
-) -> (Option<WindowDragEvent>, Option<crate::window_chrome::WindowAction>) {
+    menu: Option<(&dyn Fn() -> Vec<Vec<WindowMenuEntry>>, CardLayout)>,
+) -> (Option<WindowAction>, Option<crate::window_chrome::WindowAction>) {
     let edge = Container::new(ui.ctx(), Surface::ApplicationBar).edge(("sc_panel_window_bar", id), Edge::Top);
     let frame = Container::new(ui.ctx(), Surface::ApplicationBar).edge_frame(Tokens::get().app_bar);
     let height = crate::toolbar::APP_BAR_HEIGHT;
@@ -184,12 +292,73 @@ fn window_bar(
             if !enabled {
                 ui.disable();
             }
-            let mut drag = None;
+            let mut action = None;
             let rect = ui.max_rect();
-            let caption = bar.show(ui, rect, |ui, content| drag = title_grip(ui, content, active, title, rtl));
-            (drag, caption)
+            let caption = bar.show(ui, rect, |ui, content| {
+                let mut title_area = content;
+                if let Some((menu, card)) = menu {
+                    // As far from the window's edge as the docked card's menu button is
+                    // from the app window's edge: the shell's gutter, then the header's
+                    // own margin.
+                    let metrics = card.metrics;
+                    let extent = metrics.control_extent.min(content.height()).min(content.width());
+                    let margin = (card.gutter + ((metrics.header_height - extent) / 2.0).max(0.0)).min((content.width() - extent).max(0.0));
+                    let x = if rtl { content.left() + margin } else { content.right() - margin - extent };
+                    let bounds = egui::Rect::from_min_size(egui::pos2(x, content.center().y - extent / 2.0), egui::Vec2::splat(extent));
+                    title_area = if rtl { content.with_min_x(bounds.right()) } else { content.with_max_x(bounds.left()) };
+                    action = menu_button(ui, bounds, active, rtl, menu).map(WindowAction::Layout);
+                }
+                if let Some(drag) = title_grip(ui, title_area, active, title, rtl) {
+                    action = Some(WindowAction::Drag(drag));
+                }
+            });
+            (action, caption)
         })
         .inner
+}
+
+/// The window's menu button and its menu: the places in the app the panel can
+/// dock, and Close, as the docked header's menu offers them.
+fn menu_button(
+    ui: &mut egui::Ui,
+    bounds: egui::Rect,
+    active: &InstanceId,
+    rtl: bool,
+    menu: &dyn Fn() -> Vec<Vec<WindowMenuEntry>>,
+) -> Option<LayoutAction> {
+    let label = solidcraft_ui_text::tr("ui.panel_host.menu");
+    let id = ui.make_persistent_id(("panel-window-menu", active));
+    let chrome = HostChrome {
+        label,
+        icon: Some("dots"),
+        icon_only: true,
+        attention: false,
+        selected: false,
+        enabled: true,
+        drag: false,
+        title: false,
+        grip_only: false,
+        rtl,
+    };
+    let response = ui_kit::panel_host_control(ui, id, bounds, chrome);
+    let mut chosen = None;
+    Container::new(ui.ctx(), Surface::Popup).menu(&response).frame(ui_kit::Menu::frame()).show(|ui| {
+        ui.set_min_width(ui_kit::LIST_W.min(ui.ctx().content_rect().width() - 2.0 * Tokens::get().space_12).max(0.0));
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for (index, group) in menu().into_iter().enumerate() {
+            if index > 0 {
+                ui_kit::Menu::separator(ui);
+            }
+            for (row, entry) in group.into_iter().enumerate() {
+                // By position: two panels to join can share a title.
+                let registry_id = format!("panel-window-menu:{index}:{row}");
+                if ui_kit::MenuItem::new(&registry_id, &entry.label, entry.icon).show(ui).clicked() {
+                    chosen = Some(entry.action);
+                }
+            }
+        }
+    });
+    chosen
 }
 
 /// The panel's title with the section grip a docked header has, here dragging
@@ -239,6 +408,8 @@ fn title_grip(ui: &mut egui::Ui, content: egui::Rect, active: &InstanceId, title
 struct NativeContent<'a> {
     ui: &'a mut egui::Ui,
     content: &'a mut dyn FramePanelContent,
+    /// The content keeps the docked card's inset.
+    inset: bool,
 }
 
 impl PanelHost for NativeContent<'_> {
@@ -252,6 +423,7 @@ impl PanelHost for NativeContent<'_> {
     ) -> PanelResult<()> {
         if let Some(body) = geometry.body {
             let rect = super::workspace::egui_rect(body);
+            let rect = if self.inset { super::workspace::content_inset(rect) } else { rect };
             let mut ui = self.ui.new_child(egui::UiBuilder::new().id_salt(&geometry.instance).max_rect(rect));
             ui.set_clip_rect(ui.clip_rect().intersect(rect));
             self.content.render(ContentSlot::Body, &mut ui, context, controller, services)?;

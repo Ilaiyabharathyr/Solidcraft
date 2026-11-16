@@ -333,8 +333,16 @@ On desktop, **Pop out to window** moves a shared panel into a separate OS window
 Closing the OS window returns the panel through its saved dock placement. The
 controller and document stay with the panel. The desktop adapter remembers the
 panel's window size and monitor for the current app session and checks that the
-OS created the window before presenting content. On the web, the same action
-places the panel in the shared Floating zone.
+OS created the window before presenting content. With the Layout preference
+**Use the app's title bar in panel windows** (desktop only, on by default), the
+window has the app's own title bar (the shared window chrome): the panel's title
+with its grip, which drags the panel back over the app to the normal dock target,
+and at its trailing end the panel's menu with the dock places and the app's
+panels to join, as the docked menu offers them, then Close. The window then lays
+out the panel's actions and body as its docked card does, with the same metrics
+and content inset. With that preference off, the window has the system's title
+bar and the earlier layout. On the web, the same action places the panel in the
+shared Floating zone.
 
 With the Layout preference **Drag panels out of the app into their own windows**
 (desktop only, off by default), the area outside the app window is one more
@@ -352,10 +360,8 @@ dock's height, and the window fits its content once measured, as a side card
 does. Like live drag paint, it runs no
 second body and changes no layout. Release opens the panel there, only after that
 window was shown, and the panel keeps that same window. Release over the app,
-Escape, focus loss or a changed app window cancels and closes it. With the
-preference on, panel windows use the app's own title bar (the shared window
-chrome): the panel's title with its grip sits there, and dragging it over the
-app shows the normal dock target; release docks the panel there. With the
+Escape, focus loss or a changed app window cancels and closes it. Its windows
+always have the app's own title bar, whose grip drags them back. With the
 preference off, a drag past the app's edge keeps the panel in the app.
 
 Panels in the workspace use the ribbon's theme fill and backdrop blur. The
