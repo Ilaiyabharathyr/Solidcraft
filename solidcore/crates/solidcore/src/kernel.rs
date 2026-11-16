@@ -176,6 +176,7 @@ pub struct WorkCounters {
     classification_snapshots: Cell<u64>,
     orient_boxes: Cell<u64>,
     ball_certified_roots: Cell<u64>,
+    curved_edge_runs: Cell<u64>,
     blends_recertified: Cell<u64>,
 }
 
@@ -330,6 +331,16 @@ impl WorkCounters {
         self.ball_certified_roots.get()
     }
 
+    /// Curved intersection pieces classified as running along a face edge
+    /// (`CurveClassification::classify_edge_interval`, WR-305): each one certified tangent to
+    /// the edge at both ends and within the intersection tolerance of it as a whole
+    /// (`curve_runs_along`). Not the fork's (a test's witness that a body reaches the
+    /// certificate).
+    #[must_use]
+    pub fn curved_edge_runs(&self) -> u64 {
+        self.curved_edge_runs.get()
+    }
+
     /// Procedural blends recertified as a record's faces got their definitions back
     /// (`surface::procedural_blend::convert::definition_surface`): each certificate that
     /// ran, not each blend [`Kernel::recertify_memo`] answered. Not the fork's (a test's
@@ -358,6 +369,7 @@ impl WorkCounters {
         self.classification_snapshots.set(0);
         self.orient_boxes.set(0);
         self.ball_certified_roots.set(0);
+        self.curved_edge_runs.set(0);
         self.blends_recertified.set(0);
     }
 
@@ -459,6 +471,12 @@ impl WorkCounters {
     pub(crate) fn add_ball_certified_root(&self) {
         self.ball_certified_roots
             .set(self.ball_certified_roots.get().saturating_add(1));
+    }
+
+    /// Counts one curved piece certified to run along a face edge.
+    pub(crate) fn add_curved_edge_run(&self) {
+        self.curved_edge_runs
+            .set(self.curved_edge_runs.get().saturating_add(1));
     }
 
     /// Counts one procedural blend recertified as its record's face got it back.
@@ -685,8 +703,6 @@ pub struct UpstreamFixes {
     pub boolean_vertex_by_best_crossing: bool,
     /// `SmProtoEdge::Resolve` splits a proto edge from a proto vertex back to itself whose curve ends find two of its vertex definitions at each other definition of that proto vertex lying on the curve (`DropPoint` within the larger of the two tolerances, farther than twice it from both ends), then resolves the proto vertex; upstream keeps the edge whole past that third vertex, a vertex of its own face, and the merge fails (`SM_ERR`; two equal tubes a hair apart end to end) (WR-579, #1517; the fork's tangency-labs/smlib@9eec159).
     pub proto_edge_splits_at_captured_vertices: bool,
-    /// `SmFace::CurveOnClassify` classifies an interval whose two ends lie on one face edge (or its vertices) and whose midpoint is within the intersection tolerance of it as on that edge (the fork's `ClassifyEdgeInterval`, WR-305, #1057). Curved pieces only: a straight interval along a straight edge is always classified, by a certificate on its two ends (the distance is affine along it), with or without this flag.
-    pub classify_edge_interval: bool,
     /// `SmProtoEdge::Resolve` treats a proto edge from a proto vertex back to itself whose ends find one vertex definition as degenerate below twice the proto vertex's containment radius, and `ImprintIntersections` fits that vertex to its edges (WR-306, #1058).
     pub degenerate_proto_edge_in_one_vertex: bool,
     /// `MakeEdgeInFaceWithVU` grows each end vertex's tolerance to twice its gap to the new edge's end (only if larger), after `RefreshTolerance` keeps it as it was, so `AssertValid` does not refuse the edge (WR-469, #870; a solidcore-only fix, not in the SolidCraft fork at tangency-labs/smlib@26cc451, whose `MakeEdgeInFaceWithVU` ends with `RefreshTolerance` only; `plan/upstream-issues/WR-469--make-edge-in-face-vertex-tolerance-gap.md`).
@@ -1365,9 +1381,10 @@ mod tests {
                 w.shell_traversal_faces(),
                 w.proto_vertex_point_solves(),
                 w.merge_record_visits(),
+                w.curved_edge_runs(),
             )
         };
-        assert_eq!(counts(w), (0, 0, 0, 0, 0, 0, 0, 0, 0));
+        assert_eq!(counts(w), (0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
         w.add_face_pair();
         w.add_face_pair();
         w.add_loop_classified();
@@ -1380,11 +1397,12 @@ mod tests {
         w.add_shell_traversal_face();
         w.add_proto_vertex_point_solve();
         w.add_merge_record_visits(3);
-        assert_eq!(counts(w), (2, 1, 1, 1, 3, 1, 1, 1, 3));
+        w.add_curved_edge_run();
+        assert_eq!(counts(w), (2, 1, 1, 1, 3, 1, 1, 1, 3, 1));
         // each kernel counts its own work
         assert_eq!(Kernel::default().work_counters.face_pairs(), 0);
         w.reset();
-        assert_eq!(counts(w), (0, 0, 0, 0, 0, 0, 0, 0, 0));
+        assert_eq!(counts(w), (0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
     }
 
     #[test]
