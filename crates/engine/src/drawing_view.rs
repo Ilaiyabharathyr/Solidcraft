@@ -568,7 +568,7 @@ pub fn measured<'a>(
     if set.bodies.is_empty() {
         return Err(Unmeasured::NothingChosen);
     }
-    let extents = measure(&set, &view.basis)?;
+    let extents = measure(&set, &view.drawn())?;
     Ok((set, extents))
 }
 
@@ -629,7 +629,7 @@ pub fn on_sheet_from(sessions: &mut ViewSessions, drawing: &Drawing, id: u64, cm
     }
     let centre = drawing.view_centre(id).map_err(|e| bad(cmd, e.to_string()))?;
     let shown = shown_by(sessions, &view);
-    let measured = measured(&shown, &view).map(|(set, e)| (e, shows(&set, &view.basis, &e, view.reference_shown_percent)));
+    let measured = measured(&shown, &view).map(|(set, e)| (e, shows(&set, &view.drawn(), &e, view.reference_shown_percent)));
     placed(&view, measured, centre, cmd)
 }
 
@@ -659,7 +659,7 @@ pub fn placed(view: &ResolvedView, measured: std::result::Result<(Extents, Aabb2
             (Extents { model, error_mm: 0.0, bodies: 0 }, model, Some(why))
         }
     };
-    let boundary = frame(view.basis, scale, &extents.model, centre, cmd)?.boundary(&shows).map_err(|e| bad(cmd, e.to_string()))?;
+    let boundary = frame(view.drawn(), scale, &extents.model, centre, cmd)?.boundary(&shows).map_err(|e| bad(cmd, e.to_string()))?;
     Ok(OnSheet { boundary, extents, unmeasured })
 }
 

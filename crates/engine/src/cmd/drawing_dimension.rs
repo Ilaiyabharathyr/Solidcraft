@@ -650,12 +650,12 @@ fn layout_on_sheet(s: &Session, d: &Drawing, dimension: &Dimension, r: &Resolved
     };
     let size = d.views.iter().find(|v| v.id == id).and_then(|v| d.sheets.iter().find(|sheet| sheet.id == v.sheet)).map(|sheet| sheet.sheet.size_mm());
     let (Ok(frame), Ok(centre), Some(Ok(size))) =
-        (crate::drawing_view::frame(view.basis, view.scale.value, &on.extents.model, Vec2::ZERO, INSPECT), d.view_centre(id), size)
+        (crate::drawing_view::frame(view.drawn(), view.scale.value, &on.extents.model, Vec2::ZERO, INSPECT), d.view_centre(id), size)
     else {
         return not_drawn();
     };
     // Asks for a font to fall back to and doesn't wait: add and its dry run run on the window thread.
-    let Some(paper) = paper_group(dimension, r, &frame, view.line_group.value, &PaperFonts::new(&d.font, &d.language, false)) else {
+    let Some(paper) = paper_group(dimension, r, &frame, view.rotation, view.line_group.value, &PaperFonts::new(&d.font, &d.language, false)) else {
         return (None, (!r.points.is_empty()).then(|| NO_PLACE.to_string()));
     };
     // No layout at all until the font is found: a short span's lines depend on its text's width.

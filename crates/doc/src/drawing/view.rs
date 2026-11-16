@@ -30,8 +30,10 @@
 //! view is placed at a point; an auxiliary view's side is a direction of about unit length; a view
 //! lined up with its parent is on the parent's sheet; a section view is placed at a point, and its
 //! cutting line keeps [`CuttingLine::new`]'s rules; a view's place is on paper
-//! ([`is_paper_coordinate`]); a view's occurrence paths keep [`check_occurrence_paths`]; at most
-//! [`MAX_VIEWS`] views, listed by id ([`Drawing::add_views`]).
+//! ([`is_paper_coordinate`]); a view's occurrence paths keep [`check_occurrence_paths`]; a view's
+//! turn is 0 up to 360 degrees, a turned view is placed at a point, no view lines up with a turned
+//! view, and no section or auxiliary view is made from one yet; at most [`MAX_VIEWS`] views, listed by
+//! id ([`Drawing::add_views`]).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -86,6 +88,11 @@ pub struct View {
     /// ([`Drawing::give_letter`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<ViewLabel>,
+    /// How far it is turned on its sheet about its centre, in degrees anticlockwise, 0 up to 360
+    /// (#13044): its picture and what is placed on it turn, the way it looks doesn't, and the views made
+    /// from it don't ([`ResolvedView::drawn`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation: f64,
 }
 
 /// The most letters a view's letter has: `ZZZ` is the last one given.
@@ -485,6 +492,36 @@ pub struct ResolvedView {
     pub configuration: Setting<ViewConfiguration>,
     /// A flat pattern view's body and turn; none for a view of the model.
     pub flat: Option<FlatOf>,
+    /// How far the view itself is turned on its sheet, in degrees anticlockwise: never inherited.
+    pub rotation: f64,
+}
+
+impl ResolvedView {
+    /// Its basis turned anticlockwise on paper by its rotation, about the basis's normal: what its
+    /// picture, its box and its place on paper are drawn through. `basis` stays the model's: its
+    /// dimensions measure on it and the views made from it fold from it. Unturned, `basis` itself; a
+    /// quarter turn, exact axes, as [`QuarterTurn::basis`] gives.
+    pub fn drawn(&self) -> Plane {
+        if self.rotation == 0.0 {
+            return self.basis;
+        }
+        let (sin, cos) = turn_sin_cos(self.rotation);
+        // A point's paper coordinates turn anticlockwise, so the axes they are read along turn back.
+        let Plane { origin, x, y } = self.basis;
+        Plane { origin, x: x * cos - y * sin, y: x * sin + y * cos }
+    }
+}
+
+/// The sine and cosine of a view's turn of `degrees`: exact at the quarter turns, so a view turned
+/// so draws on exact axes. The one rule its picture and what is placed on it turn by.
+pub fn turn_sin_cos(degrees: f64) -> (f64, f64) {
+    match degrees {
+        0.0 => (0.0, 1.0),
+        90.0 => (1.0, 0.0),
+        180.0 => (0.0, -1.0),
+        270.0 => (-1.0, 0.0),
+        d => d.to_radians().sin_cos(),
+    }
 }
 
 fn is_zero(v: &f64) -> bool {
@@ -498,12 +535,13 @@ impl View {
     /// needs one (ISO 128-30). A pictorial view needs none either: no arrow or cutting line points at
     /// it, so nothing names it by its letter. An auxiliary view needs one: it is placed at a point,
     /// apart from any of the four projection places. Each later kind of view placed apart (detail)
-    /// adds its arm here.
+    /// adds its arm here. A turned view needs one, of any kind: its label is where its angle is read.
     pub fn needs_letter(&self) -> bool {
-        matches!(
-            (&self.kind, self.place),
-            (ViewKind::Projected { .. }, ViewPlace::At(_)) | (ViewKind::Section { .. } | ViewKind::Auxiliary { .. }, _)
-        )
+        self.rotation != 0.0
+            || matches!(
+                (&self.kind, self.place),
+                (ViewKind::Projected { .. }, ViewPlace::At(_)) | (ViewKind::Section { .. } | ViewKind::Auxiliary { .. }, _)
+            )
     }
 }
 
@@ -651,6 +689,9 @@ impl Drawing {
             ViewPlace::Aligned(along) => is_paper_coordinate(along),
         };
         require(place, || format!("its place is at most {MAX_SIDE_MM} mm from the sheet's origin"))?;
+        require((0.0..360.0).contains(&view.rotation), || "its rotation is 0 up to 360 degrees".into())?;
+        let apart = view.rotation == 0.0 || matches!(view.place, ViewPlace::At(_));
+        require(apart, || "a turned view is placed at a point: it no longer lines up with its parent".into())?;
         check_occurrence_paths(view.settings.occurrences.as_deref().unwrap_or_default(), view.settings.hide.as_deref().unwrap_or_default())?;
         view.settings.pose.as_ref().map_or(Ok(()), check_pose)?;
         if let Some(label) = &view.label {
@@ -674,13 +715,18 @@ impl Drawing {
             ViewKind::Projected { parent, .. } => {
                 self.chain_of(view.id)?;
                 self.can_project_from(*parent)?;
-                let parent_sheet = self.view(*parent).map(|p| p.sheet);
+                let parent = self.view(*parent);
                 let lined_up = matches!(view.place, ViewPlace::Aligned(_));
-                require(!lined_up || parent_sheet == Some(view.sheet), || "a view lined up with its parent is on its parent's sheet".into())
+                require(!lined_up || parent.map(|p| p.sheet) == Some(view.sheet), || {
+                    "a view lined up with its parent is on its parent's sheet".into()
+                })?;
+                // Lined up, both draw the model's box middle on one line: a turned box's isn't.
+                require(!lined_up || parent.is_some_and(|p| p.rotation == 0.0), || "a view lined up with its parent: its parent isn't turned".into())
             }
             ViewKind::Section { parent, .. } => {
                 self.chain_of(view.id)?;
                 self.can_project_from(*parent)?;
+                self.drawn_on_unturned(*parent)?;
                 require(matches!(view.place, ViewPlace::At(_)), || "a section view is placed at a point: it has no side to line up on".into())
             }
             ViewKind::Pictorial { parent, .. } => {
@@ -691,6 +737,7 @@ impl Drawing {
             ViewKind::Auxiliary { parent, toward } => {
                 self.chain_of(view.id)?;
                 self.can_project_from(*parent)?;
+                self.drawn_on_unturned(*parent)?;
                 // A unit, as the command makes it, or near one: never so short that no fold is found.
                 let unit = toward.iter().all(|c| c.is_finite() && c.abs() <= 1.0) && toward.iter().any(|c| c.abs() >= 0.5);
                 require(unit, || {
@@ -712,6 +759,13 @@ impl Drawing {
         require(!pictorial, || "not supported yet: a view projected from a pictorial view".into())?;
         let flat = matches!(chain.last().map(|end| &end.kind), Some(ViewKind::Flat { .. }));
         require(!flat, || "not supported yet: a view made from a flat pattern view".into())
+    }
+
+    /// Whether a section or auxiliary view can be made from view `parent`: its cutting line or its side
+    /// is drawn on the parent's paper, which a turned parent turns, so not from a turned view yet.
+    fn drawn_on_unturned(&self, parent: u64) -> Result<()> {
+        let turned = self.view(parent).is_some_and(|p| p.rotation != 0.0);
+        require(!turned, || "not supported yet: a section or auxiliary view of a turned view".into())
     }
 
     /// The rules of a view that ends a chain, a base or flat pattern view: it draws one of the
@@ -775,6 +829,8 @@ impl Drawing {
             pose: or_default(&chain, |s| s.pose.clone(), Pose::Designed),
             configuration: or_default(&chain, |s| s.configuration, ViewConfiguration::Active),
             flat,
+            // The view's own, as its cut is: the views made from it aren't turned.
+            rotation: chain.first().map_or(0.0, |view| view.rotation),
         })
     }
 
@@ -865,17 +921,23 @@ impl Drawing {
         Ok(())
     }
 
-    /// What view `id`'s label reads, a line for each part shown: its words and letter (`VIEW B`), its
-    /// name, then its scale when that isn't its sheet's ([`Drawing::sheet_scale`]), written as the
-    /// sheet's scale field writes it (`SCALE 2:1`). None when it draws no label: it has none, doesn't
-    /// need one, is hidden, or shows no part.
+    /// What view `id`'s label reads, a line for each part shown: its words and letter (`VIEW B`) and
+    /// its turn when it is turned (`VIEW B 30°`, to two decimals at most), its name, then its scale
+    /// when that isn't its sheet's ([`Drawing::sheet_scale`]), written as the sheet's scale field writes
+    /// it (`SCALE 2:1`). None when it draws no label: it has none, doesn't need one, is hidden, or
+    /// shows no part.
     pub fn label_text(&self, id: u64) -> Option<String> {
         let view = self.view(id).filter(|view| view.needs_letter())?;
         let label = view.label.as_ref().filter(|label| label.shown)?;
         let after = |words: &str, what: String| if words.is_empty() { what } else { format!("{words} {what}") };
         let scale = self.resolve_view(id).ok().map(|resolved| resolved.scale.value).filter(|scale| self.sheet_scale(view.sheet) != Some(*scale));
+        let turn = (view.rotation != 0.0).then(|| format!("{}°", format!("{:.2}", view.rotation).trim_end_matches('0').trim_end_matches('.')));
+        let letter = label.show_letter.then(|| after(&label.words, label.letter.clone()));
         let lines: Vec<String> = [
-            label.show_letter.then(|| after(&label.words, label.letter.clone())),
+            match (letter, turn) {
+                (Some(letter), Some(turn)) => Some(format!("{letter} {turn}")),
+                (letter, turn) => letter.or(turn),
+            },
             Some(label.name.clone()).filter(|name| !name.is_empty()),
             scale.filter(|_| label.show_scale).map(|scale| after(&label.scale_words, scale.to_string())),
         ]

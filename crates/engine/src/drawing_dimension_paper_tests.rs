@@ -47,7 +47,7 @@ fn length(direction: LinearDirection) -> DimensionKind {
 
 /// `dimension` on paper in the built-in font, in English.
 fn laid(dimension: &Dimension, resolved: &Resolved, frame: &ViewFrame) -> Option<OnPaper> {
-    paper_group(dimension, resolved, frame, LineGroup::DEFAULT, &PaperFonts::new("", "en", true))
+    paper_group(dimension, resolved, frame, 0.0, LineGroup::DEFAULT, &PaperFonts::new("", "en", true))
 }
 
 fn drawn(kind: DimensionKind, offset: f64, points: &[[f64; 2]], text: &str, scale: &str) -> Group {
@@ -79,7 +79,7 @@ fn a_dimensions_lines_are_its_groups_thin_line() {
     let widths = |group| {
         let d = dimension(length(LinearDirection::Horizontal), 10.0, TextPlace::Centred);
         let drawn =
-            paper_group(&d, &read(&[[0.0, 0.0], [40.0, 0.0]], "40.00"), &view_at("1:1"), group, &PaperFonts::new("", "en", true)).unwrap().group;
+            paper_group(&d, &read(&[[0.0, 0.0], [40.0, 0.0]], "40.00"), &view_at("1:1"), 0.0, group, &PaperFonts::new("", "en", true)).unwrap().group;
         let strokes = drawn.items.iter().filter_map(|i| match i {
             Item::Stroke { width_mm, .. } => Some(*width_mm),
             _ => None,
