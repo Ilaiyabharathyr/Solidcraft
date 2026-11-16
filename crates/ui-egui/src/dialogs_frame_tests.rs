@@ -1115,6 +1115,26 @@ fn a_refused_line_gives_the_waiting_point_back_with_its_reference() {
     assert_eq!(c[0].1["pairs"][1]["a"], given, "{}", c[0].1);
 }
 
+/// A valid pick is kept when the frame fails for a change made after it (a wall thicker than the
+/// tube), before its preview is in: that preview's error is not the pick's.
+#[test]
+fn a_change_after_a_valid_pick_does_not_take_it_back() {
+    let mut app = box_app();
+    let d = dialog_on(&mut app, &[]);
+    app.dialog = Some(d);
+    pick_in(&mut app, &[corner(0., 0., 0.), corner(0., 0., 400.)]);
+    let m = member(open(&mut app));
+    let kinds = frame::profile_kinds();
+    let k = &kinds[m.kind];
+    let wall = k.required.iter().chain(k.optional).position(|n| *n == "wall").unwrap();
+    m.dims[m.kind][wall] = "30".into();
+    settle_preview(&mut app);
+    let d = app.dialog.as_ref().unwrap();
+    assert!(app.preview.error.is_some(), "the frame fails");
+    assert!(!d.error.as_deref().is_some_and(super::refused_pick), "{:?}", d.error);
+    assert_eq!(path(d), [corner(0., 0., 0.), corner(0., 0., 400.)]);
+}
+
 /// A failing pick's preview takes back only that pick: a pick made after it, before that preview
 /// is in, stays, though the path it made fails too.
 #[test]

@@ -182,6 +182,7 @@ fn fitted(member: &Traced, (end_point, toward, middle): (Vec3, Vec3, Vec3), tool
     let Some(piece) = far_piece else { return Ok(None) };
     // Fitting took the middle away, which lies inside the tools: the piece reaching farthest from the end is kept
     // when it comes out of them, and dropped when it lies wholly inside them (ruling C4).
+    // ponytail: a coplanar cut's sliver counts as sticking out and keeps the piece; measure what is left if one shows.
     let mut rest = Some(piece.body.clone());
     for &(tool, _) in &reach {
         let Some(b) = rest else { break };

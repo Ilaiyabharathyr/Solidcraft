@@ -223,8 +223,12 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
                 Cutter::Earlier(e) => (earlier_ids.get(e), earlier.get(e).map(|e| &e.0)),
             };
             let id = format!("{}>{}", ids.get(m).map_or("", String::as_str), x.map_or("", String::as_str));
-            // A name pinned to another piece is kept for it, whichever of the two is named first.
-            let free = |n: &String| st.body(n).is_none() && !named.contains(n) && !piece_pins.iter().any(|(k, p)| **k != id && *p == n.as_str());
+            // A name pinned to another piece is kept for it, whichever of the two is named first; of two
+            // pinned to one name, the first named takes it.
+            let own = names.get(&id).map(|n| n.trim());
+            let free = |n: &String| {
+                st.body(n).is_none() && !named.contains(n) && !piece_pins.iter().any(|(k, p)| **k != id && *p == n.as_str() && Some(*p) != own)
+            };
             let pinned = names.get(&id).map(|n| n.trim().to_string()).filter(|n| !n.is_empty() && free(n));
             let joined = format!("{name} · {}", x_name.map_or("", String::as_str));
             let piece = (1..=MAX_MEMBERS + 1).map(|k| if k == 1 { joined.clone() } else { format!("{joined} ({k})") }).find(free);

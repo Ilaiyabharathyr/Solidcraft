@@ -137,8 +137,10 @@ pub struct Member {
 /// preview of the path it made fails ([`settle_pick`]).
 #[derive(Clone, Debug)]
 pub struct Pending {
-    /// The path the pick made.
+    /// The path the pick made, and the commands it sent: a preview of anything else (the path or
+    /// a value changed since) is not the pick's.
     after: Vec<Sel>,
+    cmds: Vec<(String, Value)>,
     /// What taking it back restores ([`take_back`]).
     back: Back,
 }
@@ -293,7 +295,8 @@ pub(crate) fn remove_tubes(app: &mut SolveApp, ids: &[String]) {
     // `frame.remove_member` drops it: a kept one, and a picked corner whose members, as OK would
     // send them now, name it.
     let removed: std::collections::BTreeSet<&str> = all.iter().filter(|t| ids.contains(&t.id)).map(|t| t.id.as_str()).collect();
-    let names_removed = |o: &Value| o["members"].as_array().is_some_and(|ms| ms.iter().any(|m| m.as_str().is_some_and(|m| removed.contains(m))));
+    let names_removed =
+        |o: &Value| o.get("members").and_then(Value::as_array).is_some_and(|ms| ms.iter().any(|m| m.as_str().is_some_and(|m| removed.contains(m))));
     let mut gone_corners = Vec::new();
     if let Some(d) = app.dialog.as_ref()
         && let Kind::Frame(m) = &d.kind
@@ -602,8 +605,8 @@ fn pick_as(app: &SolveApp, d: &mut Dialog, sel: Sel, given: Option<Value>) {
                 *r = given.next().or_else(|| point_ref(app, item).ok());
             }
         }
-        if check {
-            m.pending = Some(Box::new(Pending { after: items.to_vec(), back }));
+        if let Some(cmds) = check {
+            m.pending = Some(Box::new(Pending { after: items.to_vec(), cmds, back }));
         }
     }
 }
@@ -629,11 +632,16 @@ pub(crate) fn settle_pick(app: &mut SolveApp) {
         return;
     }
     let error = app.preview.error.clone();
+    if !matches!(app.dialog.as_ref().map(|d| &d.kind), Some(Kind::Frame(m)) if m.pending.is_some()) {
+        return;
+    }
+    let now = app.dialog.as_ref().and_then(|d| crate::dialogs::apply_commands(app, d).ok());
     let Some(d) = app.dialog.as_mut() else { return };
     let Kind::Frame(m) = &mut d.kind else { return };
     let Some(pending) = m.pending.take() else { return };
     if let Some(why) = error
         && crate::selection::items(&d.inputs, 0) == pending.after.as_slice()
+        && now.as_ref() == Some(&pending.cmds)
     {
         take_back(d, pending.back, &why);
     }
@@ -771,18 +779,18 @@ pub(crate) fn prompt(d: &mut Dialog) {
 }
 
 /// Why the path's newest picks (those after `before`) make the feature fail, where that shows
-/// without building it; `Ok(true)` when they complete a tube onto a path that built, for the live
-/// preview to check ([`settle_pick`]).
-fn refusal(app: &SolveApp, d: &Dialog, before: &[Sel]) -> Result<bool, String> {
+/// without building it; `Ok(Some(commands))` when they complete a tube onto a path that built, for
+/// the live preview of those commands to check ([`settle_pick`]).
+fn refusal(app: &SolveApp, d: &Dialog, before: &[Sel]) -> Result<Option<Vec<(String, Value)>>, String> {
     let items = crate::selection::items(&d.inputs, 0);
     if items.len() <= before.len() {
-        return Ok(false);
+        return Ok(None);
     }
     let (lines, pairs, _) = pairs_of(items)?;
     let had = pairs_of(before).map(|(l, p, _)| (l.len(), p.len())).unwrap_or_default();
     // A point now waiting for its partner builds nothing new.
     if (lines.len(), pairs.len()) == had {
-        return Ok(false);
+        return Ok(None);
     }
     // What fails already (a value, a point gone) is not this pick's doing: its own error shows.
     // Nor is a failure whose path before isn't known to build yet (its preview still computing).
@@ -792,11 +800,11 @@ fn refusal(app: &SolveApp, d: &Dialog, before: &[Sel]) -> Result<bool, String> {
             path.items = before.to_vec();
         }
         if app.preview.error.is_some() || crate::dialogs::apply_commands(app, &was).is_err() {
-            return Ok(false);
+            return Ok(None);
         }
     }
-    crate::dialogs::apply_commands(app, d)?;
-    Ok(had == (0, 0) || !app.preview.busy)
+    let cmds = crate::dialogs::apply_commands(app, d)?;
+    Ok((had == (0, 0) || !app.preview.busy).then_some(cmds))
 }
 
 fn tr(text: &str) -> &str {

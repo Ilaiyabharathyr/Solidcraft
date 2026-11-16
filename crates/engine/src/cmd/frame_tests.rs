@@ -4611,6 +4611,22 @@ fn a_piece_name_pinned_to_another_piece_is_not_taken() {
 }
 
 #[test]
+fn of_two_pieces_pinned_to_one_name_the_first_keeps_it() {
+    // Both braces' later pieces pinned to `Brace`: pair2's, named first, takes it; pair3's is named as if unpinned.
+    let mut s = Session::default();
+    let at = [("R0", [0.0, 0.0, 0.0]), ("R1", [600.0, 0.0, 0.0]), ("B0", [200.0, -200.0, 0.0]), ("B1", [200.0, 200.0, 0.0])];
+    points(&mut s, &at);
+    points(&mut s, &[("C0", [400.0, -200.0, 0.0]), ("C1", [400.0, 200.0, 0.0])]);
+    let pairs = json!([pair("R0", "R1"), pair("B0", "B1"), pair("C0", "C1")]);
+    let names = json!({"pair2>pair1": "Brace", "pair3>pair1": "Brace"});
+    run(&mut s, "frame.member", json!({"pairs": pairs, "profile": tube(), "corner": "auto", "body_name": "T", "names": names}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 5, "{bs:?}");
+    assert_tube(body_named(&bs, "Brace"), [180.0, 20.0, -20.0], [220.0, 200.0, 20.0], 180.0);
+    assert_tube(body_named(&bs, "T (3) · T"), [380.0, 20.0, -20.0], [420.0, 200.0, 20.0], 180.0);
+}
+
+#[test]
 fn remove_tubes_reply_names_the_tubes_it_changed() {
     // A mitred rectangle loses its bottom tube: the side tubes that were mitred to it are changed (square ends now), the
     // top is not, and nothing is created.
