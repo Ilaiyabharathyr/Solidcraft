@@ -93,6 +93,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     )),
 ];
 
+/// `frame.plate`: a separate plate body on a planar face, attached to the member that made the face.
 fn plate(s: &mut Session, p: &Value) -> Result<Value> {
     use solidcraft_doc::frame::{PlateHoles, PlateShape};
     let cmd = "frame.plate";

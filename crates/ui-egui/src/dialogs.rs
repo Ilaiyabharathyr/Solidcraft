@@ -2959,7 +2959,7 @@ fn title(k: &Kind) -> &'static str {
         Kind::Plastic(k) => k.title(),
         Kind::Frame(_) => "FRAME MEMBER",
         Kind::EndCap(_) => "ui.end_cap_title",
-        Kind::FramePlate(_) => "MOUNTING PLATE",
+        Kind::FramePlate(_) => "ui.mounting_plate_title",
         Kind::Appearance(_) => "APPEARANCE",
         Kind::Motion(k) => k.title(),
         Kind::Part(_) => "INSERT PART",
@@ -4278,7 +4278,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let mut value_fields = Vec::new();
 
     let raw_title = title_of(&d);
-    let translated_title = if matches!(d.kind, Kind::FramePlate(_)) { app.tr("ui.mounting_plate_title") } else { tr(raw_title) };
+    let translated_title = tr(raw_title);
     let heading = if d.editing.is_some() {
         solidcraft_ui_text::format("dialog.edit_title", &[("title", translated_title)])
     } else {
