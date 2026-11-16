@@ -29,8 +29,8 @@ pub(crate) fn has_links(app: &SolveApp, sketch: u64) -> bool {
 fn label(app: &SolveApp, link: &Link) -> String {
     let what = link.source.describe();
     let mut label = match link.kind {
-        LinkKind::Intersect => format!("{}: {what}", crate::i18n::tr_label("Intersect")),
-        LinkKind::Include => format!("{}: {what}", crate::i18n::tr_label("Include 3D Geometry")),
+        LinkKind::Intersect => format!("{}: {what}", solidcraft_ui_text::tr_label("Intersect")),
+        LinkKind::Include => format!("{}: {what}", solidcraft_ui_text::tr_label("Include 3D Geometry")),
         _ => {
             let mut chars = what.chars();
             chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
@@ -80,7 +80,7 @@ fn entries(app: &SolveApp, sketch: u64) -> Vec<Entry> {
             let mut text = label(app, link);
             let state = status(app, sketch, link);
             if let Some(state) = state {
-                text.push_str(&format!(" — {}", crate::i18n::tr_label(state)));
+                text.push_str(&format!(" — {}", solidcraft_ui_text::tr_label(state)));
             }
             let curves =
                 sk.link_curves(&link.id).into_iter().filter_map(|c| sk.curves.get(c)).map(|c| Sel::SketchCurve { id: c.id.clone(), sketch: None });
