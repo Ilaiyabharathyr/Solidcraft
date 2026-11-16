@@ -1613,6 +1613,19 @@ fn a_new_frame_member_starts_on_auto_with_fit_ends() {
     assert_eq!(CORNER_TYPES[member(&mut d).corner].0, "auto");
 }
 
+/// With the preference "New Frame Members start on Corner Type None" a new Frame Member starts on
+/// None, as before Auto, and its command sends no corner.
+#[test]
+fn the_frame_starts_on_none_preference_keeps_the_old_start() {
+    let mut app = frame_app();
+    app.preferences.frame_starts_on_none = true;
+    let lines = frame_lines(&app);
+    let mut d = dialog_on(&mut app, &lines);
+    assert_eq!(CORNER_TYPES[member(&mut d).corner].0, "none");
+    let p = &apply_commands(&app, &d).unwrap()[0].1;
+    assert!(p.get("corner").is_none() && p.get("fit_ends").is_none(), "{p}");
+}
+
 /// Fit Ends to Earlier Frames unticked writes nothing, and under None, ticked or not, neither.
 #[test]
 fn fit_ends_unticked_writes_nothing() {
