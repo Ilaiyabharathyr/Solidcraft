@@ -757,6 +757,32 @@ fn this_frame_members_tubes_are_tinted_apart_from_other_frame_members() {
     assert_ne!(own[..3], other[..3], "this one's are tinted");
 }
 
+/// With a component placed away from its frame the preview is of the placed model; this feature's
+/// new tubes are still drawn see-through in the ghost colour there.
+#[test]
+fn a_placed_models_preview_keeps_the_ghost_colour() {
+    let mut app = box_app();
+    let c = app.run("component.create", json!({"name": "Away", "grounded": false})).unwrap()["component"].as_u64().unwrap();
+    let o = app.session.doc.occurrence_of(c).unwrap().id;
+    app.run("occurrence.move", json!({"occurrence": o, "translate": [0, 0, 1000]})).unwrap();
+    app.run("component.activate", json!({"component": 0})).unwrap();
+    assert!(solidcraft_engine::frames::placed(&app.session));
+    let mut d = ghosted_frame_dialog(&mut app);
+    pick_all(&app, &mut d, &[corner(0., 0., 400.), corner(600., 0., 400.)]);
+    app.dialog = Some(d.clone());
+    let colors = crate::preview::colors(&app);
+    let built = crate::preview::compute(&app.session, &apply_commands(&app, &d).unwrap(), colors).unwrap();
+    assert!(built.scene.tris.is_empty() && !built.scene.glass.is_empty(), "the new tube is drawn see-through");
+    let drawn: std::collections::BTreeSet<[u8; 4]> = built
+        .scene
+        .glass
+        .chunks(crate::gpu::TRI_SIZE)
+        .filter_map(|v| v.get(24..28).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes))
+        .filter_map(|i| built.scene.palette.get(crate::gpu::PaletteIndex(i)))
+        .collect();
+    assert_eq!(drawn.into_iter().collect::<Vec<_>>(), [colors.new_body], "in the ghost colour, its alpha {}", colors.new_body[3]);
+}
+
 #[test]
 fn with_ghosting_off_members_draw_and_pick_as_today() {
     let mut app = railed_box();
@@ -1034,10 +1060,9 @@ fn ok_after_removing_every_tube_deletes_the_frame_member() {
     assert_eq!(members(&app), bodies);
 }
 
-/// A line refused in place of the waiting point gives the point back as it was picked, with its
-/// reference.
-#[test]
-fn a_refused_line_gives_the_waiting_point_back_with_its_reference() {
+/// The box with a circle drawn in sketch `Hoop`, and the circle as a pick: a line no member can
+/// be laid on.
+fn hoop_app() -> (SolveApp, Sel) {
     let mut app = box_app();
     for (id, p) in [
         ("sketch.create", json!({"plane": "XY", "name": "Hoop"})),
@@ -1048,17 +1073,64 @@ fn a_refused_line_gives_the_waiting_point_back_with_its_reference() {
     }
     let hoop = sketch_id(&app, "Hoop");
     let circle = Sel::ExternalSketchCurve { sketch: hoop, id: app.session.doc.sketch(hoop).unwrap().curves[0].id.clone() };
-    let mut d = dialog_on(&mut app, &[]);
-    pick_all(&app, &mut d, &[corner(0., 0., 0.), corner(0., 0., 400.)]);
+    (app, circle)
+}
+
+/// `picks` made in the open dialog, as clicks make them.
+fn pick_in(app: &mut SolveApp, picks: &[Sel]) {
+    let mut d = app.dialog.take().unwrap();
+    pick_all(app, &mut d, picks);
+    app.dialog = Some(d);
+}
+
+/// A line refused in place of the waiting point gives the point back as it was picked, with its
+/// reference: once the live preview of the path it made is in and fails, so a pick never waits for
+/// a build on the UI thread. A valid pick after it is kept.
+#[test]
+fn a_refused_line_gives_the_waiting_point_back_with_its_reference() {
+    let (mut app, circle) = hoop_app();
+    let d = dialog_on(&mut app, &[]);
+    app.dialog = Some(d);
+    pick_in(&mut app, &[corner(0., 0., 0.), corner(0., 0., 400.)]);
+    settle_preview(&mut app);
     // A reference other than the one the corner would be found as again.
     let given = json!({"vertex": [600.0, 0.0, 0.001]});
+    let mut d = app.dialog.take().unwrap();
     super::pick_as(&app, &mut d, corner(600., 0., 0.), Some(given.clone()));
-    pick(&app, &mut d, circle);
+    pick(&app, &mut d, circle.clone());
+    assert!(!d.error.as_deref().is_some_and(super::refused_pick), "{:?}", d.error);
+    assert_eq!(path(&d).last(), Some(&circle), "taken until its preview is in");
+    app.dialog = Some(d);
+    settle_preview(&mut app);
+    let d = app.dialog.as_ref().unwrap();
     assert!(d.error.as_deref().is_some_and(super::refused_pick), "{:?}", d.error);
-    assert_eq!(path(&d), [corner(0., 0., 0.), corner(0., 0., 400.), corner(600., 0., 0.)]);
-    pick(&app, &mut d, corner(600., 0., 400.));
+    assert_eq!(path(d), [corner(0., 0., 0.), corner(0., 0., 400.), corner(600., 0., 0.)]);
+    settle_preview(&mut app);
+    pick_in(&mut app, &[corner(600., 0., 400.)]);
+    settle_preview(&mut app);
+    let d = app.dialog.clone().unwrap();
+    assert!(d.error.is_none() && app.preview.error.is_none(), "{:?} {:?}", d.error, app.preview.error);
+    assert_eq!(path(&d).len(), 4, "the valid pick is kept");
     let c = apply_commands(&app, &d).unwrap();
     assert_eq!(c[0].1["pairs"][1]["a"], given, "{}", c[0].1);
+}
+
+/// A failing pick's preview takes back only that pick: a pick made after it, before that preview
+/// is in, stays, though the path it made fails too.
+#[test]
+fn a_preview_of_an_older_path_takes_no_newer_pick_back() {
+    let (mut app, circle) = hoop_app();
+    let d = dialog_on(&mut app, &[]);
+    app.dialog = Some(d);
+    pick_in(&mut app, std::slice::from_ref(&circle));
+    crate::preview::update(&mut app, &egui::Context::default());
+    assert!(app.preview.busy, "the circle's path is previewed");
+    pick_in(&mut app, &[corner(0., 0., 0.), corner(0., 0., 400.)]);
+    settle_preview(&mut app);
+    let d = app.dialog.as_ref().unwrap();
+    assert!(app.preview.error.is_some());
+    assert!(!d.error.as_deref().is_some_and(super::refused_pick), "{:?}", d.error);
+    assert_eq!(path(d), [circle, corner(0., 0., 0.), corner(0., 0., 400.)]);
 }
 
 /// In a design with a component placed away from its frame the preview is of the placed model,
@@ -1462,6 +1534,44 @@ fn an_edit_keeps_an_override_of_a_pair_members_corner() {
     assert_eq!(apply_commands(&app, &e).unwrap()[0].1["params"]["corners"], over);
 }
 
+/// Remove Tube drops the corner overrides naming the tube taken out, as `frame.remove_member` does: one kept
+/// from the edited feature (the bottom line and pair1), and a picked row (the brace's corner when the brace goes).
+#[test]
+fn remove_tube_drops_the_overrides_naming_it() {
+    let mut app = frame_app();
+    let bottom = lines_at(&app, 0.0, 0.0).into_iter().find(|l| lines_at(&app, 600.0, 0.0).contains(l)).unwrap();
+    let (a, b) = (point_at(&app, 600.0, 0.0), point_at(&app, 600.0, 400.0));
+    let over = json!([{"members": [bottom, "pair1"], "corner": "mitre", "flip": false}]);
+    app.run(
+        "frame.member",
+        json!({"sketch": "Frame", "lines": [bottom], "profile": tube(), "corners": over,
+               "pairs": [{"a": {"sketch": "Frame", "point": a}, "b": {"sketch": "Frame", "point": b}}]}),
+    )
+    .unwrap();
+    let f = app.session.doc.features.last().unwrap().id;
+    app.edit_feature(f);
+    settle_preview(&mut app);
+    super::remove_tubes(&mut app, &["pair1".to_string()]);
+    let d = app.dialog.clone().unwrap();
+    let c = apply_commands(&app, &d).unwrap();
+    assert!(c[0].1["params"].get("corners").is_none(), "{}", c[0].1);
+    crate::dialogs::run_dialog(&mut app, &d).unwrap();
+    // A picked row: the three-tube corner at (0, 0) goes with the brace.
+    let mut app = braced_app();
+    let corners = json!([{"members": lines_at(&app, 0.0, 0.0), "corner": "auto", "flip": true}]);
+    app.run("frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "corners": corners})).unwrap();
+    let f = app.session.doc.features.last().unwrap().id;
+    app.edit_feature(f);
+    settle_preview(&mut app);
+    assert_eq!(open(&mut app).inputs[2].items.len(), 1);
+    super::remove_tubes(&mut app, &["brace".to_string()]);
+    let d = app.dialog.clone().unwrap();
+    assert!(d.inputs[2].items.is_empty(), "{:?}", d.inputs[2].items);
+    let c = apply_commands(&app, &d).unwrap();
+    assert!(c[0].1["params"].get("corners").is_none(), "{}", c[0].1);
+    crate::dialogs::run_dialog(&mut app, &d).unwrap();
+}
+
 /// A new Frame Member starts on Auto with Fit Ends to Earlier Frames ticked, unflipped, with no
 /// overrides, even after one made with Butt; its command says so.
 #[test]
@@ -1730,6 +1840,44 @@ fn a_box_over_the_frame_sketch_picks_its_lines() {
     let corners = &h.app.dialog.as_ref().unwrap().inputs[2].items;
     assert_eq!(corners.len(), 4, "{corners:?}");
     assert!(corners.contains(&Sel::ExternalSketchPoint { sketch: frame, id: point_at(&h.app, 600.0, 400.0) }), "{corners:?}");
+}
+
+/// A marquee over a 3D sketch picks its straight lines into Lines, as a click on each does.
+#[test]
+fn a_box_over_a_3d_sketch_picks_its_lines() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.home.open = false;
+    for (id, p) in [
+        ("sketch.create", json!({"plane": "XY", "name": "Space"})),
+        ("sketch.options", json!({"sketch_3d": true})),
+        ("sketch.line3d", json!({"points": [[0, 0, 0], [600, 0, 0]]})),
+        ("sketch.line3d", json!({"points": [[600, 0, 0], [600, 400, 0]]})),
+        ("sketch.finish", json!({})),
+    ] {
+        h.app.run(id, p).unwrap();
+    }
+    let space = sketch_id(&h.app, "Space");
+    let mut want: Vec<String> = h.app.session.doc.sketch(space).unwrap().wires.iter().map(|w| w.id.clone()).collect();
+    want.sort();
+    assert_eq!(want.len(), 2, "{want:?}");
+    h.app.set_origin_shown(false);
+    h.app.ui.show_browser = false;
+    h.app.ui.show_timeline = false;
+    h.call("ui.view", json!({"view": "top"}));
+    h.call("ui.camera", json!({"target": [300, 200, 0], "distance": 1600}));
+    h.app.start("frame.member");
+    h.frames(2);
+    h.step(&json!({"drag": [{"world": [-50, -50, 0]}, {"world": [650, 450, 0]}]})).unwrap();
+    let mut lines: Vec<String> = h.app.dialog.as_ref().unwrap().inputs[0]
+        .items
+        .iter()
+        .filter_map(|s| match s {
+            Sel::ExternalSketchCurve { sketch, id } if *sketch == space => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    lines.sort();
+    assert_eq!(lines, want, "{:?}", h.app.dialog.as_ref().unwrap().inputs[0].items);
 }
 
 /// The frame dialog in a harness, the frame's lines picked, the feature's type `corner`, and the

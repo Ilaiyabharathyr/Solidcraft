@@ -658,6 +658,7 @@ pub fn update(app: &mut SolveApp, ctx: &egui::Context) {
     if app.preview.busy {
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
+    crate::dialogs_frame::settle_pick(app);
 }
 
 /// What tells one preview computation from another: its commands, the document revision they

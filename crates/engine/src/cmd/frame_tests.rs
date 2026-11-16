@@ -4593,6 +4593,44 @@ fn a_point_pair_brace_crossing_a_rail_is_split() {
 }
 
 #[test]
+fn a_piece_name_pinned_to_another_piece_is_not_taken() {
+    // Two braces across the rail, at x = 200 (pair2) and 400 (pair3), each split as in
+    // `a_point_pair_brace_crossing_a_rail_is_split`. pair3's later piece is pinned to `T (2) · T`, the name pair2's
+    // would be given: the pin holds, and pair2's piece takes the next free name.
+    let mut s = Session::default();
+    let at = [("R0", [0.0, 0.0, 0.0]), ("R1", [600.0, 0.0, 0.0]), ("B0", [200.0, -200.0, 0.0]), ("B1", [200.0, 200.0, 0.0])];
+    points(&mut s, &at);
+    points(&mut s, &[("C0", [400.0, -200.0, 0.0]), ("C1", [400.0, 200.0, 0.0])]);
+    let pairs = json!([pair("R0", "R1"), pair("B0", "B1"), pair("C0", "C1")]);
+    let names = json!({"pair3>pair1": "T (2) · T"});
+    run(&mut s, "frame.member", json!({"pairs": pairs, "profile": tube(), "corner": "auto", "body_name": "T", "names": names}));
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 5, "{bs:?}");
+    assert_tube(body_named(&bs, "T (2) · T"), [380.0, 20.0, -20.0], [420.0, 200.0, 20.0], 180.0);
+    assert_tube(body_named(&bs, "T (2) · T (2)"), [180.0, 20.0, -20.0], [220.0, 200.0, 20.0], 180.0);
+}
+
+#[test]
+fn remove_tubes_reply_names_the_tubes_it_changed() {
+    // A mitred rectangle loses its bottom tube: the side tubes that were mitred to it are changed (square ends now), the
+    // top is not, and nothing is created.
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre"}));
+    let fid = first_frame(&s);
+    let (before, bottom) = (boxes(&mut s), line_at_y(&s, "Frame", 0.0));
+    let r = remove(&mut s, json!([{"feature": fid, "line": bottom}]));
+    let after = boxes(&mut s);
+    let moved: Vec<&String> =
+        after.iter().filter(|(n, (lo, hi))| !before.get(*n).is_some_and(|b| near3(b.0, *lo) && near3(b.1, *hi))).map(|b| b.0).collect();
+    assert_eq!((after.len(), moved.len()), (3, 2), "{before:?} {after:?}");
+    assert_eq!(r["created_bodies"], json!([]), "{r}");
+    let mut changed: Vec<String> = serde_json::from_value(r["changed_bodies"].clone()).unwrap();
+    changed.sort();
+    assert_eq!(changed.iter().collect::<Vec<_>>(), moved, "{r}");
+}
+
+#[test]
 fn a_clipping_tube_is_notched() {
     // The brace runs 30 above the rail: the centrelines miss by 30, less than the section's 40. The brace keeps one
     // body, its name and its box (z 10…50), losing what lies in the rail's squared tool, y −20…20 and z 10…20. Of its

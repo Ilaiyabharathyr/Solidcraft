@@ -129,7 +129,22 @@ pub struct Member {
     /// Whether the Corner Overrides rows show (the arrow on its line folds them; a new pick
     /// opens them). For this dialog only: not saved.
     pub overrides_open: bool,
+    /// The last pick that completed a tube, until the live preview of the path it made is in ([`settle_pick`]).
+    pub pending: Option<Box<Pending>>,
 }
+
+/// A pick into the path that completed a tube onto a path that built: taken back if the live
+/// preview of the path it made fails ([`settle_pick`]).
+#[derive(Clone, Debug)]
+pub struct Pending {
+    /// The path the pick made.
+    after: Vec<Sel>,
+    /// What taking it back restores ([`take_back`]).
+    back: Back,
+}
+
+/// The path's items before a pick, and the member's `path`, `refs` and `pair_ids` with them.
+type Back = (Vec<Sel>, Vec<Sel>, Vec<Option<Value>>, Vec<Option<String>>);
 
 /// A member of the Frame Member the dialog previews, as its live preview made it: its id (a
 /// sketch line's, or a pair's as the preview numbered it), which of the path's pairs it is (none
@@ -274,6 +289,21 @@ pub(crate) fn remove_tubes(app: &mut SolveApp, ids: &[String]) {
     // The last finished preview's, busy or not: tubes are picked again whenever the path
     // changes, so a preview still computing is of this same path.
     let all = app.preview.centrelines.clone();
+    // A corner override naming a tube taken out (its line or pair id) goes with it, as
+    // `frame.remove_member` drops it: a kept one, and a picked corner whose members, as OK would
+    // send them now, name it.
+    let removed: std::collections::BTreeSet<&str> = all.iter().filter(|t| ids.contains(&t.id)).map(|t| t.id.as_str()).collect();
+    let names_removed = |o: &Value| o["members"].as_array().is_some_and(|ms| ms.iter().any(|m| m.as_str().is_some_and(|m| removed.contains(m))));
+    let mut gone_corners = Vec::new();
+    if let Some(d) = app.dialog.as_ref()
+        && let Kind::Frame(m) = &d.kind
+        && let Ok(cmds) = commands(app, m, &d.inputs, &d.extra)
+        && let Some(sent) = cmds.first().and_then(|c| c.1.get("corners")).and_then(Value::as_array)
+    {
+        // The picked corners come first, in order, each a frame sketch point.
+        let points = crate::selection::items(&d.inputs, 2).iter().filter(|p| matches!(p, Sel::ExternalSketchPoint { .. }));
+        gone_corners = points.zip(sent).filter(|(_, o)| names_removed(o)).map(|(p, _)| p.clone()).collect();
+    }
     let Some(d) = app.dialog.as_mut() else { return };
     let (Some(path), Kind::Frame(m)) = (d.inputs.first_mut(), &mut d.kind) else { return };
     m.sync(&path.items);
@@ -299,6 +329,15 @@ pub(crate) fn remove_tubes(app: &mut SolveApp, ids: &[String]) {
             .filter_map(|t| Some(Sel::ExternalSketchCurve { sketch: t.sketch?, id: t.id.clone() }))
             .collect();
         path.items.splice(0..0, missing);
+    }
+    if let Some(corners) = d.inputs.get_mut(2) {
+        corners.items.retain(|p| !gone_corners.contains(p));
+    }
+    if let Some(Value::Array(kept)) = d.extra.get_mut("corners") {
+        kept.retain(|o| !names_removed(o));
+        if kept.is_empty() {
+            d.extra.remove("corners");
+        }
     }
     m.picked_tubes.clear();
     prompt(d);
@@ -375,6 +414,7 @@ impl Member {
             overrides: Vec::new(),
             next_pair: 0,
             overrides_open: true,
+            pending: None,
         }
     }
 
@@ -516,10 +556,9 @@ pub(crate) fn pick(app: &SolveApp, d: &mut Dialog, sel: Sel) {
 /// [`pick_hit`], a new point taking `given` as its lasting reference when there is one.
 fn pick_as(app: &SolveApp, d: &mut Dialog, sel: Sel, given: Option<Value>) {
     let mut before = (matches!(d.kind, Kind::Frame(_)) && d.active == 0).then(|| crate::selection::items(&d.inputs, 0).to_vec());
-    let original = before.clone();
     // What is kept for each entry goes back with the entries when the pick is refused.
-    let kept = match &d.kind {
-        Kind::Frame(m) => Some((m.path.clone(), m.refs.clone(), m.pair_ids.clone())),
+    let back: Option<Back> = match (&before, &d.kind) {
+        (Some(items), Kind::Frame(m)) => Some((items.clone(), m.path.clone(), m.refs.clone(), m.pair_ids.clone())),
         _ => None,
     };
     // A point waiting for its partner: clicked again it is taken out, and a line clicked instead
@@ -548,17 +587,11 @@ fn pick_as(app: &SolveApp, d: &mut Dialog, sel: Sel, given: Option<Value>) {
         given.push(r);
     }
     let mut given = given.into_iter().flatten();
-    let Some(before) = before else { return };
-    if let Some(why) = refusal(app, d, &before) {
-        if let Some((path, original)) = d.inputs.first_mut().zip(original) {
-            path.items = original;
-        }
-        if let (Kind::Frame(m), Some(kept)) = (&mut d.kind, kept) {
-            (m.path, m.refs, m.pair_ids) = kept;
-        }
-        d.error = Some(solidcraft_ui_text::format("frame.pick_refused", &[("reason", tr(&why))]));
-        return;
-    }
+    let (Some(before), Some(back)) = (before, back) else { return };
+    let check = match refusal(app, d, &before) {
+        Ok(check) => check,
+        Err(why) => return take_back(d, back, &why),
+    };
     prompt(d);
     // Each new point's reference is fixed as it is taken: a snap point is known only while it
     // stays among the woken ones (`snap_wake::snapped`), which a long session of picks outlives.
@@ -569,6 +602,40 @@ fn pick_as(app: &SolveApp, d: &mut Dialog, sel: Sel, given: Option<Value>) {
                 *r = given.next().or_else(|| point_ref(app, item).ok());
             }
         }
+        if check {
+            m.pending = Some(Box::new(Pending { after: items.to_vec(), back }));
+        }
+    }
+}
+
+/// Take a pick back: the path and what is kept for its entries as they were before it, and the
+/// dialog says why.
+fn take_back(d: &mut Dialog, (items, path, refs, pair_ids): Back, why: &str) {
+    if let Some(input) = d.inputs.first_mut() {
+        input.items = items;
+    }
+    if let Kind::Frame(m) = &mut d.kind {
+        (m.path, m.refs, m.pair_ids) = (path, refs, pair_ids);
+    }
+    d.error = Some(solidcraft_ui_text::format("frame.pick_refused", &[("reason", tr(why))]));
+}
+
+/// After the live preview is updated: the pick that completed a tube ([`refusal`]) is taken back
+/// when the preview of the path it made is in and failed, as the dialog refuses a pick. A preview
+/// of any other path, an older one still computing included, takes nothing back.
+pub(crate) fn settle_pick(app: &mut SolveApp) {
+    // While computing, the preview shows an older path; once done, the dialog's path now.
+    if app.preview.busy {
+        return;
+    }
+    let error = app.preview.error.clone();
+    let Some(d) = app.dialog.as_mut() else { return };
+    let Kind::Frame(m) = &mut d.kind else { return };
+    let Some(pending) = m.pending.take() else { return };
+    if let Some(why) = error
+        && crate::selection::items(&d.inputs, 0) == pending.after.as_slice()
+    {
+        take_back(d, pending.back, &why);
     }
 }
 
@@ -703,37 +770,33 @@ pub(crate) fn prompt(d: &mut Dialog) {
     }
 }
 
-/// Why the path's newest picks (those after `before`) would make the feature fail, if they would.
-fn refusal(app: &SolveApp, d: &Dialog, before: &[Sel]) -> Option<String> {
+/// Why the path's newest picks (those after `before`) make the feature fail, where that shows
+/// without building it; `Ok(true)` when they complete a tube onto a path that built, for the live
+/// preview to check ([`settle_pick`]).
+fn refusal(app: &SolveApp, d: &Dialog, before: &[Sel]) -> Result<bool, String> {
     let items = crate::selection::items(&d.inputs, 0);
     if items.len() <= before.len() {
-        return None;
+        return Ok(false);
     }
-    let (lines, pairs, _) = match pairs_of(items) {
-        Ok(p) => p,
-        Err(e) => return Some(e),
-    };
+    let (lines, pairs, _) = pairs_of(items)?;
     let had = pairs_of(before).map(|(l, p, _)| (l.len(), p.len())).unwrap_or_default();
     // A point now waiting for its partner builds nothing new.
     if (lines.len(), pairs.len()) == had {
-        return None;
+        return Ok(false);
     }
     // What fails already (a value, a point gone) is not this pick's doing: its own error shows.
+    // Nor is a failure whose path before isn't known to build yet (its preview still computing).
     if had != (0, 0) {
         let mut was = d.clone();
         if let Some(path) = was.inputs.first_mut() {
             path.items = before.to_vec();
         }
         if app.preview.error.is_some() || crate::dialogs::apply_commands(app, &was).is_err() {
-            return None;
+            return Ok(false);
         }
     }
-    // ponytail: one Frame Member evaluation per completing pick, on the UI thread; check the
-    // async preview's result and take the pick back then if a large frame makes clicks lag.
-    match crate::dialogs::apply_commands(app, d) {
-        Ok(cmds) => app.session.preview(&cmds).err().map(|e| e.to_string()),
-        Err(e) => Some(e),
-    }
+    crate::dialogs::apply_commands(app, d)?;
+    Ok(had == (0, 0) || !app.preview.busy)
 }
 
 fn tr(text: &str) -> &str {

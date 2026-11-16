@@ -204,6 +204,7 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
     let base = body_name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map_or(description, str::to_string);
     let ids: Vec<String> = segments.into_iter().map(|(id, _, _)| id).collect();
     let named = member_names(st, &ids, &parts, names, &base);
+    let piece_pins: Vec<(&String, &str)> = names.iter().filter(|(k, _)| k.contains('>')).map(|(k, n)| (k, n.trim())).collect();
     // A piece with no body leaves its name unused.
     for (m, (name, t)) in named.iter().zip(made).enumerate() {
         if let Some(t) = t {
@@ -221,8 +222,9 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
                 }
                 Cutter::Earlier(e) => (earlier_ids.get(e), earlier.get(e).map(|e| &e.0)),
             };
-            let free = |n: &String| st.body(n).is_none() && !named.contains(n);
             let id = format!("{}>{}", ids.get(m).map_or("", String::as_str), x.map_or("", String::as_str));
+            // A name pinned to another piece is kept for it, whichever of the two is named first.
+            let free = |n: &String| st.body(n).is_none() && !named.contains(n) && !piece_pins.iter().any(|(k, p)| **k != id && *p == n.as_str());
             let pinned = names.get(&id).map(|n| n.trim().to_string()).filter(|n| !n.is_empty() && free(n));
             let joined = format!("{name} · {}", x_name.map_or("", String::as_str));
             let piece = (1..=MAX_MEMBERS + 1).map(|k| if k == 1 { joined.clone() } else { format!("{joined} ({k})") }).find(free);
@@ -2108,6 +2110,12 @@ pub fn corner_point(st: &ModelState, sketch: u64, members: &[String]) -> Option<
 /// marquee in the Frame Member dialog picks these.
 pub fn is_member_line(sk: &Sketch, ci: usize) -> bool {
     sk.curves.get(ci).is_some_and(|c| !c.construction && !c.centerline && c.link.is_none() && matches!(c.kind, CurveKind::Line { .. }))
+}
+
+/// Whether wire `wi` of `sk` is a 3D line a frame member is laid on unless lines are picked: a
+/// straight one drawn in it (not projected or otherwise linked), as [`member_lines`] takes them.
+pub fn is_member_wire(sk: &Sketch, wi: usize) -> bool {
+    sk.wires.get(wi).is_some_and(|w| w.link.is_none() && straight(&w.pts).is_some())
 }
 
 /// Each member's place in the sketch's drawing order: a 2D line's curve index, a 3D line's wire

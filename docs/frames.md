@@ -227,7 +227,8 @@ inside an earlier tube, or on two of them, is fitted rather than jointed, and br
 corner are fitted to each other. So is a corner of tubes in no sketch plane that lies inside an earlier
 tube or one of this frame's own sketch tubes. On a Mitre or Butt frame only free ends (ends at
 no corner) are fitted, to this frame's tubes before them in drawing order too, whether or not an
-earlier Frame Member exists; None never fits. Earlier tubes are never changed.
+earlier Frame Member exists; None never fits. Earlier tubes are never changed. A tube whose end is fitted
+so deep that its middle lies inside the earlier tube keeps what comes out of it; one wholly inside fails.
 
 **Overrides.** Under Auto a `corners` entry may name any points where two or more tubes meet:
 `members` holds 2 to 1000 distinct ids, the point-to-point tubes ending there included. Auto is in the
@@ -251,7 +252,10 @@ Under Auto, a tube ending on the middle of a tube its plan doesn't fit it to (a 
 pair's middle, say) touches it end on middle and keeps overlapping it, as Auto always built it. A
 piece is found from its name, and the longest tube name it starts with wins, so where tube names
 themselves hold ` · ` a piece can be matched to the wrong line. A name pinned to a piece stays in
-`names` when only the tube that cut it is removed; it is simply unused.
+`names` when only the tube that cut it is removed; it is simply unused, and no other overlap piece is given
+that name. A Move, Mirror or Pattern copy of an earlier frame's tube is fitted to only while that frame still has
+the original tube: once the original is removed, later frames don't fit to the copy. A copy of one piece of
+an earlier frame's split tube may not be fitted to by later frames.
 When
 a crossing or an overlap first cuts a line, references to that line's far end (an End Cap, a face pick)
 stay on the line's first piece, which no longer has that end, and fail with an error. A short piece past a

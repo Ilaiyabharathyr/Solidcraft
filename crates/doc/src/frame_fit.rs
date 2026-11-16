@@ -90,8 +90,9 @@ fn tool(plane: &Plane, outline: &[Region2], start: f64, end: f64, cuts: &[Cut]) 
 /// only tools whose exact bounds come within `w` of the end (the member's section diagonal) and that meet the end
 /// zone ([`zone`], never deeper than a quarter of the member) take part, each cut only within a zone deep enough to
 /// hold its whole crossing, so a tool crossing the member mid-span leaves it whole there (claude_fusion `cope_end`);
-/// the piece holding `middle` (a point inside the member's material near its line's middle) is kept; unchanged when
-/// no tool reaches the end.
+/// the piece holding `middle` (a point inside the member's material near its line's middle) is kept, or where fitting
+/// took the middle away, the piece reaching farthest from the end ([`fit_piece_end`]); unchanged when no tool reaches
+/// the end.
 pub fn fit_end(member: &Traced, end_point: Vec3, toward: Vec3, middle: Vec3, tools: &[&Traced], id: &str) -> Result<Traced> {
     fitted(member, (end_point, toward, middle), tools, id, false)?.ok_or_else(|| gone(id))
 }
@@ -108,8 +109,8 @@ fn gone(id: &str) -> DocError {
     DocError::Invalid(format!("the member on line `{id}` was cut away completely"))
 }
 
-/// [`fit_end`], keeping the farthest piece (`far`, [`fit_piece_end`]) or the one holding `middle`; `None` when
-/// nothing is kept.
+/// [`fit_end`], keeping the farthest piece (`far`, [`fit_piece_end`]) or the one holding `middle`, else the farthest;
+/// `None` when nothing is kept.
 fn fitted(member: &Traced, (end_point, toward, middle): (Vec3, Vec3, Vec3), tools: &[&Traced], id: &str, far: bool) -> Result<Option<Traced>> {
     let toward = toward.normalized().ok_or_else(|| DocError::Invalid(format!("the member on line `{id}` has no direction")))?;
     let w = diagonal(&member.body, end_point, toward, middle);
@@ -139,7 +140,7 @@ fn fitted(member: &Traced, (end_point, toward, middle): (Vec3, Vec3, Vec3), tool
     let roles = (0..clip.face_count()).map(|k| vec![format!("fit_zone:{k}")]).collect();
     let clip = Traced::made(clip, Some(roles));
     let mut fitted: Option<Traced> = None;
-    for (tool, _) in reach {
+    for &(tool, _) in &reach {
         // ponytail: every tool is clipped, even one wholly inside the zone; skip those if the boolean shows.
         let Some(part) = kernel::boolean(&tool.body, &clip.body, BoolOp::Intersect)? else { continue };
         let part = Traced::step(part, &[tool, &clip]);
@@ -150,25 +151,43 @@ fn fitted(member: &Traced, (end_point, toward, middle): (Vec3, Vec3, Vec3), tool
     let Some(fitted) = fitted else { return Ok(Some(member.clone())) };
     let lumps = fitted.body.lumps()?;
     let lineages = Lineage::lumps(&fitted.body, fitted.lineage.as_ref(), &lumps);
-    if far {
-        if lumps.len() == 1 {
-            return Ok(lumps.into_iter().zip(lineages).next().map(|(body, lineage)| Traced { body, lineage, recipe: None }));
-        }
-        let mut best: Option<(f64, Traced)> = None;
-        for (body, lineage) in lumps.into_iter().zip(lineages) {
-            let along = (end_point - kernel::measure_mass(&body)?.centroid).dot(toward);
-            if best.as_ref().is_none_or(|(most, _)| along > *most) {
-                best = Some((along, Traced { body, lineage, recipe: None }));
+    let mut pieces: Vec<Traced> = lumps.into_iter().zip(lineages).map(|(body, lineage)| Traced { body, lineage, recipe: None }).collect();
+    if !far {
+        let mut holding = None;
+        for (k, piece) in pieces.iter().enumerate() {
+            if piece.body.classify_point(middle)? != PointClass::Outside {
+                holding = Some(k);
+                break;
             }
         }
-        return Ok(best.map(|b| b.1));
-    }
-    for (body, lineage) in lumps.into_iter().zip(lineages) {
-        if body.classify_point(middle)? != PointClass::Outside {
-            return Ok(Some(Traced { body, lineage, recipe: None }));
+        if let Some(k) = holding {
+            return Ok(pieces.into_iter().nth(k));
         }
     }
-    Ok(None)
+    let far_piece = if pieces.len() == 1 {
+        pieces.pop()
+    } else {
+        let mut best: Option<(f64, Traced)> = None;
+        for piece in pieces {
+            let along = (end_point - kernel::measure_mass(&piece.body)?.centroid).dot(toward);
+            if best.as_ref().is_none_or(|(most, _)| along > *most) {
+                best = Some((along, piece));
+            }
+        }
+        best.map(|b| b.1)
+    };
+    if far {
+        return Ok(far_piece);
+    }
+    let Some(piece) = far_piece else { return Ok(None) };
+    // Fitting took the middle away, which lies inside the tools: the piece reaching farthest from the end is kept
+    // when it comes out of them, and dropped when it lies wholly inside them (ruling C4).
+    let mut rest = Some(piece.body.clone());
+    for &(tool, _) in &reach {
+        let Some(b) = rest else { break };
+        rest = kernel::boolean(&b, &tool.body, BoolOp::Cut)?;
+    }
+    Ok(rest.map(|_| piece))
 }
 
 /// The end zone: a box `w` out from the member's line each way, from `w` past `end` back `depth` into the

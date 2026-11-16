@@ -628,5 +628,5 @@ fn remove_member(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     s.refresh();
-    super::features::feature_reply(s, f.id, &before)
+    super::features::feature_reply(s, f.id, &before, true)
 }

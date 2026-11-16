@@ -8248,6 +8248,15 @@ fn box_select(app: &mut SolveApp, proj: &Proj, bx: BoxSel, add: bool) {
                         out.push(Sel::ExternalSketchCurve { sketch: sid, id: c.id.clone() });
                     }
                 }
+                // And its 3D lines, as a click takes them (window: wholly on screen and inside).
+                for (_, w) in
+                    ss.sketch.wires.iter().enumerate().filter(|(i, _)| frame && solidcraft_engine::doc::frame::is_member_wire(&ss.sketch, *i))
+                {
+                    let pts = to2(&w.pts);
+                    if (bx.crossing || pts.len() == w.pts.len()) && bx.takes(&pts) {
+                        out.push(Sel::ExternalSketchCurve { sketch: sid, id: w.id.clone() });
+                    }
+                }
             }
             if pick_points {
                 let visible = solidcraft_engine::view::SketchPointVisibility::new(&ss.sketch);
