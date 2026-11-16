@@ -143,6 +143,13 @@ pub(super) fn paint(
     Ok(action)
 }
 
+/// A panel window's height besides its body: its title bar and, when the panel
+/// has actions, their row.
+pub(super) fn window_chrome(ctx: &egui::Context, actions: bool) -> f32 {
+    let row = if actions { Tokens::get().form_close_size + ctx.global_style().spacing.item_spacing.y } else { 0.0 };
+    crate::toolbar::APP_BAR_HEIGHT + row
+}
+
 /// The window a drag shows before the panel opens in it: the same title bar,
 /// and the panel's body as painted this frame where its content will be.
 pub(super) fn paint_drop(ui: &mut egui::Ui, title_bar: Option<TitleBar>, active: &InstanceId, title: &str, rtl: bool, card: Option<&WindowCard>) {

@@ -14438,6 +14438,80 @@ fn a_dropped_window_opens_at_the_shown_place_kept_on_its_monitor() {
     );
     assert_eq!((window.position, window.inner_size), (Some(landing.min), Some(landing.size())));
     assert_ne!(adapter.drop_window(&other, "Other".into(), landing).0, dropped, "the next drag shows a new window");
+    // The window has its card's size, its title bar in the header's place; a panel
+    // from the bottom strip opens in the shape of a new side column instead.
+    let card = Size { width: 248.0, height: 325.0 };
+    let title_bar = crate::toolbar::APP_BAR_HEIGHT;
+    assert_eq!(super::app::drop_window_size(Zone::Left, card, 27.0, 250.0, 700.0), Size { width: 248.0, height: 325.0 - 27.0 + title_bar });
+    let strip = Size { width: 1784.0, height: 44.0 };
+    assert_eq!(super::app::drop_window_size(Zone::Bottom, strip, 44.0, 250.0, 700.0), Size { width: 250.0, height: 700.0 });
+    // From the bottom strip it stays taller than wide, so its panel keeps a side
+    // card's vertical layout, however short its content.
+    let short = super::app::portrait(Size { width: 266.0, height: 92.0 });
+    assert_eq!(responsive(Zone::Window, short, None).unwrap().0, Flow::Tall, "{short:?}");
+    assert_eq!(super::app::portrait(Size { width: 266.0, height: 500.0 }), Size { width: 266.0, height: 500.0 });
+    // Its height then follows the panel's measured content when the panel sizes to
+    // its content; unmeasured or filling, it does not.
+    let measured = |policy, height| AllocationMetricsFixture {
+        revision: 1,
+        policies: [(id("other"), policy)].into_iter().collect(),
+        width: None,
+        narrow_height: height,
+        wide_height: height,
+    };
+    let content = measured(SideHeightPolicy::Content, 330.0);
+    assert_eq!(super::app::content_height(Some(&content), &id("other"), 250.0, 60.0), Some(330.0));
+    assert_eq!(super::app::content_height(Some(&measured(SideHeightPolicy::Fill, 330.0)), &id("other"), 250.0, 60.0), None);
+    assert_eq!(super::app::content_height(Some(&measured(SideHeightPolicy::Content, MAX_LOGICAL)), &id("other"), 250.0, 60.0), None);
+    assert_eq!(super::app::content_height(None, &id("other"), 250.0, 60.0), None);
+}
+
+#[test]
+fn raw_host_paints_a_panel_dragged_out_of_the_bottom_strip_as_a_side_card_for_its_window() {
+    let mut h = PanelMountHarness::new(true).unwrap();
+    // Another panel already fills the left column.
+    h.dispatch(vec![
+        fixture_open("fixture.log", "one", "one", Zone::Left, 0).unwrap(),
+        fixture_open("fixture.editor", "editor", "editor-section", Zone::Bottom, 1).unwrap(),
+    ])
+    .unwrap();
+    let mut raw = RawPanelHost::new(h, 1.0);
+    raw.inner_origin = Some(egui::pos2(200.0, 100.0));
+    raw.host.set_drag_out(true);
+    raw.host.set_live_drag(true);
+    raw.frame(Vec::new(), false);
+    let strip = raw.host.frame().unwrap().layout.sections.iter().find(|card| card.instance == id("editor")).unwrap().clone();
+    let one = raw.host.frame().unwrap().layout.sections.iter().find(|card| card.instance == id("one")).unwrap().clone();
+    assert_eq!(strip.zone, Zone::Bottom);
+    let start = raw.at(HostControlTarget::Pointer(HostPointerTarget::Header { instance: id("editor") }));
+    let outside = egui::pos2(1500.0, 400.0);
+    raw.pointer(start, true, false);
+    raw.frame(vec![egui::Event::PointerMoved(outside)], false);
+    raw.frame(vec![egui::Event::PointerMoved(outside)], false);
+    assert!(raw.host.window_landing_preview().is_some(), "past the edge, the Window target is offered");
+    // Its body is laid out once as the side card the app's left edge would dock it
+    // as: a new column of the full height, not the space left under another panel.
+    // Its window's preview shows that paint.
+    let side = raw.host.leaving_side_card().expect("a panel from the bottom strip is painted as a side card").clone();
+    assert!(side.zone.side() && !side.inline && side.body.is_some(), "{side:?}");
+    assert!(side.outer.size.width < strip.outer.size.width, "{side:?}");
+    assert!(
+        side.outer.origin.y <= one.outer.origin.y + 0.5 && side.outer.size.height >= one.outer.size.height - 0.5,
+        "{side:?} is not stacked under {one:?}"
+    );
+    let target = egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(side.outer.size.width, side.outer.size.height));
+    let mut output = egui::Context::default()
+        .run_ui(egui::RawInput::default(), |ui| raw.host.window_card().expect("the side card's paint goes with it").paint(ui, target));
+    output.textures_delta.clear();
+    assert!(output.shapes.iter().any(|shape| matches!(shape.shape, egui::Shape::Text(_))), "{:?}", output.shapes);
+    // Back over the app, it is the strip again.
+    raw.frame(vec![egui::Event::PointerMoved(start)], false);
+    raw.frame(vec![egui::Event::PointerMoved(start)], false);
+    assert!(raw.host.leaving_side_card().is_none());
+    raw.frame(
+        vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }],
+        false,
+    );
 }
 
 #[test]

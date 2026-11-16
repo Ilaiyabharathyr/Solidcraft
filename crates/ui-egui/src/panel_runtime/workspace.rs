@@ -288,6 +288,12 @@ pub struct WorkspacePanelHost {
     /// The paint of a panel being dragged out, for its window's preview.
     #[cfg(not(target_arch = "wasm32"))]
     window_card: Option<WindowCard>,
+    /// A panel dragged out of the bottom strip, as the side card the app's left
+    /// edge would dock it as: its body is painted once in that shape for its window.
+    leaving_side_card: Option<HostSection>,
+    /// What `leaving_side_card` was projected for: the panel, the layout revision,
+    /// the capacity and the content measurements. It is kept while they stay.
+    side_card_key: Option<(InstanceId, u64, LogicalRect, u64)>,
     /// A popped-out panel dragged back by its window's grip. Its own capture:
     /// focus is in that window, which would cancel this host's pointer capture.
     window_drag: HostInteraction,
@@ -374,6 +380,50 @@ impl WorkspacePanelHost {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn window_card(&self) -> Option<&WindowCard> {
         self.window_card.as_ref()
+    }
+
+    /// The side card a panel dragged out of the bottom strip is painted as.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn leaving_side_card(&self) -> Option<&HostSection> {
+        self.leaving_side_card.as_ref()
+    }
+
+    /// A panel leaving the app from the bottom strip has no body there to copy:
+    /// with live drag paint, which hides it in the app, its real body is laid out
+    /// once as the side card the app's left edge would dock it as, as a dock
+    /// target's preview is. The projection is kept while its inputs stay.
+    fn update_side_card(&mut self, runtime: &PanelRuntime, frame: &HostFrame) {
+        let key = self
+            .side_card_source(frame)
+            .map(|source| (source, frame.layout.revision, frame.layout.capacity, frame.layout.geometry_policy.content_revision));
+        if key.is_none() || key != self.side_card_key {
+            self.leaving_side_card = key.as_ref().and_then(|(source, ..)| Self::side_card_for_window(runtime, frame, source));
+            self.side_card_key = key;
+        }
+    }
+
+    /// The panel leaving the app from the bottom strip, when live drag paint shows it.
+    fn side_card_source(&self, frame: &HostFrame) -> Option<InstanceId> {
+        if !self.live_drag || cfg!(target_arch = "wasm32") {
+            return None;
+        }
+        frame.preview.as_ref().filter(|preview| preview.rejection.is_none() && preview.window.is_some())?;
+        let source = self.interaction.move_source()?;
+        frame.layout.sections.iter().find(|card| &card.instance == source && card.zone == Zone::Bottom && !card.collapsed)?;
+        Some(source.clone())
+    }
+
+    fn side_card_for_window(runtime: &PanelRuntime, frame: &HostFrame, source: &InstanceId) -> Option<HostSection> {
+        // As the app's left edge would dock it: a new column of the dock area's full
+        // height, whatever is already docked there.
+        let edge = super::interaction::host_drop_targets(runtime.layout(), &frame.layout, source)
+            .ok()?
+            .into_iter()
+            .find(|target| target.id == HostDropTargetId::Dock { zone: Zone::Left, before: None })?;
+        let action =
+            apply_action(runtime.layout().inspect().revision, vec![Mutation::Move { instance: source.clone(), destination: edge.destination }]);
+        let prepared = prepare_host_layout(runtime.layout(), &runtime_scope(runtime), &frame.layout, action).ok()?;
+        prepared.layout().sections.iter().find(|card| &card.instance == source && !card.inline).cloned()
     }
 
     /// The host showed the window for the landing at `requested` at `shown` this frame.
@@ -488,6 +538,8 @@ impl WorkspacePanelHost {
             window_landing: None,
             #[cfg(not(target_arch = "wasm32"))]
             window_card: None,
+            leaving_side_card: None,
+            side_card_key: None,
             window_drag: HostInteraction::default(),
             window_drag_events: Vec::new(),
             drag_paint: DragPaint::default(),
@@ -1094,6 +1146,7 @@ impl WorkspacePanelHost {
         let mut unpainted = Vec::new();
         self.content_reports.clear();
         let mut drag_cards = Vec::new();
+        self.update_side_card(runtime, &frame);
         let capture_drag = (self.live_drag || self.drag_out)
             && (self.interaction.is_captured() || self.drag_paint.active() || ui.input(|input| input.pointer.primary_down()));
         let drag_layout = self
@@ -1114,6 +1167,7 @@ impl WorkspacePanelHost {
             move_source: (!self.live_drag).then_some(self.interaction.move_source()).flatten(),
             drag_cards: capture_drag.then_some(&mut drag_cards),
             drag_layout,
+            side_card: self.leaving_side_card.as_ref(),
             tab_drop: self
                 .live_drag
                 .then(|| {
@@ -1706,7 +1760,12 @@ impl WorkspacePanelHost {
             self.window_card = leaving
                 .then(|| source.and_then(|source| drag_cards.iter().find(|card| &card.instance == source)))
                 .flatten()
-                .zip(source.and_then(|source| frame.layout.sections.iter().find(|section| &section.instance == source)))
+                .zip(source.and_then(|source| {
+                    self.leaving_side_card
+                        .as_ref()
+                        .filter(|card| &card.instance == source)
+                        .or_else(|| frame.layout.sections.iter().find(|section| &section.instance == source))
+                }))
                 .map(|(card, section)| {
                     // The window's title bar takes the header's place: copy the body only.
                     let header = (section.header.origin.y + section.header.size.height - section.outer.origin.y).max(0.0);
@@ -2492,6 +2551,8 @@ struct WorkspaceContentHost<'a> {
     move_source: Option<&'a InstanceId>,
     drag_cards: Option<&'a mut Vec<CardPaint>>,
     drag_layout: Option<&'a HostLayout>,
+    /// The dragged panel's geometry as a side card, for its window's preview.
+    side_card: Option<&'a HostSection>,
     tab_drop: Option<(&'a SectionId, &'a InstanceId, usize)>,
     open_menu: Option<&'a HostMenu>,
     controls: &'a mut Vec<HostFrameControl>,
@@ -2557,13 +2618,16 @@ impl PanelHost for WorkspaceContentHost<'_> {
         // Lay out the real body once at its landing size. Capture the resulting
         // paint and animate from the committed position without stretching widgets.
         let committed_bounds = egui_rect(section.outer);
-        let projected = self.drag_layout.and_then(|layout| {
-            layout.sections.iter().find(|target| {
-                target.instance == section.instance
-                    && target.inline == section.inline
-                    && target.collapsed == section.collapsed
-                    && target.outer.size.width == section.outer.size.width
-                    && (target.zone == Zone::Floating) == (section.zone == Zone::Floating)
+        let side_card = self.side_card.filter(|target| target.instance == section.instance);
+        let projected = side_card.or_else(|| {
+            self.drag_layout.and_then(|layout| {
+                layout.sections.iter().find(|target| {
+                    target.instance == section.instance
+                        && target.inline == section.inline
+                        && target.collapsed == section.collapsed
+                        && target.outer.size.width == section.outer.size.width
+                        && (target.zone == Zone::Floating) == (section.zone == Zone::Floating)
+                })
             })
         });
         let paint_section = projected.unwrap_or(section);
@@ -2574,6 +2638,8 @@ impl PanelHost for WorkspaceContentHost<'_> {
             outer: target.outer,
             usable_body: target.body.or(target.inline_content),
             preview_geometry: true,
+            // A side card lays its content out tall, as docked at a side.
+            flow: if side_card.is_some() { Flow::Tall } else { context.flow },
             ..context.clone()
         });
         let content_context = paint_context.as_ref().unwrap_or(context);
@@ -2628,6 +2694,11 @@ impl PanelHost for WorkspaceContentHost<'_> {
                         continue;
                     }
                     if tab_drop.is_some() && matches!(target, HostPointerTarget::Tab { .. } | HostPointerTarget::TabOverflow { .. }) {
+                        continue;
+                    }
+                    // Painted as a side card for its window, whose title bar replaces the
+                    // header: the strip's header controls would not fit that header.
+                    if side_card.is_some() && !matches!(target, HostPointerTarget::HeaderAction { .. }) {
                         continue;
                     }
                     let data = pointer_instance(target).and_then(|instance| self.metadata.get(instance));
@@ -2831,7 +2902,7 @@ impl PanelHost for WorkspaceContentHost<'_> {
                 let mut content_ui = ui.new_child(egui::UiBuilder::new().id_salt("content_clip").max_rect(paint_bounds));
                 content_ui.set_clip_rect(content_clip);
                 let content_ui = &mut content_ui;
-                if !section.collapsed && section.inline {
+                if !section.collapsed && paint_section.inline {
                     if let Some(body) = paint_section.inline_content {
                         render_slot(
                             content_ui,
