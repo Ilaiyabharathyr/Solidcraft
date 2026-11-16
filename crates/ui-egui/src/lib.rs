@@ -510,7 +510,7 @@ pub struct Services {
     /// Open dialog.
     pub pick_file: Option<Box<dyn Fn(&str, &[&str]) -> FilePickerFuture>>,
     /// Open a dialog asking for a program (a slicer); `None` when the host has no such dialog.
-    pub pick_program: Option<Box<dyn Fn() -> FilePickerFuture>>,
+    pub pick_program: Option<Box<dyn Fn(&str) -> FilePickerFuture>>,
     /// Select the local document library root; unavailable in browser hosts.
     pub pick_folder: Option<Box<dyn Fn() -> FilePickerFuture>>,
     pub show_in_folder: Option<Box<dyn Fn(&str)>>,
