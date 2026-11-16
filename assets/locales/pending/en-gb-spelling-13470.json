@@ -51,7 +51,6 @@
     "prefs.navigator_fit_note": "A face, corner or arrow of a navigator, or an axis of the gizmo, also looks at the middle of the model from the one distance that fits it from every side (its bounding sphere). Home uses the same zoom and centre while this is on, so views chosen after it only turn. Off: the view turns in place, keeping its target and zoom.",
     "prefs.preview_tint_new_faces_help": "A preview of a feature that changes a body can draw the surface it adds in the preview colour. When off, the body is drawn as itself.",
     "prefs.sketch.ellipse_axes_note": "The major and minor axes as construction lines, so the half-axes and axes can be dimensioned. Off: the ellipse alone, and D on it gives its minor radius wherever the value is pulled, drawn and labelled R as before.",
-    "prefs.viewport_analysis_status_help": "Show active analyses above the viewport, open their legends from each item, and use Esc to turn off the newest analysis. Turn off to restore corner legends and the previous Esc behaviour.",
     "prefs.viewport_material_finish_help": "Bodies are lit by a soft studio: metal and glossy appearances reflect it, other bodies get a satin sheen. Off: flat shading in their colour, as before",
     "refused.face_curved": "One of its curved faces can't be used for modelling.",
     "refused.face_flat": "One of its flat faces can't be used for modelling.",
