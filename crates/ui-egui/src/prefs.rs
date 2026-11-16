@@ -1105,6 +1105,8 @@ preference_settings! {
     navigator_home: bool = true, PAGE_NAVIGATION;
     /// Show the radial ring and enable hold/flick gestures for viewport context menus.
     radial_context_menu: bool = false, PAGE_NAVIGATION => check("Radial context menu");
+    /// Independent tool orders for the model and sketch context rings.
+    radial_tools: crate::radial_context::Config = Default::default(), PAGE_NAVIGATION;
     /// Work on the model directly in the viewport (pull a face to extrude or cut); off by default.
     direct_interaction: bool = false, PAGE_TOOLS;
     /// Mouse gestures: a ring of tools on the right button.
@@ -11072,6 +11074,7 @@ mod tests {
         assert!(!Prefs::default().radial_context_menu);
         let old: Prefs = serde_json::from_value(json!({"nav":"solidworks","zoom_reverse":true})).unwrap();
         assert!(!old.radial_context_menu && old.zoom_reverse && old.nav == "solidworks");
+        assert_eq!(old.radial_tools, crate::radial_context::Config::default());
         let mut h = crate::scenario::Harness::new();
         h.call("ui.prefs", json!({"open":"Navigation"}));
         for _ in 0..16 {
@@ -11090,11 +11093,14 @@ mod tests {
         h.call("ui.prefs", json!({"button":"cancel"}));
         assert!(!h.app.preferences.radial_context_menu, "Cancel restores the default-off setting");
         h.call("ui.prefs", json!({"open":"Navigation","radial_context_menu":true}));
+        h.app.preferences.radial_tools.set_tools(false, vec!["undo".into()]);
         h.call("ui.prefs", json!({"button":"apply"}));
         h.call("ui.prefs", json!({"button":"defaults"}));
         assert!(!h.app.preferences.radial_context_menu, "Navigation defaults disable the ring");
+        assert_eq!(h.app.preferences.radial_tools, crate::radial_context::Config::default());
         h.call("ui.prefs", json!({"button":"cancel"}));
         assert!(h.app.preferences.radial_context_menu, "Cancel restores the last Apply");
+        assert_eq!(h.app.preferences.radial_tools.tools(false), ["undo"]);
     }
 
     #[test]
