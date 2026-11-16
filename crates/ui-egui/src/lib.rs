@@ -1433,6 +1433,7 @@ impl SolveApp {
         // Before a design given at start opens: its paths follow the network preferences.
         prefs::sync_surface_analysis(self);
         crate::plugins::sync_policy(self);
+        prefs::sync_pattern_limit(self);
         prefs::apply_network(&self.preferences);
         // Before a file given at start opens: the largest file it may be (#4086).
         prefs::apply_file_limits(&self.preferences);
@@ -1757,6 +1758,13 @@ impl SolveApp {
             }
             if id == "view.origin_axes_across_view" {
                 self.preferences.origin_axes_across_view = v.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+            }
+            // The limit the command set is the preference, so the next frame keeps it (#7824).
+            if id == "sketch.pattern_limit"
+                && let Some(limit) = v.get("pattern_limit").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok())
+            {
+                self.preferences.sketch_pattern_limit = limit;
+                prefs::sync_pattern_limit(self);
             }
             if matches!(id, "view.ambient_occlusion" | "view.graphics_preset") {
                 self.preferences.ambient_occlusion = v.get("enabled").and_then(Value::as_bool).unwrap_or(false);
