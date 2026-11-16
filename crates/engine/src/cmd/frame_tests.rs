@@ -1104,6 +1104,13 @@ fn an_old_coped_butt_design_reads_as_butt_with_coped() {
         assert_eq!(read(&reopened.doc), want, "{old}");
         assert_eq!(bodies(&mut reopened).len(), 4, "{old}");
     }
+    // An edit that sets `coped_butt` (an older script's `timeline.edit`): read the same way.
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "corners": corners}));
+    let fid = first_frame(&s);
+    run(&mut s, "timeline.edit", json!({"feature": fid, "set": {"corner": "coped_butt"}}));
+    assert_eq!(read(&s.doc), (CornerType::Butt, true, vec![CornerType::Butt]));
 }
 
 #[test]

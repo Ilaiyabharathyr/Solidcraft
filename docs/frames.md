@@ -57,11 +57,13 @@ every butt joint of the frame: the tube that gives way is cut to the other tube'
 Butt corner's butting member and the butts Auto chooses (each coped as below), a tube ending on the
 middle of another, the tubes fitted where three or more end, the pieces where tubes cross, the
 notches and splits where tubes overlap, and with Fit Ends to Earlier Frames the ends fitted to earlier
-frames' tubes. Mitres stay mitres (a Mitre frame's corners, Auto's mitres and Mitre overrides). A
-round tube's squared outline is already its real one, so there Coped changes only the butt corners.
-The box is greyed under None, which cuts nothing. A
-design or script from an older build that says `coped_butt`, as the frame's type or an override's,
-is read as `butt` with `coped` ticked.
+frames' tubes. Mitres stay mitres (a Mitre frame's corners, Auto's mitres and Mitre overrides). Auto's
+angled butts at nearly in-line corners stay flat too: there the short tube meets the long tube's
+square end, not its side. A round tube's squared outline is already its real one, so there Coped
+changes only the butt corners. The box is greyed under None, which cuts nothing. A design or script
+from an older build that says `coped_butt`, as the frame's type or an override's (in `frame.member`
+or `timeline.edit`), is read as `butt` with `coped` ticked; on a None frame such an override is
+then a plain Butt.
 
 A **corner** is a point where two or more of the feature's members end, within 0.001 mm, and no
 other member passes through: sketch-line members and members between two points (`pairs`) alike.

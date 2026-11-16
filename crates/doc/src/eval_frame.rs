@@ -1240,7 +1240,7 @@ fn auto_ends(
 
 /// An Auto frame's members (#4003 stage 2): cut at their corners ([`auto_ends`], [`cut_members`]), then each end to
 /// fit cut, in laying order, to the members it meets as their plane cuts build them (each member's cutting tool,
-/// [`frame_fit::fit_tool`], made once). A fitted face is named for the end it finishes and the id of the member it
+/// [`member_tool`], made once). A fitted face is named for the end it finishes and the id of the member it
 /// fits (a piece's own id, [`pieced`]), `corner_start:<member>:face:<k>` (`corner_end:…`), so a member's fitted faces
 /// keep names of their own whatever the laying or pick order, and where three tubes cross. `plan`: the frame's
 /// [`frame_layout::plan`], over `segments` [`pieced`] by it. A piece of a line cut where tubes cross keeps what lies
