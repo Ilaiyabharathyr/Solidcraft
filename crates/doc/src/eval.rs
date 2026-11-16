@@ -6746,22 +6746,6 @@ fn sheet_hole_cut(
     Ok(handled)
 }
 
-/// The cutting tools of one hole at `position`, drilling along `dir` (`kept_inside`: see
-/// [`hole_tools_and_prisms`]).
-#[allow(clippy::too_many_arguments)]
-fn hole_tools(
-    vals: &BTreeMap<String, Value>,
-    st: &ModelState,
-    position: &Vec3,
-    dir: Vec3,
-    diameter: &str,
-    depth: &Option<crate::Expr>,
-    hole: &HoleKind,
-    kept_inside: bool,
-) -> Result<Vec<Traced>> {
-    Ok(hole_tools_and_prisms(vals, st, position, dir, diameter, depth, hole, kept_inside)?.into_iter().map(|(tool, _)| tool).collect())
-}
-
 /// The scale a hole's tools are sized by: the largest body the hole's axis meets (#2904), so a
 /// large body elsewhere in the model changes neither the tool's reach above the face nor its
 /// depth. A hole whose axis meets no body is sized by the
@@ -6873,7 +6857,7 @@ fn hole_run_on(st: &ModelState, plane: &Plane, reach: f64, top: f64) -> (f64, Ve
     (if lowest.is_finite() { top.min(lowest / 2.0) } else { top }, near)
 }
 
-/// [`hole_tools`], each with its exact geometry when it is a straight cylinder along the axis
+/// Tools for a hole at `position` along `dir`, each with its exact geometry when it is a straight cylinder
 /// (a plain hole, a counterbore, a drill point left in the air past a through hole), so sheet
 /// metal can keep it as a flat cut-out or pocket. Each tool's faces are named by the part of the
 /// hole it cuts (`bore`, `cbore`, `csink`: `F7:cbore:base` is a counterbore's floor).
@@ -9411,6 +9395,7 @@ fn replay(
         let present: Vec<String> = targets.iter().filter(|t| st.bodies.iter().any(|b| &b.name == *t)).cloned().collect();
         let targets = if present.is_empty() { targets } else { present };
         let mut copies = Vec::new();
+        let mut hole_prisms = Vec::new();
         let mut instances = Vec::with_capacity(mats.len());
         // Each hole copy's axes (spot and direction), where the check for copies that miss looks
         // for material first.
@@ -9447,11 +9432,10 @@ fn replay(
                     let to = to.map(|t| crate::apply_point(m, t.0));
                     let depth = hole_depth_to(st, &at, d, &to, depth)?;
                     // Each copy's faces are named as the hole's, with the instance.
-                    copies.extend(hole_tools(vals, st, &at, d, diameter, &depth, hole, !from_inside)?.into_iter().map(|t| Traced {
-                        lineage: t.lineage.map(|l| l.copied(src.id, first + k + 1)),
-                        body: t.body,
-                        recipe: None,
-                    }));
+                    for (t, prism) in hole_tools_and_prisms(vals, st, &at, d, diameter, &depth, hole, !from_inside)? {
+                        copies.push(Traced { lineage: t.lineage.map(|l| l.copied(src.id, first + k + 1)), body: t.body, recipe: None });
+                        hole_prisms.push(prism);
+                    }
                 }
                 instances.push(start..copies.len());
                 axes.push(on);
@@ -9512,6 +9496,23 @@ fn replay(
             let (m, t) = count_copy_misses(st, f, &targets, &copies, &instances, &axes);
             missed += m;
             total += t;
+        }
+        // Hole copies keep the same flat cut-outs and pockets as the original hole (#17546).
+        // The sheet helper takes its scope from the feature, including the source's targets.
+        if !hole_prisms.is_empty() && !st.sheets.is_empty() {
+            let sheet_scope;
+            let sheet_feature = if targets.is_empty() {
+                f
+            } else {
+                sheet_scope = Feature { participants: targets.clone(), ..f.clone() };
+                &sheet_scope
+            };
+            let tools = copies.iter().cloned().zip(hole_prisms).collect::<Vec<_>>();
+            let handled = sheet_hole_cut(st, sheet_feature, &tools, warning)?;
+            if !handled.is_empty() {
+                apply_beside_sheet_cut(doc, st, f, copies, op, &targets, &handled)?;
+                continue;
+            }
         }
         // Copies of a cut through sheet metal are cut-outs of its flat pattern, as the cut is
         // (#6841): each machined into the sheets in turn, then cut from the other targets.
