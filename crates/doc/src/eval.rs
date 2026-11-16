@@ -7255,6 +7255,13 @@ fn extrude_within_reach(ends: [f64; 2]) -> Result<()> {
 }
 
 /// Construct planar caps locally before placing the completed tool.
+#[derive(Clone, Copy)]
+enum CapRoles {
+    ByHeight,
+    TwoSided,
+    Named([&'static str; 2]),
+}
+
 fn centered_extrude(
     plane: &Plane,
     region: &Region2,
@@ -7262,7 +7269,7 @@ fn centered_extrude(
     end: f64,
     sketch: Option<&SolvedSketch>,
     thin: Option<&crate::lineage::ThinWallRoles>,
-    two_sided: bool,
+    cap_roles: CapRoles,
 ) -> Result<Vec<Traced>> {
     if !plane.origin.is_finite()
         || !plane.x.is_finite()
@@ -7280,10 +7287,10 @@ fn centered_extrude(
     // they close. Their height cannot tell them apart: both sides may lie on the same side of
     // the sketch plane, and two caps named alike are two pieces of one face, which the
     // history cannot tell apart (a sketch on either of them could not keep its attachment).
-    let caps = if two_sided {
-        [Some("bottom".to_string()), Some("top".to_string())]
-    } else {
-        [Some(crate::lineage::extrude_cap_role(lo)), Some(crate::lineage::extrude_cap_role(hi))]
+    let caps = match cap_roles {
+        CapRoles::TwoSided => [Some("bottom".to_string()), Some("top".to_string())],
+        CapRoles::Named([a, b]) => [Some(a.to_string()), Some(b.to_string())],
+        CapRoles::ByHeight => [Some(crate::lineage::extrude_cap_role(lo)), Some(crate::lineage::extrude_cap_role(hi))],
     };
     let roles = crate::lineage::ProfileRoles { sketch, region: Some(region), caps, thin };
     // Fit cap surfaces in their own coordinates. Fitting a distant world-space
@@ -7564,17 +7571,33 @@ fn feature_tools_with_constructor(
             let untrimmed = extent.to.is_none() && extent.from.is_none() && !extent.through_all;
             let mut tools = Vec::new();
             if is_symmetric_offset {
-                let gap = off.abs();
-                let half = hi;
-                extrude_within_reach([-gap - half, gap + half])?;
+                let [(pos_lo, pos_hi), (neg_lo, neg_hi)] = kernel::symmetric_offset_intervals(off, hi);
+                extrude_within_reach([neg_lo, pos_hi])?;
                 for r in &regions {
-                    tools.extend(centered_extrude(&ss.plane, r, gap, gap + half, Some(&ss), thin_roles.as_ref(), true)?);
-                    tools.extend(centered_extrude(&ss.plane, r, -gap - half, -gap, Some(&ss), thin_roles.as_ref(), true)?);
+                    tools.extend(centered_extrude(
+                        &ss.plane,
+                        r,
+                        pos_lo,
+                        pos_hi,
+                        Some(&ss),
+                        thin_roles.as_ref(),
+                        CapRoles::Named(["bottom_pos", "top_pos"]),
+                    )?);
+                    tools.extend(centered_extrude(
+                        &ss.plane,
+                        r,
+                        neg_lo,
+                        neg_hi,
+                        Some(&ss),
+                        thin_roles.as_ref(),
+                        CapRoles::Named(["bottom_neg", "top_neg"]),
+                    )?);
                 }
             } else {
                 extrude_within_reach([lo + off, hi + off])?;
                 for r in &regions {
-                    tools.extend(centered_extrude(&ss.plane, r, lo + off, hi + off, Some(&ss), thin_roles.as_ref(), extent.distance2.is_some())?);
+                    let cap_roles = if extent.distance2.is_some() { CapRoles::TwoSided } else { CapRoles::ByHeight };
+                    tools.extend(centered_extrude(&ss.plane, r, lo + off, hi + off, Some(&ss), thin_roles.as_ref(), cap_roles)?);
                 }
             }
             // A cut or a join by profiles apart in the sketch (the letters of a text): each tool
@@ -7641,13 +7664,9 @@ fn feature_tools_with_constructor(
                         let nominal = |plane: &solidcore_record::Plane| {
                             let height = (plane.origin - ss.plane.origin).dot(n);
                             if is_symmetric_offset {
-                                let gap = off.abs();
-                                let half = hi;
-                                let tolerance = 1e-9 * (1.0 + height.abs() + (gap + half));
-                                (height - gap).abs() <= tolerance
-                                    || (height - (gap + half)).abs() <= tolerance
-                                    || (height - (-gap)).abs() <= tolerance
-                                    || (height - (-gap - half)).abs() <= tolerance
+                                let [(pos_lo, pos_hi), (neg_lo, neg_hi)] = kernel::symmetric_offset_intervals(off, hi);
+                                let tolerance = 1e-9 * (1.0 + height.abs() + pos_hi.abs() + neg_lo.abs());
+                                [pos_lo, pos_hi, neg_lo, neg_hi].into_iter().any(|h| (height - h).abs() <= tolerance)
                             } else {
                                 let tolerance = 1e-9 * (1.0 + height.abs() + (lo + off).abs() + (hi + off).abs());
                                 (height - (lo + off)).abs() <= tolerance || (height - (hi + off)).abs() <= tolerance
