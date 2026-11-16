@@ -361,7 +361,7 @@ fn view_label(d: &Drawing, view: &View) -> String {
                 let Some(next) = d.view(*parent) else { break };
                 at = next;
             }
-            ViewKind::Pictorial { parent, diagonal } => {
+            ViewKind::Pictorial { parent, diagonal, .. } => {
                 label.push_str(match diagonal {
                     Diagonal::AboveRight => "Pictorial above right of ",
                     Diagonal::AboveLeft => "Pictorial above left of ",
