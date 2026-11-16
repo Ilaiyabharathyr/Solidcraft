@@ -1,5 +1,6 @@
 use super::*;
 use crate::{ConstraintKind, solve};
+use solidcraft_geom::prelude::*;
 
 fn square(size: f64) -> Vec<LinkGeom> {
     let pts = [Vec2::new(-size, -size), Vec2::new(size, -size), Vec2::new(size, size), Vec2::new(-size, size)];
@@ -885,4 +886,41 @@ fn rebuilt_face_keeps_constraints_on_edges_that_survive_and_reports_the_rest() {
     let on_edge = sk.point_index(&on_edge_id).unwrap();
     assert!(matches!(c.kind, ConstraintKind::PointOnCurve { p, c } if p == on_edge && c == top));
     assert!(solve(&mut sk).ok());
+}
+
+/// A 0.5 mm chamfer cut into a corner of a 1000 mm face leaves two new points, each 0.5 mm from
+/// the old corner: neither is clearly the nearer, so neither takes its id. The constraint on the
+/// corner is reported dropped, not kept on one of the chamfer's ends. The other corners keep
+/// their ids.
+#[test]
+fn a_small_chamfer_on_a_large_face_does_not_give_the_corner_id_to_either_end() {
+    let mut sk = Sketch::new();
+    let link = sk.add_link(LinkKind::Project, face(), &square(500.0)).unwrap();
+    let id_at =
+        |sk: &Sketch, at: Vec2| sk.link_points(&link).into_iter().find(|p| sk.points[*p].pos.dist(at) < 1e-9).map(|p| sk.points[p].id.clone());
+    let corner = Vec2::new(500.0, 500.0);
+    let corner_id = id_at(&sk, corner).unwrap();
+    let other_id = id_at(&sk, Vec2::new(-500.0, 500.0)).unwrap();
+    let free = sk.add_point(corner, None).unwrap();
+    let q = sk.point_index(&corner_id).unwrap();
+    let on_corner = sk.add_constraint(ConstraintKind::Coincident { p: free, q }, None).unwrap();
+    // The untouched corner is held too, so the rebuild carries its id over.
+    let other = sk.add_point(Vec2::new(-500.0, 500.0), None).unwrap();
+    let r = sk.point_index(&other_id).unwrap();
+    let on_other = sk.add_constraint(ConstraintKind::Coincident { p: other, q: r }, None).unwrap();
+    let (a, b) = (Vec2::new(500.0, 499.5), Vec2::new(499.5, 500.0));
+    let chamfered = [
+        LinkGeom::Line(Vec2::new(-500.0, -500.0), Vec2::new(500.0, -500.0)),
+        LinkGeom::Line(Vec2::new(500.0, -500.0), a),
+        LinkGeom::Line(a, b),
+        LinkGeom::Line(b, Vec2::new(-500.0, 500.0)),
+        LinkGeom::Line(Vec2::new(-500.0, 500.0), Vec2::new(-500.0, -500.0)),
+    ];
+    let update = sk.update_link_detail(&link, &chamfered).unwrap();
+    assert!(update.rebuilt);
+    assert_ne!(id_at(&sk, a).as_deref(), Some(corner_id.as_str()));
+    assert_ne!(id_at(&sk, b).as_deref(), Some(corner_id.as_str()));
+    assert!(update.dropped.contains(&on_corner), "{:?}", update.dropped);
+    assert_eq!(id_at(&sk, Vec2::new(-500.0, 500.0)), Some(other_id), "an untouched corner keeps its id");
+    assert!(!update.dropped.contains(&on_other) && sk.constraints.iter().any(|c| c.id == on_other));
 }

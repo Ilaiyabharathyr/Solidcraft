@@ -222,6 +222,32 @@ fn lost_placement_keeps_last_geometry_and_never_switches_copies() {
     assert_eq!(refs["references"][0]["status"], "lost", "{refs}");
 }
 
+/// A projection in part B of an edge of a root body (its placement path is empty: the root)
+/// stays that edge when the body is joined into another root body before the sketch: the
+/// joined body is searched for the named edge, as for a body of any other component.
+#[test]
+fn a_root_bodys_edge_stays_found_after_the_body_is_joined() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length":20,"width":20,"height":10,"body_name":"Base"}));
+    run(&mut s, "solid.box", json!({"length":10,"width":10,"height":10,"corner":[20,0,0],"body_name":"Tool"}));
+    run(&mut s, "component.create", json!({"name":"B"}));
+    let sketch = run(&mut s, "sketch.create", json!({"plane":"XY","name":"Receiver"}))["sketch"].as_u64().unwrap();
+    let r = run(&mut s, "sketch.project", json!({"refs":[{"edge":[25,10,10],"body":"Tool"}]}));
+    let link = r["links"][0]["link"].as_str().unwrap().to_string();
+    let stored = s.doc.sketch(sketch).unwrap().link(&link).unwrap().clone();
+    assert_eq!(stored.placement.as_ref().map(|p| p.source.clone()), Some(Vec::new()), "premise: a root source: {stored:?}");
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "component.activate", json!({"component":0}));
+    run(&mut s, "solid.combine", json!({"target":"Base","tools":["Tool"],"operation":"join"}));
+    let join = s.doc.features.last().unwrap().id;
+    let at = s.doc.features.iter().position(|f| f.id == sketch).unwrap();
+    run(&mut s, "timeline.reorder", json!({"feature":join,"position":at}));
+    let st = s.model.state();
+    assert!(st.body("Tool").is_none(), "premise: Tool is joined into Base before the sketch");
+    assert!(!st.sketch(sketch).unwrap().sketch.link(&link).unwrap().lost, "found on the joined body");
+    assert!(same_line(line(&s, sketch, &link), Vec2::new(20.0, 10.0), Vec2::new(30.0, 10.0)));
+}
+
 #[test]
 fn same_component_other_placement_and_ambiguous_sketch_sources_are_refused() {
     let (mut s, comp_a, a1, a2, _, _, _) = assembly();

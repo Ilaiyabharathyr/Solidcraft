@@ -349,6 +349,8 @@ pub(super) fn omit_removed(
 fn references(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sketch.references";
     let mut out = Vec::new();
+    // A placement the exploded view shows has no move to capture.
+    let moves = s.uncaptured_moves().into_owned();
     for id in target_sketches(s, p, cmd, true)? {
         let stored = sketch_store::read(&s.doc, id)?;
         let result = s.model.result(id);
@@ -358,7 +360,7 @@ fn references(s: &mut Session, p: &Value) -> Result<Value> {
             let shown = evaluated.and_then(|sk| sk.link(&l.id));
             let lost = shown.map_or(l.lost, |x| x.lost);
             let paths = l.placement.iter().flat_map(|p| p.source.iter().chain(&p.author));
-            let pending = paths.clone().any(|o| s.pending_moves.contains_key(o));
+            let pending = paths.clone().any(|o| moves.contains_key(o));
             let stale = evaluated.is_some_and(|sk| moved(&link_spots(stored, &l.id), &link_spots(sk, &l.id)));
             let status = if l.frozen {
                 "frozen"
@@ -421,7 +423,11 @@ fn update_references(s: &mut Session, p: &Value) -> Result<Value> {
         let (mut updated, mut unchanged, mut unavailable) = (Vec::new(), Vec::new(), Vec::new());
         let linked: Vec<u64> = s.doc.links.keys().copied().collect();
         for comp in linked {
-            match update.run_nested(s, &json!({"component": comp})) {
+            // The host decides on the file update as if it were asked for it directly: a refusal
+            // reads nothing and changes nothing, and the outer command fails with it.
+            let params = json!({"component": comp});
+            s.check_command(update, &params)?;
+            match update.run_nested(s, &params) {
                 Ok(v) => {
                     let names = |k: &str| v[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
                     updated.extend(names("updated"));
@@ -441,7 +447,8 @@ fn update_references(s: &mut Session, p: &Value) -> Result<Value> {
             .flat_map(|sk| sk.links.iter().filter_map(|l| l.placement.clone()))
             .flat_map(|p| p.source.into_iter().chain(p.author))
             .collect();
-        let moves: Vec<(u64, solidcraft_doc::Mat)> = s.pending_moves.iter().filter(|(o, _)| read.contains(o)).map(|(o, m)| (*o, *m)).collect();
+        // The exploded view is shown, never captured (as component.capture_position does).
+        let moves: Vec<(u64, solidcraft_doc::Mat)> = s.uncaptured_moves().iter().filter(|(o, _)| read.contains(o)).map(|(o, m)| (*o, *m)).collect();
         for (o, _) in &moves {
             s.pending_moves.remove(o);
         }
@@ -561,6 +568,8 @@ fn repair_link(s: &mut Session, p: &Value) -> Result<Value> {
         l.face_name = new.face_name;
         l.edge_name = new.edge_name;
         l.placement = new.placement;
+        // The new source is a link of its own, not the attachment face's border.
+        l.auto_face = new.auto_face;
         l.lost = false;
         l.frozen = false;
         // Deleted members were edges of the old source.

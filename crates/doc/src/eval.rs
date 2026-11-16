@@ -3263,7 +3263,8 @@ fn placement_digest(doc: &Document, f: &Feature, st: Option<&ModelState>) -> u64
                 None if plane_reads_geometry(plane) => reads.all = true,
                 None => {}
             }
-            for link in &sketch.links {
+            // A frozen link reads nothing: its geometry stays as it is wherever its source goes.
+            for link in sketch.links.iter().filter(|l| !l.frozen) {
                 match &link.placement {
                     // Read at that placement, not at its component's first one.
                     Some(p) => reads.placed.push((p.author.clone(), p.source.clone())),

@@ -240,6 +240,24 @@ fn freeze_holds_the_geometry_and_resume_follows_again() {
     assert!((hole_centre(&s, sketch, &face) - Vec2::new(120.0, 20.0)).len() < 1e-6, "undo freezes it again");
 }
 
+/// A frozen projection reads nothing, so moving the copy it was read from leaves its sketch's
+/// result as it was (taken from the cache), where a live one is evaluated again.
+#[test]
+fn moving_the_source_of_a_frozen_projection_does_not_evaluate_its_sketch_again() {
+    let (mut s, _, a2, sketch) = holed_parts();
+    let face = top_face_of_second(&mut s, a2);
+    run(&mut s, "sketch.finish", json!({}));
+    let result = |s: &Session| s.model.result(sketch).map(|r| r.state.clone()).unwrap();
+    let live = result(&s);
+    run(&mut s, "occurrence.move", json!({"occurrence":a2,"translate":[0,9,0]}));
+    assert!(!std::sync::Arc::ptr_eq(&live, &result(&s)), "premise: a live projection is evaluated again");
+    run(&mut s, "sketch.freeze_link", json!({"sketch":sketch,"link":face}));
+    let frozen = result(&s);
+    run(&mut s, "occurrence.move", json!({"occurrence":a2,"translate":[0,9,0]}));
+    assert!(std::sync::Arc::ptr_eq(&frozen, &result(&s)), "the frozen projection's sketch is not evaluated again");
+    assert!((hole_centre(&s, sketch, &face) - Vec2::new(120.0, 29.0)).len() < 1e-6, "where it was frozen");
+}
+
 #[test]
 fn a_frozen_projection_keeps_its_size_when_the_source_is_resized_and_update_says_frozen() {
     let (mut s, _, sketch, face) = parametric_plate(false);
@@ -281,6 +299,47 @@ fn pending_moves_are_reported_and_captured_by_update() {
     assert_eq!(refs["references"][0]["status"], "current");
     run(&mut s, "edit.undo", json!({}));
     assert!((hole_centre(&s, sketch, &face) - Vec2::new(120.0, 20.0)).len() < 1e-6);
+}
+
+/// An exploded view places the copy only while it is shown: the projection reports no pending
+/// move, and Update References with capture writes nothing into the design.
+#[test]
+fn an_exploded_view_is_not_a_pending_move_and_is_never_captured() {
+    let (mut s, _, a2, sketch) = holed_parts();
+    let face = top_face_of_second(&mut s, a2);
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "occurrence.ground", json!({"occurrence":a2,"grounded":false}));
+    let saved = s.doc.occurrences.iter().find(|o| o.id == a2).unwrap().transform;
+    let view = run(&mut s, "explode.create", json!({"moves":[{"occurrence":a2,"translate":[0,50,0]}]}))["view"].as_u64().unwrap();
+    run(&mut s, "explode.show", json!({"view":view}));
+    assert!(!s.pending_moves.is_empty(), "premise: the exploded view places A:2");
+    assert_eq!(run(&mut s, "sketch.references", json!({}))["references"][0]["status"], "current");
+    let r = run(&mut s, "sketch.update_references", json!({"capture":true}));
+    assert_eq!(r["captured"], json!([]), "{r}");
+    assert_eq!(s.doc.occurrences.iter().find(|o| o.id == a2).unwrap().transform, saved, "the design keeps A:2's placement");
+    assert!((hole_centre(&s, sketch, &face) - Vec2::new(120.0, 20.0)).len() < 1e-6);
+}
+
+/// A sketch on a face projects that face's border on its own (an auto-projected link, which
+/// resolves through the attachment). Repaired onto another body's face, it is an ordinary link
+/// of that face: it no longer looks for the attachment, so it is found again on evaluation.
+#[test]
+fn a_repaired_auto_projected_border_follows_its_new_source() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length":40,"width":40,"height":10,"body_name":"Plate"}));
+    run(&mut s, "solid.cylinder", json!({"radius":5,"height":10,"base":[60,0,0],"body_name":"Post"}));
+    let sketch = run(&mut s, "sketch.create", json!({"plane":{"face":[20,20,10]}}))["sketch"].as_u64().unwrap();
+    let auto = s.doc.sketch(sketch).unwrap().links.iter().find(|l| l.auto_face).map(|l| l.id.clone()).expect("premise: the border is auto-projected");
+    let r = run(&mut s, "sketch.repair_link", json!({"link":auto,"ref":{"face":[60,0,10],"body":"Post"}}));
+    assert!(r["rebuilt"].as_bool().is_some(), "{r}");
+    run(&mut s, "sketch.finish", json!({}));
+    let stored = s.doc.sketch(sketch).unwrap().link(&auto).cloned().unwrap();
+    assert!(!stored.auto_face && !stored.lost, "{stored:?}");
+    let state = s.model.state();
+    let shown = state.sketch(sketch).unwrap().sketch.link(&auto).cloned().unwrap();
+    assert!(!shown.lost, "found again on its new source: {shown:?}");
+    let (lines, rounds) = shape(&s, sketch, &auto);
+    assert!(lines == 0 && rounds > 0, "the post's circle, not the plate's square: {lines} lines, {rounds} rounds");
 }
 
 #[test]
@@ -346,6 +405,15 @@ fn update_with_files_reports_an_unavailable_design_and_keeps_geometry() {
     let r = run(&mut s, "sketch.update_references", json!({"files":true}));
     assert_eq!(r["ok"], true, "{r}");
     assert!((length(&s) - 16.0).abs() < 1e-6, "the edited design's edge, at the second placement");
+    // A host that refuses linked-design updates refuses them here too: nothing is read or changed.
+    save(22.0);
+    s.set_command_check(Some(std::sync::Arc::new(|id, _, _| if id == "component.update_links" { Err("no file updates".into()) } else { Ok(()) })));
+    let before = s.doc.clone();
+    let e = s.execute("sketch.update_references", &json!({"files":true})).unwrap_err().to_string();
+    assert!(e.contains("no file updates"), "{e}");
+    assert!(*s.doc == *before, "the design is unchanged");
+    assert!((length(&s) - 16.0).abs() < 1e-6);
+    s.set_command_check(None);
     std::fs::remove_file(&part).unwrap();
     let r = run(&mut s, "sketch.update_references", json!({"files":true}));
     assert_eq!(r["ok"], false);

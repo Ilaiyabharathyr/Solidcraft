@@ -17,9 +17,10 @@ use crate::schema::sketch::{
 use crate::schema::sketch_dimension::{DimensionResult, SketchDimensionParams};
 use crate::schema::sketch_dimensioned::{DrawDimensionedParams, DrawDimensionedResult};
 use crate::schema::sketch_session::{
-    Activated, Attachment, BrokenLink, ChainParams, ChainResult, ConstructionParams, ConstructionResult, CreateParams, CreateResult, DeleteParams, DeleteResult,
-    DimensionTextParams, DimensionTextResult, DragEndParams, DragEndResult, DragParams, DragResult, Frame, MovePointParams, MovePointResult,
-    MovePointsParams, MovePointsResult, MovedPoint, OptionsParams, OptionsReply, OptionsResult, SketchOptions, SolveParams, SolveResult,
+    Activated, Attachment, BrokenLink, ChainParams, ChainResult, ConstructionParams, ConstructionResult, CreateParams, CreateResult, DeleteParams,
+    DeleteResult, DimensionTextParams, DimensionTextResult, DragEndParams, DragEndResult, DragParams, DragResult, Frame, MovePointParams,
+    MovePointResult, MovePointsParams, MovePointsResult, MovedPoint, OptionsParams, OptionsReply, OptionsResult, SketchOptions, SolveParams,
+    SolveResult,
 };
 use crate::schema::sketch_shapes::{
     ArcCenterPointParams, ArcThreePointParams, CircleCenterParams, CircleThreePointParams, CircleTwoPointParams, Created, DrawResult, LineParams,

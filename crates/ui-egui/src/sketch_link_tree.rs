@@ -82,7 +82,8 @@ fn entries(app: &SolveApp, sketch: u64) -> Vec<Entry> {
             if let Some(state) = state {
                 text.push_str(&format!(" — {}", crate::i18n::tr_label(state)));
             }
-            let curves = sk.link_curves(&link.id).into_iter().filter_map(|c| sk.curves.get(c)).map(|c| Sel::SketchCurve { id: c.id.clone(), sketch: None });
+            let curves =
+                sk.link_curves(&link.id).into_iter().filter_map(|c| sk.curves.get(c)).map(|c| Sel::SketchCurve { id: c.id.clone(), sketch: None });
             let points = sk.link_points(&link.id).into_iter().filter_map(|p| sk.points.get(p)).map(|p| Sel::SketchPoint { id: p.id.clone() });
             let members: Vec<Sel> = curves.chain(points).collect();
             let selected = active && !members.is_empty() && members.iter().all(|m| app.session.selection.contains(m));

@@ -1688,7 +1688,11 @@ pub fn placed_source(
                 // A named edge whose body was joined into another body of the same component is
                 // that edge of the joined body; nothing outside the placement's component is searched.
                 None => {
-                    let leaf = placement.source.last().and_then(|id| doc.occurrences.iter().find(|o| o.id == *id)).map(|o| o.component);
+                    // An empty path is the root component (0).
+                    let leaf = match placement.source.last() {
+                        None => Some(0),
+                        Some(id) => doc.occurrences.iter().find(|o| o.id == *id).map(|o| o.component),
+                    };
                     edge_name.and_then(|name| {
                         placed
                             .raw
@@ -1817,9 +1821,11 @@ pub struct EdgePieces {
 /// The name a deleted source edge is kept by in [`solidcraft_sketch::Link::omit_edges`]: its
 /// family's (its name without position and piece numbers). Only a whole family is ever left
 /// out, so numbers passing between its edges, or a later split of one of them, cannot leave out
-/// another edge instead.
+/// another edge instead. A name saved in the older nested form (`F5:blend:A|B`) is read as it is
+/// written now (`F5:blend(A|B)`, #5857), so a member deleted before that change stays deleted.
 pub fn omit_name(name: &str) -> String {
-    crate::naming::strip_edge_piece(crate::piece_names::strip_edge_number(name))
+    let name = crate::persistent_name::written_now(name);
+    crate::naming::strip_edge_piece(crate::piece_names::strip_edge_number(&name))
 }
 
 /// The edges of `body` a face link leaves out: those of the families the `omit` names name. A
