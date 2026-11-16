@@ -4597,6 +4597,17 @@ fn exactly(s: &mut Session) -> Vec<String> {
     out
 }
 
+/// An [`exactly`] line with its volume rounded to 1e-6 mm³: kernel updates move a volume's last digits (1e-12
+/// relative) without changing the shape, while the bounding box and face names stay exact.
+fn volume_rounded(line: &str) -> String {
+    let Some(at) = line.find(" [") else { return line.to_string() };
+    let (head, rest) = line.split_at(at);
+    match head.rsplit_once(' ').map(|(name, v)| (name, v.parse::<f64>())) {
+        Some((name, Ok(v))) => format!("{name} {v:.6}{rest}"),
+        _ => line.to_string(),
+    }
+}
+
 /// Every body's name and sorted face names ([`built`]), as one FNV-1a digest and the number of faces: exact, and
 /// short enough to record.
 fn face_digest(s: &mut Session) -> String {
@@ -4718,7 +4729,8 @@ fn frames_without_overlaps_are_unchanged() {
     assert_eq!(got.len(), want.len(), "{got:#?}");
     for (((what, g, digest), (w_what, w)), (f_what, f)) in got.iter().zip(want).zip(faces) {
         assert_eq!((what, what), (w_what, &f_what));
-        assert_eq!(g, &w.iter().map(|l| l.to_string()).collect::<Vec<_>>(), "{what}");
+        let g: Vec<String> = g.iter().map(|l| volume_rounded(l)).collect();
+        assert_eq!(g, w.iter().map(|l| volume_rounded(l)).collect::<Vec<_>>(), "{what}");
         assert_eq!(digest, f, "{what}: face names");
     }
 }
