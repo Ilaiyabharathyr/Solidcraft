@@ -1,6 +1,6 @@
 {
   "uk": {
-    "Board colour": "Колір плати",
+    "Board color": "Колір плати",
     "Board thickness": "Товщина плати",
     "Board thickness must be greater than 0 and at most 1000 mm.": "Товщина плати має бути більшою за 0 і не більшою за 1000 мм.",
     "Colour by type": "За типом",
@@ -13,7 +13,6 @@
     "Include silkscreen": "Включити шовкографію",
     "Inner radius": "Внутрішній радіус",
     "Joint symbols": "Позначки з'єднань",
-    "Modelled": "Змодельовано",
     "Open KiCad PCB": "Відкрити плату KiCad",
     "Outline": "Контур",
     "Overlay on the board": "Накладка на плату",
