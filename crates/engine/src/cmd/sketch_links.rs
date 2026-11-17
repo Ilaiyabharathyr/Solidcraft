@@ -204,16 +204,16 @@ fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
     p.dist(a + ab * t)
 }
 
-/// Is `p` on `g`, within `tol`: on a line's segment, on an arc between its ends (not elsewhere
-/// on its circle), on a circle. None for other curves.
-fn on_geom(g: &LinkGeom, p: Vec2, tol: f64) -> Option<bool> {
-    Some(match *g {
-        LinkGeom::Line(a, b) => seg_dist(p, a, b) <= tol,
-        LinkGeom::Circle(c, r) => (p.dist(c) - r).abs() <= tol,
-        LinkGeom::Arc { c, a, b } => {
+/// Is `p` on curve `ci` of `sk`, within `tol`: on a line's segment, on an arc between its
+/// ends (not elsewhere on its circle), on a circle; on the drawn path of any other curve.
+fn on_curve(sk: &Sketch, ci: usize, p: Vec2, tol: f64) -> bool {
+    match sk.curve_link_geom(ci) {
+        Some(LinkGeom::Line(a, b)) => seg_dist(p, a, b) <= tol,
+        Some(LinkGeom::Circle(c, r)) => (p.dist(c) - r).abs() <= tol,
+        Some(LinkGeom::Arc { c, a, b }) => {
             let r = c.dist(a);
             if (p.dist(c) - r).abs() > tol || r <= tol {
-                return Some(false);
+                return false;
             }
             let tau = std::f64::consts::TAU;
             let start = (a - c).angle();
@@ -222,52 +222,82 @@ fn on_geom(g: &LinkGeom, p: Vec2, tol: f64) -> Option<bool> {
             let slack = tol / r;
             at <= sweep + slack || at >= tau - slack
         }
-        _ => return None,
-    })
-}
-
-/// Is `p` on curve `ci` of `sk`, within `tol` ([`on_geom`]); on the drawn path of any other curve.
-fn on_curve(sk: &Sketch, ci: usize, p: Vec2, tol: f64) -> bool {
-    match sk.curve_link_geom(ci) {
-        Some(g) => on_geom(&g, p, tol).unwrap_or_else(|| {
+        Some(_) => {
             let path = sk.polyline(ci);
             let size = path.iter().zip(path.iter().skip(1)).map(|(a, b)| a.dist(*b)).sum::<f64>();
             path.windows(2).any(|w| matches!(w, [a, b] if seg_dist(p, *a, *b) <= tol.max(size * 1e-3)))
-        }),
+        }
         None => false,
     }
 }
 
-/// Points on piece `g` that together pin it down: its ends and middle; eight points round a
-/// circle, so no half of it holds them all. A conic's or a control-point spline's `spot` is a
-/// control point, off the curve (a solid's exact Bézier pieces are such splines).
-fn probes(g: &LinkGeom) -> Vec<Vec2> {
-    match g {
+/// Does piece `g` lie on curve `ci` of `sk` (its ends and middle within `tol` of it)?
+fn piece_on(sk: &Sketch, ci: usize, g: &LinkGeom, tol: f64) -> bool {
+    // Points on the piece itself: a conic's or a control-point spline's `spot` is a control
+    // point, off the curve (a solid's exact Bézier pieces are such splines).
+    let probe = match g {
         LinkGeom::Point(p) => vec![*p],
         LinkGeom::Line(a, b) | LinkGeom::Arc { a, b, .. } => vec![g.spot(), *a, *b],
         LinkGeom::Conic { a, apex, b, rho } => vec![solidcraft_sketch::conic_point(*a, *apex, *b, *rho, 0.5), *a, *b],
-        LinkGeom::Circle(c, r) => (0..8_u8)
-            .map(|k| {
-                let t = f64::from(k) * std::f64::consts::FRAC_PI_4;
-                *c + Vec2::new(t.cos(), t.sin()) * *r
-            })
-            .collect(),
+        LinkGeom::Circle(c, r) => vec![g.spot(), *c - Vec2::X * *r, *c + Vec2::Y * *r],
         LinkGeom::Ellipse { major, .. } => vec![*major],
         LinkGeom::Spline { pts, control, degree, periodic, nurbs } => {
             [0.0, 0.5, 1.0].map(|t| solidcraft_sketch::spline_point_mode(pts, *control, *degree, *periodic, nurbs.as_ref(), t)).to_vec()
         }
+    };
+    probe.iter().all(|p| on_curve(sk, ci, *p, tol))
+}
+
+/// The deleted curves on circle piece (`c`, `r`) of a source edge, and whether they are all of
+/// it: a circle about the same centre with the same radius (within `tol`), or arcs on that
+/// circle whose angular spans together close the whole turn (a hole's rim saved as two halves,
+/// #18250, the edge now read as one circle, #17175). An arc is never the whole circle however
+/// little of it is missing: coverage is by the arcs' exact spans, not by points sampled on them.
+fn circle_parts(sk: &Sketch, deleted: &[usize], c: Vec2, r: f64, tol: f64) -> (Vec<usize>, bool) {
+    let same = |centre: Vec2, radius: f64| centre.dist(c) <= tol && (radius - r).abs() <= tol;
+    let (mut parts, mut spans, mut full) = (Vec::new(), Vec::new(), false);
+    for &ci in deleted {
+        match sk.curve_link_geom(ci) {
+            Some(LinkGeom::Circle(centre, radius)) if same(centre, radius) => {
+                parts.push(ci);
+                full = true;
+            }
+            Some(LinkGeom::Arc { c: centre, a, b }) if same(centre, centre.dist(a)) && same(centre, centre.dist(b)) => {
+                let start = (a - centre).angle();
+                parts.push(ci);
+                spans.push((start.rem_euclid(std::f64::consts::TAU), ((b - centre).angle() - start).rem_euclid(std::f64::consts::TAU)));
+            }
+            _ => {}
+        }
     }
+    // The angle `tol` is along the rim.
+    let slack = if r > tol { tol / r } else { std::f64::consts::TAU };
+    (parts, full || covers_turn(&spans, slack))
 }
 
-/// Does piece `g` lie on curve `ci` of `sk` (all its [`probes`] within `tol` of it)?
-fn piece_on(sk: &Sketch, ci: usize, g: &LinkGeom, tol: f64) -> bool {
-    probes(g).iter().all(|p| on_curve(sk, ci, *p, tol))
-}
-
-/// Does curve `ci` of `sk` lie on piece `g`, a part of it (a hole's rim saved as two halves,
-/// #18250, each half on the one circle its source edge is now read as)?
-fn part_of(sk: &Sketch, ci: usize, g: &LinkGeom, tol: f64) -> bool {
-    sk.curve_link_geom(ci).is_some_and(|cg| probes(&cg).iter().all(|p| on_geom(g, *p, tol) == Some(true)))
+/// Do the counter-clockwise spans `(start in [0, 2π), sweep)` together cover a whole turn, with
+/// no gap wider than `slack` (radians)? A span past 2π goes on from 0.
+fn covers_turn(spans: &[(f64, f64)], slack: f64) -> bool {
+    let tau = std::f64::consts::TAU;
+    let mut on_turn: Vec<(f64, f64)> = Vec::new();
+    for &(start, sweep) in spans {
+        let end = start + sweep;
+        if end > tau {
+            on_turn.push((start, tau));
+            on_turn.push((0.0, end - tau));
+        } else {
+            on_turn.push((start, end));
+        }
+    }
+    on_turn.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut reach = 0.0_f64;
+    for (start, end) in on_turn {
+        if start > reach + slack {
+            return false;
+        }
+        reach = reach.max(end);
+    }
+    reach >= tau - slack
 }
 
 /// Before curves and points of a sketch are deleted: each link that keeps some of its members
@@ -320,21 +350,20 @@ pub(super) fn omit_removed(
                 Some(Err(why)) => return Err(why.clone()),
                 None => return Err("its source edges are not known".into()),
             };
-            // The deleted curves each piece of each source edge is, and whether they are all of
-            // it: one curve it lies on, else the curves lying on it (a saved hole's two halves
-            // on the one circle its edge is read as now) when they cover it. Empty: none touch it.
+            // The deleted curves on each piece of each source edge, and whether they are all of
+            // it: the one deleted curve it lies on; for a circle, the circle or the arcs on it
+            // that close the turn ([`circle_parts`]). Empty: no deleted curve touches it.
             let on: Vec<Vec<(Vec<usize>, bool)>> = edges
                 .iter()
                 .map(|e| {
                     e.geom
                         .iter()
-                        .map(|g| {
-                            if let Some(c) = deleted.iter().copied().find(|c| piece_on(sk, *c, g, tol)) {
-                                return (vec![c], true);
-                            }
-                            let parts: Vec<usize> = deleted.iter().copied().filter(|c| part_of(sk, *c, g, tol)).collect();
-                            let whole = !parts.is_empty() && probes(g).iter().all(|p| parts.iter().any(|c| on_curve(sk, *c, *p, tol)));
-                            (parts, whole)
+                        .map(|g| match *g {
+                            LinkGeom::Circle(c, r) => circle_parts(sk, &deleted, c, r, tol),
+                            _ => match deleted.iter().copied().find(|c| piece_on(sk, *c, g, tol)) {
+                                Some(c) => (vec![c], true),
+                                None => (Vec::new(), false),
+                            },
                         })
                         .collect()
                 })

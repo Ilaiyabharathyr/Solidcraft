@@ -6,7 +6,7 @@ use crate::Session;
 use serde_json::{Value, json};
 use solidcore_record::Vec2;
 use solidcraft_geom::prelude::*;
-use solidcraft_sketch::{CurveKind, LinkGeom};
+use solidcraft_sketch::{CurveKind, LinkGeom, Sketch};
 
 fn run(s: &mut Session, cmd: &str, params: Value) -> Value {
     s.execute(cmd, &params).unwrap_or_else(|e| panic!("{cmd} {params}: {e}"))
@@ -665,6 +665,28 @@ fn a_freshly_projected_hole_is_one_circle_and_stays_deleted_through_a_resize() {
         assert!(matches!(sk.curves[sk.curve_index(&hole[0]).unwrap()].kind, CurveKind::Circle { .. }), "a circle, not an arc");
     }
     the_whole_hole_stays_deleted_through_a_resize(s, sketch, &face, hole);
+}
+
+/// Deleted arcs are all of a projected circle only when their spans close the turn (#18250): a
+/// 350° arc whose 10° gap falls between points sampled every 45° is not, nor are halves 1°
+/// apart or an arc about another centre; arcs that meet across 0° are.
+#[test]
+fn only_arcs_on_the_circle_that_close_the_turn_are_all_of_it() {
+    let mut sk = Sketch::new();
+    let at = |centre: Vec2, deg: f64| centre + Vec2::new(deg.to_radians().cos(), deg.to_radians().sin()) * 5.0;
+    let mut arc = |centre: Vec2, from: f64, to: f64| sk.add_arc(centre, at(centre, from), at(centre, to), [None; 3], None).unwrap();
+    let near_full = arc(Vec2::ZERO, 27.5, 17.5);
+    let across = arc(Vec2::ZERO, 300.0, 60.0);
+    let rest = arc(Vec2::ZERO, 60.0, 300.0);
+    let upper = arc(Vec2::ZERO, 0.0, 180.0);
+    let lower_short = arc(Vec2::ZERO, 181.0, 360.0);
+    let elsewhere = arc(Vec2::new(0.5, 0.0), 180.0, 0.0);
+    let parts = |deleted: &[usize]| super::circle_parts(&sk, deleted, Vec2::ZERO, 5.0, 1e-7);
+    assert_eq!(parts(&[near_full]), (vec![near_full], false), "a 350° arc leaves its 10° gap");
+    assert_eq!(parts(&[across, rest]), (vec![across, rest], true), "complementary arcs across 0° close the turn");
+    assert_eq!(parts(&[across]), (vec![across], false));
+    assert_eq!(parts(&[upper, lower_short]), (vec![upper, lower_short], false), "halves 1° apart");
+    assert_eq!(parts(&[upper, elsewhere]), (vec![upper], false), "an arc about another centre is not on the circle");
 }
 
 #[test]
