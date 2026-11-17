@@ -1,6 +1,6 @@
 //! A frame member saves its `corner` (none, mitre or butt), its `flip` (a butt's other member runs
 //! through), `coped` (#17854: every butt joint of the frame cut to the other tube's real shape;
-//! saved only when true), `gap` (the weld gap left at every butt and mitre, a length; saved only when
+//! saved only when true), `gap` (the weld gap left at every welded end, a length; saved only when
 //! set) and `corners`, the corners, crossings and overlaps finished their own way, each as
 //! `{members: [{line}], kind, gap?}` (#4003's shape): its members in order, the first running through
 //! (or staying whole at a crossing or overlap), and of three or more the first two making the corner.

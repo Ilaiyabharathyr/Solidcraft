@@ -46,7 +46,7 @@ use solidcraft_kernel::{self as kernel, PointClass};
 
 use super::super::{ModelState, mirror_matrix, pattern_transforms, point, val};
 use super::{
-    Axes, CutEnd, Layout, Reach, copes, frame_ends, frame_member_id, layout, member_line_ids, member_tool, members_at, overlap_overrides,
+    Axes, CutEnd, Layout, Reach, copes, frame_ends, frame_member_id, gap_value, layout, member_line_ids, member_tool, members_at, overlap_overrides,
     overlap_parent, overrides, pieced, placer, plans, section_axes, section_reach,
 };
 use crate::expr::{Kind, Value};
@@ -68,12 +68,14 @@ type Pose = (u64, Mat, Option<usize>);
 /// one, as a cutting tool placed where that body is now: (body name, tool), and each one's id as an overlap piece's id
 /// names it (ruling O4): a Frame Member's own tube `<feature id>:<member id>` ([`frame_member_id`]), a copy (or a tube
 /// whose member isn't found) its body name; and each one's [`Reach`], its member's line placed where the tool is.
-/// Tools are built once per call, each the tube's real shape when `f` copes ([`copes`]).
+/// Tools are built once per call, each the tube's real shape when `f` copes ([`copes`]), grown by the weld gap `gap`
+/// (the fitted frame's, for what its ends are fitted to; 0 for the tubes as they are).
 pub fn earlier_tools(
     doc: &Document,
     vals: &BTreeMap<String, Value>,
     f: &Feature,
     st: &ModelState,
+    gap: f64,
 ) -> Result<(Vec<(String, Traced)>, Vec<String>, Vec<Reach>)> {
     let Some(here) = doc.features.iter().position(|g| g.id == f.id) else { return Ok(Default::default()) };
     let coped = copes(&f.kind);
@@ -170,7 +172,8 @@ pub fn earlier_tools(
         let (Some(to_f), false, Ok(bounds)) = (into_f(b.component), b.body.is_mesh(), b.body.exact_bounds()) else { continue };
         'body: for (g, m, known) in poses {
             // An earlier feature that no longer lays out has no tubes to fit to.
-            let Some(source) = members.entry(*g).or_insert_with(|| doc.feature(*g).and_then(|g| Members::of(doc, vals, g, st, coped).ok())).as_mut()
+            let Some(source) =
+                members.entry(*g).or_insert_with(|| doc.feature(*g).and_then(|g| Members::of(doc, vals, g, st, (coped, gap)).ok())).as_mut()
             else {
                 continue;
             };
@@ -302,8 +305,9 @@ fn bits(m: &Mat) -> [u64; 16] {
 }
 
 /// An earlier Frame Member's members, laid out and cut at their corners as [`super::member_section`] lays them, in
-/// its own frame: points in each one's material a quarter, half and three quarters along it, and each one's tool
-/// once built, its real shape when `coped` (the frame fitted to it copes).
+/// its own frame (its corners set back by its own weld gap): points in each one's material a quarter, half and three
+/// quarters along it, and each one's tool once built, its real shape when `coped` (the frame fitted to it copes) and
+/// grown by `gap` (that frame's weld gap).
 struct Members {
     segments: Vec<(String, Vec3, Vec3)>,
     regions: Vec<Region2>,
@@ -313,15 +317,17 @@ struct Members {
     points: Vec<[Vec3; 3]>,
     tools: Vec<Option<kernel::Body>>,
     coped: bool,
+    gap: f64,
 }
 
 impl Members {
-    fn of(doc: &Document, vals: &BTreeMap<String, Value>, g: &Feature, st: &ModelState, coped: bool) -> Result<Members> {
-        let FeatureKind::FrameMember { corner, corners, .. } = &g.kind else {
+    fn of(doc: &Document, vals: &BTreeMap<String, Value>, g: &Feature, st: &ModelState, (coped, gap): (bool, f64)) -> Result<Members> {
+        let FeatureKind::FrameMember { corner, corners, gap: own_gap, .. } = &g.kind else {
             return Err(DocError::Invalid("not a frame member feature".into()));
         };
         let Layout { segments, regions, at, turn, sketch_x, drawn, planes, .. } = layout(doc, vals, g, st)?;
-        let corners = &overrides(*corner, (&segments, &planes, &drawn, sketch_x), corners);
+        let own_gap = gap_value(vals, own_gap.as_ref(), "`gap`")?;
+        let corners = &overrides(*corner, (&segments, &planes, &drawn, sketch_x), corners, Some((vals, own_gap)))?;
         // ponytail: an earlier frame's corner or chain corner that its own Fit Ends left Free is cut here as jointed
         // (finding it would build the tools of the frames before that one too); the tool then reaches on inside the
         // tube that corner lies in, which the fitted end is cut by anyway.
@@ -333,12 +339,13 @@ impl Members {
         let inside = regions.first().map(|r| r.interior_point()).ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;
         let (ends, points) = {
             let placed = placer(&axes, at);
-            let ends = frame_ends(&g.kind, corners, &segments, &regions, &placed, (plan.or(crossing), &planes, &overlaps), (sketch_x, &drawn))?;
+            let ends =
+                frame_ends(&g.kind, corners, &segments, &regions, &placed, (plan.or(crossing), &planes, &overlaps), (sketch_x, &drawn), own_gap)?;
             let along = |m: usize, a: Vec3, b: Vec3, t: f64| placed(m, a + (b - a) * t).to_world(inside);
             (ends, segments.iter().enumerate().map(|(m, (_, a, b))| [0.25, 0.5, 0.75].map(|t| along(m, *a, *b, t))).collect())
         };
         let tools = vec![None; segments.len()];
-        Ok(Members { segments, regions, axes, at, ends, points, tools, coped })
+        Ok(Members { segments, regions, axes, at, ends, points, tools, coped, gap })
     }
 
     /// How far member m's tool reaches from its line: its section, and its ends built past the line's.
@@ -354,7 +361,7 @@ impl Members {
             #[cfg(test)]
             TOOL_BUILDS.set(TOOL_BUILDS.get() + 1);
             let placed = placer(&self.axes, self.at);
-            *slot = Some(member_tool(&self.segments, &self.regions, &placed, &self.ends, m, self.coped)?.body);
+            *slot = Some(member_tool(&self.segments, &self.regions, &placed, &self.ends, m, self.coped, self.gap)?.body);
         }
         slot.as_ref().ok_or_else(|| DocError::Invalid(format!("no member {m}")))
     }

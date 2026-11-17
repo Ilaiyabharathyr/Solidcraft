@@ -5407,3 +5407,219 @@ fn locost_sized_design_timing() {
     println!("LOCOST tubes={n} full evaluation={:.2?}", start.elapsed());
     assert!(n >= 50, "{n}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// The weld gap (#17854)
+
+/// A 45 × 45 solid bar, 2025 mm² of section.
+fn bar45() -> Value {
+    json!({"kind": "bar", "width": 45, "height": 45})
+}
+
+/// The rectangle frame in [`bar45`] finished `corner`, with `more` added to the command: each body's volume by name.
+fn bar_rectangle(corner: &str, more: Value) -> std::collections::BTreeMap<String, f64> {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let mut p = json!({"sketch": "Frame", "profile": bar45(), "corner": corner});
+    for (k, v) in more.as_object().unwrap() {
+        p[k] = v.clone();
+    }
+    run(&mut s, "frame.member", p);
+    bodies(&mut s).into_iter().map(|b| (b.0, b.1)).collect()
+}
+
+/// The volumes of a rectangle's bars, largest first.
+fn sorted_volumes(v: &std::collections::BTreeMap<String, f64>) -> Vec<f64> {
+    let mut v: Vec<f64> = v.values().copied().collect();
+    v.sort_by(|a, b| b.total_cmp(a));
+    v
+}
+
+#[test]
+fn a_mitred_rectangle_with_a_gap() {
+    // Each mitre plane moves 1.5 back square to itself: 1.5√2 along each bar at each end.
+    let got = sorted_volumes(&bar_rectangle("mitre", json!({"gap": 3})));
+    let r2 = 2f64.sqrt();
+    let want = [600.0, 600.0, 400.0, 400.0].map(|l| 2025.0 * (l - 3.0 * r2));
+    assert_eq!(got.len(), 4, "{got:?}");
+    for (g, w) in got.iter().zip(want) {
+        assert!(rel(*g, w) < 1e-6, "{got:?} vs {want:?}");
+    }
+}
+
+#[test]
+fn a_butted_rectangle_with_a_gap() {
+    // The 600s run through, unchanged; each 400 stops 2 short of them at both ends.
+    let (plain, gapped) = (bar_rectangle("butt", json!({})), bar_rectangle("butt", json!({"gap": 2})));
+    assert_eq!(plain.keys().collect::<Vec<_>>(), gapped.keys().collect::<Vec<_>>());
+    let mut short = 0;
+    for (name, v) in &plain {
+        let g = gapped[name];
+        if *v > 2025.0 * 500.0 {
+            assert!(rel(g, *v) < 1e-9, "{name}: {g} vs {v}");
+        } else {
+            short += 1;
+            assert!(rel(g, v - 2025.0 * 4.0) < 1e-6, "{name}: {g} vs {}", v - 2025.0 * 4.0);
+        }
+    }
+    assert_eq!(short, 2, "{plain:?}");
+}
+
+#[test]
+fn an_override_gap_beats_the_frames() {
+    // Gap 1 on the frame, 3 at the corner (0, 0): the bottom and left bars lose (3 + 1)/√2 over their two ends, the
+    // top and right ones 2/√2.
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let (bottom, left) = (line_at_y(&s, "Frame", 0.0), line_at_x(&s, "Frame", 0.0));
+    let (top, right) = (line_at_y(&s, "Frame", 400.0), line_at_x(&s, "Frame", 600.0));
+    let mut names = serde_json::Map::new();
+    for (line, name) in [(&bottom, "B"), (&left, "L"), (&top, "T"), (&right, "R")] {
+        names.insert(line.clone(), json!(name));
+    }
+    let corners = json!([{"members": [bottom, left], "kind": "mitre", "gap": 3}]);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": bar45(), "corner": "mitre", "gap": 1, "corners": corners, "names": names}));
+    let r2 = 2f64.sqrt();
+    for (name, l, ends) in [("B", 600.0, 4.0), ("L", 400.0, 4.0), ("T", 600.0, 2.0), ("R", 400.0, 2.0)] {
+        let v = measured(&mut s, name).1;
+        assert!(rel(v, 2025.0 * (l - ends / r2)) < 1e-6, "{name}: {v} vs {}", 2025.0 * (l - ends / r2));
+    }
+}
+
+/// The least distance between bodies `a` and `b`, measured on their exact faces.
+fn distance(s: &mut Session, a: &str, b: &str) -> f64 {
+    let r = run(s, "inspect.clearance", json!({"bodies": [a], "against": [b], "clearance": 50}));
+    assert_eq!(r["overlaps"].as_array().map(Vec::len), Some(0), "{r}");
+    f(&r["near"][0]["distance_mm"])
+}
+
+#[test]
+fn a_coped_t_with_a_gap_stands_off() {
+    // v ends on h's middle, coped to h's round tube grown by 2: its whole end stands 2 off h.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Tee"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [400, 0]], "ids": ["h"]}));
+    run(&mut s, "sketch.line", json!({"points": [[200, 0], [200, 100]], "ids": ["v"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let profile = json!({"kind": "round_tube", "diameter": 40, "wall": 3});
+    let p = json!({"sketch": "Tee", "profile": profile, "corner": "butt", "coped": true, "gap": 2, "names": {"h": "H", "v": "V"}});
+    run(&mut s, "frame.member", p);
+    let d = distance(&mut s, "V", "H");
+    assert!((d - 2.0).abs() < 1e-6, "{d}");
+}
+
+#[test]
+fn crossing_pieces_stand_off_by_the_gap() {
+    // v crosses h, cut into `V` and `V · H`, each fitted to h's squared tool grown by 2: flat, 22 from h's line.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Plus"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [400, 0]], "ids": ["h"]}));
+    run(&mut s, "sketch.line", json!({"points": [[200, -100], [200, 100]], "ids": ["v"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "Plus", "profile": tube(), "corner": "butt", "gap": 2, "names": {"h": "H", "v": "V"}}));
+    for name in ["V", "V · H"] {
+        let b = measured(&mut s, name);
+        let near_h = b.2[1].abs().min(b.3[1].abs());
+        assert!((near_h - 22.0).abs() < 1e-6, "{name}: {b:?}");
+        let d = distance(&mut s, name, "H");
+        assert!((d - 2.0).abs() < 1e-6, "{name}: {d}");
+    }
+    // An overlap is notched, never welded: the brace 30 above the rail builds the same at gap 2 as at gap 0.
+    let notched = |more: Value| {
+        let mut s = rail_and_brace(30.0, "butt", more);
+        bodies(&mut s).into_iter().map(|b| (b.0, b.1)).collect::<Vec<_>>()
+    };
+    let (plain, gapped) = (notched(json!({})), notched(json!({"gap": 2})));
+    assert_eq!(plain.len(), 2, "{plain:?}");
+    assert_eq!(gapped.len(), 2, "{gapped:?}");
+    for ((n, v), (gn, g)) in plain.iter().zip(&gapped) {
+        assert!(n == gn && rel(*g, *v) < 1e-9, "{plain:?} vs {gapped:?}");
+    }
+}
+
+#[test]
+fn the_later_frame_stands_off_an_earlier_one_by_its_gap() {
+    // A post across the earlier rectangle's middle, fitted to its bottom and top tubes: with gap 2 it stops 2 short of
+    // each, 22 from their lines.
+    let mut s = Session::default();
+    earlier_frame(&mut s);
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Later"}));
+    run(&mut s, "sketch.line", json!({"points": [[300, 0], [300, 400]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let p = json!({"sketch": "Later", "profile": square_of(25.0), "corner": "auto", "fit_ends": true, "gap": 2, "body_name": "B"});
+    run(&mut s, "frame.member", p);
+    let b = measured(&mut s, "B");
+    assert!((b.2[1] - 22.0).abs() < 1e-6 && (b.3[1] - 378.0).abs() < 1e-6, "{b:?}");
+}
+
+#[test]
+fn an_overlap_override_with_a_gap_is_refused() {
+    let mut s = Session::default();
+    points(&mut s, &[("R0", [0.0, 0.0, 0.0]), ("R1", [600.0, 0.0, 0.0]), ("B0", [300.0, -200.0, 30.0]), ("B1", [300.0, 200.0, 30.0])]);
+    let corners = json!([{"members": ["pair1", "pair2"], "kind": "auto", "gap": 2}]);
+    let p = json!({"pairs": [pair("R0", "R1"), pair("B0", "B1")], "profile": tube(), "corner": "butt", "corners": corners});
+    let e = s.execute("frame.member", &p).unwrap_err().to_string();
+    assert!(e.contains("gap") && e.contains("overlap"), "{e}");
+    assert!(bodies(&mut s).is_empty());
+}
+
+#[test]
+fn a_gap_out_of_range_is_refused() {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let (bottom, left) = (line_at_y(&s, "Frame", 0.0), line_at_x(&s, "Frame", 0.0));
+    for gap in [-1.0, 1001.0] {
+        let p = json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "gap": gap});
+        let e = s.execute("frame.member", &p).unwrap_err().to_string();
+        assert!(e.contains("`gap`") && e.contains("0…1000 mm"), "{gap}: {e}");
+        let corners = json!([{"members": [bottom, left], "kind": "mitre", "gap": gap}]);
+        let p = json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "corners": corners});
+        let e = s.execute("frame.member", &p).unwrap_err().to_string();
+        assert!(e.contains("gap") && e.contains("0…1000 mm"), "{gap}: {e}");
+    }
+    assert!(bodies(&mut s).is_empty());
+    // A design file is hostile: a saved gap out of range fails the feature with the reason.
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "gap": "1 mm"}));
+    let member = s.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().id;
+    let json_doc = s.doc.to_json();
+    assert!(json_doc.contains(r#""gap": "1 mm""#), "{json_doc}");
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&json_doc.replace(r#""gap": "1 mm""#, r#""gap": "-1 mm""#)).unwrap());
+    let e = reopened.model.result(member).and_then(|r| r.error.clone()).unwrap_or_default();
+    assert!(e.contains("gap") && e.contains("0…1000 mm"), "{e}");
+}
+
+#[test]
+fn a_gap_longer_than_a_member_names_it() {
+    // A 30 mm stub butting a 400: cut 40 back from the 400's near face, nothing of it is left.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "V"}));
+    run(&mut s, "sketch.line", json!({"points": [[400, 0], [0, 0], [0, 30]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let stub = line_off_x_axis(&s, "V");
+    let e = s.execute("frame.member", &json!({"sketch": "V", "profile": tube(), "corner": "butt", "gap": 40})).unwrap_err().to_string();
+    assert!(e.contains(&format!("the member on line `{stub}` was cut away completely")), "{e}");
+    assert!(bodies(&mut s).is_empty());
+}
+
+#[test]
+fn a_coped_gap_beyond_the_corner_radius_never_panics() {
+    // Outer radius 1, gap 5: the cope's outline grows past its corner radii. It builds, each butting tube 5 off.
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let profile = json!({"kind": "rect_tube", "width": 40, "height": 40, "wall": 3, "outer_radius": 1, "inner_radius": 0.5});
+    let r = s.execute("frame.member", &json!({"sketch": "Frame", "profile": profile, "corner": "butt", "coped": true, "gap": 5}));
+    let r = r.unwrap_or_else(|e| panic!("{e}"));
+    let (bottom, left) = bottom_and_left(&mut s);
+    assert_eq!(bodies(&mut s).len(), 4, "{r}");
+    // The nearest points lie on the grown radii, where the distance solver settles to about 1e-6.
+    let d = distance(&mut s, &left.0, &bottom.0);
+    assert!((d - 5.0).abs() < 1e-5, "{d}");
+    // A channel's root radii are inside corners: a gap of 20 can't grow round them, and says so.
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let channel = json!({"kind": "channel", "height": 60, "width": 45, "web": 5, "flange": 6});
+    let r = s.execute("frame.member", &json!({"sketch": "Frame", "profile": channel, "corner": "butt", "coped": true, "gap": 20}));
+    if let Err(e) = r {
+        assert!(e.to_string().contains("weld gap of 20 mm"), "{e}");
+    }
+}

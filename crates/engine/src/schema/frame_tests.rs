@@ -51,6 +51,7 @@ fn schemas_and_the_key_check_agree() {
             "exact_regions",
             "fit_ends",
             "flip",
+            "gap",
             "lines",
             "locate",
             "mirror",

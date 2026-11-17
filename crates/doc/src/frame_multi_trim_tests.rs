@@ -92,7 +92,7 @@ fn box_member() -> (Traced, Vec3, Vec3, Vec3) {
 /// A 40 × 40 tool tube along +Y at x = `x`, from y = -200 to 200.
 fn box_tool_at(x: f64) -> Traced {
     let (a, b) = (Vec3::new(x, -200.0, 0.0), Vec3::new(x, 200.0, 0.0));
-    fit_tool(&square_to(a, b), &box_tube(), 0.0, 400.0, &[]).unwrap()
+    fit_tool(&square_to(a, b), &box_tube(), 0.0, 400.0, &[], 0.0).unwrap()
 }
 
 #[test]
@@ -112,9 +112,9 @@ fn a_round_end_is_fishmouthed() {
     // and top members, fitted to both.
     let tube = round_tube();
     let left = member(&tube, Vec3::ZERO, Vec3::Y * 400.0, -20.0, 420.0);
-    let bottom = fit_tool(&square_to(Vec3::ZERO, Vec3::X * 600.0), &tube, -20.0, 620.0, &[]).unwrap();
+    let bottom = fit_tool(&square_to(Vec3::ZERO, Vec3::X * 600.0), &tube, -20.0, 620.0, &[], 0.0).unwrap();
     let (tl, tr) = (Vec3::new(0.0, 400.0, 0.0), Vec3::new(600.0, 400.0, 0.0));
-    let top = fit_tool(&square_to(tr, tl), &tube, -20.0, 620.0, &[]).unwrap();
+    let top = fit_tool(&square_to(tr, tl), &tube, -20.0, 620.0, &[], 0.0).unwrap();
     let middle = Vec3::new(18.5, 200.0, 0.0);
     let fitted = fit_end(&left, Vec3::ZERO, -Vec3::Y, middle, &[&bottom, &top], "left").unwrap();
     let fitted = fit_end(&fitted, tl, Vec3::Y, middle, &[&bottom, &top], "left").unwrap();
@@ -137,7 +137,7 @@ fn a_far_tool_leaves_the_end_alone() {
 #[test]
 fn a_member_wholly_inside_a_tool_is_cut_away() {
     let (m, end, toward, middle) = box_member();
-    let tool = fit_tool(&square_to(Vec3::new(-50.0, 0.0, 0.0), Vec3::new(400.0, 0.0, 0.0)), &box_tube(), 0.0, 450.0, &[]).unwrap();
+    let tool = fit_tool(&square_to(Vec3::new(-50.0, 0.0, 0.0), Vec3::new(400.0, 0.0, 0.0)), &box_tube(), 0.0, 450.0, &[], 0.0).unwrap();
     let e = fit_end(&m, end, toward, middle, &[&tool], "m").unwrap_err();
     assert!(e.to_string().contains("the member on line `m` was cut away completely"), "{e}");
 }
@@ -147,7 +147,7 @@ fn an_oblique_tool_crossing_mid_span_leaves_the_member_whole() {
     // A 600 mm member crossed at x = 200 by a brace whose box covers the end, far from the end itself.
     let m = member(&box_tube(), Vec3::ZERO, Vec3::X * 600.0, 0.0, 600.0);
     let (a, b) = (Vec3::new(0.0, -200.0, 0.0), Vec3::new(800.0, 600.0, 0.0));
-    let tool = fit_tool(&square_to(a, b), &box_tube(), 0.0, a.dist(b), &[]).unwrap();
+    let tool = fit_tool(&square_to(a, b), &box_tube(), 0.0, a.dist(b), &[], 0.0).unwrap();
     let tb = tool.body.exact_bounds().unwrap();
     assert!(tb.min.x < 600.0 && tb.max.x > 600.0 && tb.min.y < 0.0 && tb.max.y > 0.0, "the tool's box covers the end: {tb:?}");
     let fitted = fit_end(&m, Vec3::X * 600.0, Vec3::X, Vec3::new(300.0, 18.5, 0.0), &[&tool], "m").unwrap();
@@ -163,8 +163,8 @@ fn an_x_brace_crossing_does_not_cut_the_brace() {
     let len = a.dist(b);
     let brace = member(&box_tube(), a, b, 0.0, len);
     let (c, d) = (Vec3::new(0.0, 400.0, 0.0), Vec3::new(600.0, 0.0, 0.0));
-    let other = fit_tool(&square_to(c, d), &box_tube(), 0.0, c.dist(d), &[]).unwrap();
-    let side = fit_tool(&square_to(d, b), &box_tube(), -20.0, 420.0, &[]).unwrap();
+    let other = fit_tool(&square_to(c, d), &box_tube(), 0.0, c.dist(d), &[], 0.0).unwrap();
+    let side = fit_tool(&square_to(d, b), &box_tube(), -20.0, 420.0, &[], 0.0).unwrap();
     let toward = (b - a).normalized().unwrap();
     let (x, _) = frame::member_axes(toward, 0.0).unwrap();
     // In the wall at the brace's middle, where the other diagonal crosses it.
@@ -202,7 +202,7 @@ fn auto_groups_sharing_a_point_fit_across() {
     let drawn: Vec<usize> = (0..segs.len()).collect();
     let built = {
         let plan = crate::frame_layout::plan(&segs, &planes, &drawn, &|_, _| true, &[]).unwrap();
-        crate::eval::frame_member::auto_members(&segs, &box_tube(), (&placed, &|_, _| None), plan, (Some(Vec3::X), &drawn), false).unwrap().0
+        crate::eval::frame_member::auto_members(&segs, &box_tube(), (&placed, &|_, _| None), plan, (Some(Vec3::X), &drawn), false, 0.0).unwrap().0
     };
     let bounds = |m: usize| built[m].as_ref().unwrap().body.exact_bounds().unwrap();
     // The rectangle, laid first (its 600 is the longest tube), makes the origin's corner: a butt of r1 (600) and r4
@@ -247,7 +247,7 @@ fn a_fitted_ends_clip_faces_are_named_for_the_zone() {
     let m = member(&box_tube(), Vec3::ZERO, Vec3::X * 600.0, 0.0, 600.0);
     let d = Vec3::new(3.0_f64.to_radians().cos(), 3.0_f64.to_radians().sin(), 0.0);
     let (a, b) = (Vec3::X * 600.0 - d * 1000.0, Vec3::X * 600.0 + d * 200.0);
-    let tool = fit_tool(&square_to(a, b), &box_tube(), 0.0, a.dist(b), &[]).unwrap();
+    let tool = fit_tool(&square_to(a, b), &box_tube(), 0.0, a.dist(b), &[], 0.0).unwrap();
     let fitted = fit_end(&m, Vec3::X * 600.0, Vec3::X, Vec3::new(300.0, 18.5, 0.0), &[&tool], "m").unwrap();
     let lineage = fitted.lineage.as_ref().unwrap();
     // The operands whose faces are named as the zone's, and a face of the fitted member that comes from one.
@@ -258,4 +258,21 @@ fn a_fitted_ends_clip_faces_are_named_for_the_zone() {
         .collect();
     let from_zone = |o: &kernel::history::FaceOrigin| matches!(o, kernel::history::FaceOrigin::Face { operand, .. } if zone.contains(operand));
     assert!(lineage.history.faces.iter().any(|f| f.origins.iter().any(from_zone)), "{:?}", lineage.operands);
+}
+
+#[test]
+fn a_grown_tool_stands_off_by_the_gap() {
+    // A box tool along +Y at x = 300, cut square at y = 100. Grown by 2 its section reaches 22 from its line and its cut
+    // end stands 2 past y = 100; its uncut start stays where it was built.
+    let (a, b) = (Vec3::new(300.0, -200.0, 0.0), Vec3::new(300.0, 200.0, 0.0));
+    let cut = Cut { origin: Vec3::new(300.0, 100.0, 0.0), normal: -Vec3::Y };
+    let bounds = |gap: f64| fit_tool(&square_to(a, b), &box_tube(), 0.0, 400.0, &[cut], gap).unwrap().body.exact_bounds().unwrap();
+    let (plain, grown) = (bounds(0.0), bounds(2.0));
+    assert!((plain.min.x - 280.0).abs() < 1e-9 && (plain.max.y - 100.0).abs() < 1e-9, "{plain:?}");
+    assert!((grown.min.x - 278.0).abs() < 1e-9 && (grown.max.x - 322.0).abs() < 1e-9, "{grown:?}");
+    assert!((grown.min.z + 22.0).abs() < 1e-9 && (grown.max.z - 22.0).abs() < 1e-9, "{grown:?}");
+    assert!((grown.max.y - 102.0).abs() < 1e-9 && (grown.min.y + 200.0).abs() < 1e-9, "{grown:?}");
+    // The real shape grows too, its radii kept: its round corners 6 + 2 out.
+    let coped = coped_tool(&square_to(a, b), &box_tube(), 0.0, 400.0, &[cut], 2.0).unwrap();
+    assert!(rel(volume(&coped), (44.0 * 44.0 - (4.0 - PI) * 64.0) * 302.0) < MEASURED, "{}", volume(&coped));
 }

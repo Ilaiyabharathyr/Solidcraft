@@ -96,7 +96,7 @@ fn mitre_cuts_on_the_bisector() {
     let c = find_corners(&segs).into_iter().next().unwrap();
     let place = placer(&segs, Vec2::ZERO);
     let (cuts, cope) =
-        corner_cuts(CornerType::Mitre, false, &c, &segs, &segment_length(&segs), &place, &square(-20.0, 20.0), Some(Vec3::X), &[]).unwrap();
+        corner_cuts(CornerType::Mitre, false, 0.0, &c, &segs, &segment_length(&segs), &place, &square(-20.0, 20.0), Some(Vec3::X), &[]).unwrap();
     assert_eq!(cope, None);
     assert_eq!(cuts.len(), 2);
     let d = Vec3::new(FRAC_1_SQRT_2, -FRAC_1_SQRT_2, 0.0);
@@ -118,7 +118,7 @@ fn butt_through_member_is_flush_with_the_other_outer_face() {
     let regions = square(-20.0, 20.0);
     let cut_of = |cuts: &[(usize, bool, Cut)], m: usize| cuts.iter().find(|(k, _, _)| *k == m).map(|(_, _, cut)| *cut).unwrap();
 
-    let (cuts, cope) = corner_cuts(CornerType::Butt, false, &c, &segs, &segment_length(&segs), &place, &regions, Some(Vec3::X), &[]).unwrap();
+    let (cuts, cope) = corner_cuts(CornerType::Butt, false, 0.0, &c, &segs, &segment_length(&segs), &place, &regions, Some(Vec3::X), &[]).unwrap();
     assert_eq!((cuts.len(), cope), (2, None));
     // T is the 600 member: it keeps x ≥ −20, and U keeps y ≥ 20.
     let t = cut_of(&cuts, 0);
@@ -126,7 +126,7 @@ fn butt_through_member_is_flush_with_the_other_outer_face() {
     let u = cut_of(&cuts, 1);
     assert!(close(u.normal, Vec3::Y) && (u.origin.y - 20.0).abs() < 1e-9, "{u:?}");
 
-    let (cuts, _) = corner_cuts(CornerType::Butt, true, &c, &segs, &segment_length(&segs), &place, &regions, Some(Vec3::X), &[]).unwrap();
+    let (cuts, _) = corner_cuts(CornerType::Butt, true, 0.0, &c, &segs, &segment_length(&segs), &place, &regions, Some(Vec3::X), &[]).unwrap();
     // Flipped, T is the 400 member: it keeps y ≥ −20, and U keeps x ≥ 20.
     let t = cut_of(&cuts, 1);
     assert!(close(t.normal, Vec3::Y) && (t.origin.y + 20.0).abs() < 1e-9, "{t:?}");
@@ -134,7 +134,8 @@ fn butt_through_member_is_flush_with_the_other_outer_face() {
     assert!(close(u.normal, Vec3::X) && (u.origin.x - 20.0).abs() < 1e-9, "{u:?}");
 
     // Coped Butt: T's cut only, and the pair (T, U) to cope.
-    let (cuts, cope) = corner_cuts(CornerType::CopedButt, false, &c, &segs, &segment_length(&segs), &place, &regions, Some(Vec3::X), &[]).unwrap();
+    let (cuts, cope) =
+        corner_cuts(CornerType::CopedButt, false, 0.0, &c, &segs, &segment_length(&segs), &place, &regions, Some(Vec3::X), &[]).unwrap();
     assert_eq!(cuts.len(), 1);
     assert_eq!(cuts[0].0, 0);
     assert_eq!(cope, Some((0, 1)));
@@ -147,7 +148,7 @@ fn none_in_line_and_too_sharp() {
     let place = placer(&place_ell, Vec2::ZERO);
     let regions = square(-20.0, 20.0);
     assert_eq!(
-        corner_cuts(CornerType::None, false, &c, &place_ell, &segment_length(&place_ell), &place, &regions, None, &[]).unwrap(),
+        corner_cuts(CornerType::None, false, 0.0, &c, &place_ell, &segment_length(&place_ell), &place, &regions, None, &[]).unwrap(),
         (vec![], None)
     );
 
@@ -155,16 +156,19 @@ fn none_in_line_and_too_sharp() {
     let c = find_corners(&straight).into_iter().next().unwrap();
     assert!((interior(&straight, &c) - PI).abs() < 1e-12);
     let place = placer(&straight, Vec2::ZERO);
-    assert_eq!(corner_cuts(CornerType::Butt, false, &c, &straight, &segment_length(&straight), &place, &regions, None, &[]).unwrap(), (vec![], None));
+    assert_eq!(
+        corner_cuts(CornerType::Butt, false, 0.0, &c, &straight, &segment_length(&straight), &place, &regions, None, &[]).unwrap(),
+        (vec![], None)
+    );
 
     let p = (12.5, -0.001);
     let (s, co) = (3f64.to_radians().sin(), 3f64.to_radians().cos());
     let sharp = vec![seg("a", p, (p.0 + 100.0, p.1)), seg("b", p, (p.0 + 100.0 * co, p.1 + 100.0 * s))];
     let c = find_corners(&sharp).into_iter().next().unwrap();
     let place = placer(&sharp, Vec2::ZERO);
-    let err = corner_cuts(CornerType::Mitre, false, &c, &sharp, &segment_length(&sharp), &place, &regions, None, &[]).unwrap_err();
+    let err = corner_cuts(CornerType::Mitre, false, 0.0, &c, &sharp, &segment_length(&sharp), &place, &regions, None, &[]).unwrap_err();
     assert_eq!(err.to_string(), "Corner at (12.5, 0, 0) is too sharp to finish");
-    assert!(corner_cuts(CornerType::None, false, &c, &sharp, &segment_length(&sharp), &place, &regions, None, &[]).is_ok());
+    assert!(corner_cuts(CornerType::None, false, 0.0, &c, &sharp, &segment_length(&sharp), &place, &regions, None, &[]).is_ok());
 }
 
 #[test]
@@ -189,7 +193,7 @@ fn extension_reaches_every_point_of_each_cut() {
     let built = |segs: &[(String, Vec3, Vec3)], kind| {
         let c = find_corners(segs).into_iter().next().unwrap();
         let place = placer(segs, Vec2::ZERO);
-        let (cuts, _) = corner_cuts(kind, false, &c, segs, &segment_length(segs), &place, &regions, None, &[]).unwrap();
+        let (cuts, _) = corner_cuts(kind, false, 0.0, &c, segs, &segment_length(segs), &place, &regions, None, &[]).unwrap();
         cuts.iter()
             .map(|(m, s, cut)| extension(&place(*m, c.point), &regions, c.point, away(segs, (*m, *s)).unwrap(), cut).unwrap())
             .collect::<Vec<_>>()

@@ -1,9 +1,11 @@
 //! Multi-trim (#4003 `frame.multi_trim`): a tube cut by the shapes of other tubes — end cuts, copes, notches in a
 //! tube's middle, overlaps and fits to earlier frames.
 //!
-//! A tube end is cut to the tubes it meets, as a fabricator fits it. The tool is the other tube with its hole filled and its corner radii squared off, built from its section ([`squared_outline`]): a fitted
-//! end stops flat on a flat side, and is an exact fishmouth on a round tube. A Coped frame (#17854) cuts to the
-//! other tube's real shape instead, its radii kept ([`coped_tool`]). Exact geometry only, never a mesh.
+//! A tube end is cut to the tubes it meets, as a fabricator fits it. The tool is the other tube with its hole filled
+//! and its corner radii squared off, built from its section ([`squared_outline`]): a fitted end stops flat on a flat
+//! side, and is an exact fishmouth on a round tube. A Coped frame (#17854) cuts to the other tube's real shape
+//! instead, its radii kept ([`coped_tool`]). A weld gap grows the tool, so the end stands off by it. Exact geometry
+//! only, never a mesh.
 
 use solidcore_record::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
 use solidcraft_geom::prelude::*;
@@ -65,18 +67,53 @@ fn meet((a, b): (Vec2, Vec2), (c, d): (Vec2, Vec2)) -> Option<Vec2> {
 }
 
 /// A tube's cutting tool: the squared outline extruded on `plane` from `start` to `end` (as the tube is), then
-/// the same plane cuts as the tube (stage 1 Cut list), traced as a numbered tool.
-pub fn fit_tool(plane: &Plane, regions: &[Region2], start: f64, end: f64, cuts: &[Cut]) -> Result<Traced> {
-    tool(plane, &squared_outline(regions), start, end, cuts)
+/// the same plane cuts as the tube (stage 1 Cut list), traced as a numbered tool. A weld gap `gap` (mm) grows it by
+/// that much all round ([`tool`]).
+pub fn fit_tool(plane: &Plane, regions: &[Region2], start: f64, end: f64, cuts: &[Cut], gap: f64) -> Result<Traced> {
+    tool(plane, &squared_outline(regions), start, end, cuts, gap)
 }
 
 /// [`fit_tool`] of the tube's real shape ([`filled_outline`]): what a Coped frame (#17854) cuts a tube to.
-pub fn coped_tool(plane: &Plane, regions: &[Region2], start: f64, end: f64, cuts: &[Cut]) -> Result<Traced> {
-    tool(plane, &filled_outline(regions), start, end, cuts)
+pub fn coped_tool(plane: &Plane, regions: &[Region2], start: f64, end: f64, cuts: &[Cut], gap: f64) -> Result<Traced> {
+    tool(plane, &filled_outline(regions), start, end, cuts, gap)
 }
 
-/// `outline` extruded on `plane` from `start` to `end`, then cut by `cuts`, traced as a numbered tool.
-fn tool(plane: &Plane, outline: &[Region2], start: f64, end: f64, cuts: &[Cut]) -> Result<Traced> {
+/// `outline` extruded on `plane` from `start` to `end`, then cut by `cuts`, traced as a numbered tool. A weld gap
+/// `gap` (mm) grows the outline outward by it and moves each cut out by it, built out far enough to reach the moved
+/// cut, so the tool stands `gap` clear of the tube everywhere, its own cut ends included; at 0 the tube as it is.
+fn tool(plane: &Plane, outline: &[Region2], start: f64, end: f64, cuts: &[Cut], gap: f64) -> Result<Traced> {
+    if gap > 0.0 {
+        // The kernel's message speaks of a taper: say what the gap needs.
+        let refuse = |_| {
+            DocError::Invalid(format!(
+                "not supported yet: a weld gap of {gap} mm round this member profile, whose outline can't grow by it (an inside \
+                 corner's radius smaller than the gap, or an arc meeting a side at a sharp corner)"
+            ))
+        };
+        let grown = outline
+            .iter()
+            .map(|r| {
+                let ccw = if r.outer.is_ccw() { r.outer.clone() } else { r.outer.reversed() };
+                Ok(Region2 {
+                    outer: Loop2 { segs: kernel::offset_loop(&ccw, gap).map_err(refuse)?.into_iter().flatten().collect() },
+                    holes: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // A cut keeping the tool's far side (its normal along the extrusion) trims its start. Moved out by the gap, it
+        // meets the grown section up to twice the gap over its slope further out.
+        let (mut start, mut end) = (start, end);
+        let z = plane.normal();
+        for c in cuts {
+            let along = c.normal.dot(z);
+            if along.abs() > 1e-9 {
+                let more = 2.0 * gap / along.abs();
+                if along > 0.0 { start -= more } else { end += more }
+            }
+        }
+        let moved: Vec<Cut> = cuts.iter().map(|c| Cut { origin: c.origin - c.normal * gap, normal: c.normal }).collect();
+        return tool(plane, &grown, start, end, &moved, 0.0);
+    }
     let mut bodies = kernel::extrude(plane, outline, start, end)?;
     let (Some(mut body), true) = (bodies.pop(), bodies.is_empty()) else {
         return Err(DocError::Invalid("a tube's fitting tool is not one solid".into()));

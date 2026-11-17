@@ -117,13 +117,28 @@ impl From<RawOverride> for CornerOverride {
     }
 }
 
-/// An override as the build reads it: its record's lines in order, its type, and Flip, whether its first line is not
-/// the one today's rules put first of its first two (`eval_frame`'s `overrides`).
+/// An override as the build reads it: its record's lines in order, its type, Flip, whether its first line is not
+/// the one today's rules put first of its first two, and its weld gap (mm), the record's or else the frame's
+/// (`eval_frame`'s `overrides`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Override {
     pub members: Vec<String>,
     pub corner: CornerType,
     pub flip: bool,
+    pub gap: f64,
+}
+
+/// The largest weld gap (mm).
+pub const MAX_GAP: f64 = 1000.0;
+
+/// Weld gap `g` (mm) when it is 0…[`MAX_GAP`]; else why not, `what` naming it.
+pub fn checked_gap(g: f64, what: &str) -> Result<f64> {
+    if (0.0..=MAX_GAP).contains(&g) { Ok(g) } else { Err(DocError::Invalid(format!("{what} must be 0…{MAX_GAP} mm, not {g} mm"))) }
+}
+
+/// `cut` moved `by` (mm) into the side it keeps: a welded end set back for its weld gap. At 0 the cut as it is.
+fn set_back(cut: Cut, by: f64) -> Cut {
+    if by > 0.0 { Cut { origin: cut.origin + cut.normal * by, normal: cut.normal } } else { cut }
 }
 
 /// How close (mm) two line ends must be to meet.
@@ -310,10 +325,13 @@ pub fn reach(plane: &Plane, regions: &[Region2], point: Vec3, dir: Vec3) -> f64 
 /// The cuts at one corner: (member index, at_start, Cut) for each member it cuts. Coped's U gets
 /// no plane cut here; it returns T's cut only, plus the pair (t, u) for coping. `placed(member,
 /// at)` is the member's section plane placed square to its line at `at`; `length`, `sketch_x` and
-/// `drawn` pick the member that runs through ([`through`]).
+/// `drawn` pick the member that runs through ([`through`]). The weld gap `gap` (mm) sets each
+/// mitre cut back half of it, square to the mitre plane, and a butt's U cut all of it; T keeps its
+/// cut.
 pub fn corner_cuts(
     kind: CornerType,
     flip: bool,
+    gap: f64,
     corner: &Corner,
     segments: &[(String, Vec3, Vec3)],
     length: &dyn Fn(usize) -> f64,
@@ -335,7 +353,8 @@ pub fn corner_cuts(
     let dir = |e: (usize, bool)| away(segments, e).ok_or_else(|| DocError::Invalid(format!("member {} of a corner has no length", e.0)));
     if kind == CornerType::Mitre {
         let n = (dir(e0)? - dir(e1)?).normalized().ok_or_else(|| DocError::Invalid("a mitre corner has no bisector".into()))?;
-        return Ok((vec![(e0.0, e0.1, Cut { origin: p, normal: n }), (e1.0, e1.1, Cut { origin: p, normal: -n })], None));
+        let (c0, c1) = (Cut { origin: p, normal: n }, Cut { origin: p, normal: -n });
+        return Ok((vec![(e0.0, e0.1, set_back(c0, gap / 2.0)), (e1.0, e1.1, set_back(c1, gap / 2.0))], None));
     }
     let (te, ue) = if (through(segments, corner, length, sketch_x, drawn) == 0) != flip { (e0, e1) } else { (e1, e0) };
     let (t, u) = (-dir(te)?, dir(ue)?);
@@ -350,19 +369,19 @@ pub fn corner_cuts(
         return Ok((vec![(te.0, te.1, t_cut)], Some((te.0, ue.0))));
     }
     let n = across(u, t)?;
-    let u_cut = Cut { origin: p + n * finite(reach(&placed(te.0, p), regions, p, n))?, normal: n };
+    let u_cut = set_back(Cut { origin: p + n * finite(reach(&placed(te.0, p), regions, p, n))?, normal: n }, gap);
     Ok((vec![(te.0, te.1, t_cut), (ue.0, ue.1, u_cut)], None))
 }
 
 /// Auto's angled butt (#4003 spec A5) at `corner`: the `long` member cut square to its own line at the corner, and
 /// the `short` one on that same plane, keeping its own side, so it sits on the long member's square end. Nothing when
-/// either is not at the corner or the long one has no length.
-pub fn angled_butt_cuts(corner: &Corner, long: usize, short: usize, segments: &[(String, Vec3, Vec3)]) -> Vec<(usize, bool, Cut)> {
+/// either is not at the corner or the long one has no length. The weld gap `gap` (mm) sets the short one's cut back.
+pub fn angled_butt_cuts(corner: &Corner, long: usize, short: usize, segments: &[(String, Vec3, Vec3)], gap: f64) -> Vec<(usize, bool, Cut)> {
     let end = |m: usize| corner.ends.iter().copied().find(|e| e.0 == m);
     let (Some(l), Some(s)) = (end(long), end(short)) else { return Vec::new() };
     let Some(w) = away(segments, l) else { return Vec::new() };
     let p = corner.point;
-    vec![(l.0, l.1, Cut { origin: p, normal: w }), (s.0, s.1, Cut { origin: p, normal: -w })]
+    vec![(l.0, l.1, Cut { origin: p, normal: w }), (s.0, s.1, set_back(Cut { origin: p, normal: -w }, gap))]
 }
 
 /// How far past its corner a member must be built for `cut` to cross its whole section, plus

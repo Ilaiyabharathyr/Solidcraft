@@ -29,7 +29,7 @@ use solidcraft_doc::frame::{self, Anchor, CornerOverride, CornerType, MAX_MEMBER
 use super::check::{keyed, located, whole};
 use super::motion::require;
 use super::sketch_ends::SketchTarget;
-use super::types::{AngleExpr, GeoRefParam, Point2, ProfilesParam, SketchRef, StringList, not_blank_pattern, present};
+use super::types::{AngleExpr, GeoRefParam, LengthExpr, Point2, ProfilesParam, SketchRef, StringList, not_blank_pattern, present};
 use crate::params;
 
 /// The words `Anchor` is spelled with, as the handlers' message lists them.
@@ -511,7 +511,15 @@ pub fn corner_entry(v: &Value) -> Option<(CornerOverride, Option<bool>)> {
         None | Some(Value::Null) => None,
         Some(f) => Some(f.as_bool()?),
     };
-    Some((serde_json::from_value(v.clone()).ok()?, flip))
+    // `gap` as any length parameter: a number or an expression.
+    let gap = match v.get("gap") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(params::expr(v, "gap")?),
+    };
+    let mut v = v.clone();
+    v.as_object_mut()?.remove("gap");
+    let entry: CornerOverride = serde_json::from_value(v).ok()?;
+    Some((CornerOverride { gap, ..entry }, flip))
 }
 
 impl<'de> Deserialize<'de> for CornersParam {
@@ -669,6 +677,31 @@ impl JsonSchema for MemberAngle {
     }
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         generator.subschema_for::<AngleExpr>()
+    }
+}
+
+/// `gap` as `frame.member` reads it: a length or an expression, with its message. Whether the expression evaluates as
+/// a length, and within 0…1000 mm, is the handler's to check.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemberGap(pub Expr);
+
+impl<'de> Deserialize<'de> for MemberGap {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        params::expr(&wrap("gap", Value::deserialize(d)?), "gap")
+            .map(MemberGap)
+            .ok_or_else(|| D::Error::custom(whole("`gap` must be a length expression")))
+    }
+}
+
+impl JsonSchema for MemberGap {
+    fn schema_name() -> Cow<'static, str> {
+        "MemberGap".into()
+    }
+    fn inline_schema() -> bool {
+        true
+    }
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        generator.subschema_for::<LengthExpr>()
     }
 }
 
@@ -857,6 +890,12 @@ pub struct FrameMemberKeys {
     /// Corners finished their own way, each named by its members' (2 to 1000) line or pair ids.
     #[serde(default)]
     pub corners: Option<CornersParam>,
+    /// The weld gap left at every welded end (0 to 1000 mm, a length or an expression): each mitre plane moves half
+    /// of it back along its member, a butting end stops this far off the member it meets, and every fitted or coped
+    /// end, a crossing's pieces' included, stands this far off; through members keep their length, and tubes notched
+    /// where they overlap take none. A corner's own `gap` takes precedence. Default: 0.
+    #[serde(default)]
+    pub gap: Option<MemberGap>,
     /// How far the profile turns about the line, a number of degrees or an expression. Default:
     /// 0, which puts its y as near world up as the line allows (a vertical member's x along
     /// world X).

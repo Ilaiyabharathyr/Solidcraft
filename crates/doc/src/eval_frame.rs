@@ -56,14 +56,16 @@ fn pieces_by_line(st: &ModelState, f: &Feature, e: DocError) -> DocError {
 
 /// [`evaluate`], its errors naming pieces by their ids.
 fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut ModelState) -> Result<()> {
-    let FeatureKind::FrameMember { body_name, names, corner, flip, corners, fit_ends, .. } = &f.kind else {
+    let FeatureKind::FrameMember { body_name, names, corner, flip, corners, fit_ends, gap, .. } = &f.kind else {
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
     let Layout { segments, regions, description, at, turn, sketch_x, drawn, planes } = layout(doc, vals, f, st)?;
     if corners.iter().flat_map(|c| &c.members).any(|m| m.feature.as_ref().is_some_and(|n| *n != f.name)) {
         return Err(DocError::Invalid("not supported yet: a corner with a member of another frame".into()));
     }
-    let corners = &overrides(*corner, (&segments, &planes, &drawn, sketch_x), corners);
+    let gap = gap_value(vals, gap.as_ref(), "`gap`")?;
+    let records = corners;
+    let corners = &overrides(*corner, (&segments, &planes, &drawn, sketch_x), records, Some((vals, gap)))?;
     let coped = copes(&f.kind);
     let (mut plan, crossing) = plans(*corner, &segments, &planes, corners, &drawn)?;
     // The plan that cuts the lines into pieces: Auto's, or the crossings' of a Mitre, Butt or Coped frame.
@@ -73,6 +75,9 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
     // overlap, and each member's line (a piece's, its line's).
     let resolving = !corner.is_none();
     let overlap_overrides = overlap_overrides(*corner, &segments, &planes, corners);
+    if overlap_overrides.iter().any(|&k| records.get(k).is_some_and(|r| r.gap.is_some())) {
+        return Err(DocError::Invalid("A corner override of tubes that overlap takes no `gap`: an overlap is notched, not welded".into()));
+    }
     let lines: Vec<String> = match cutting {
         Some(p) => p.pieces.iter().map(|pc| segments.get(pc.parent).map_or_else(|| pc.id.clone(), |s| s.0.clone())).collect(),
         None => segments.iter().map(|s| s.0.clone()).collect(),
@@ -94,7 +99,9 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
     // Fit Ends to Earlier Frames (None never fits): the earlier Frame Members' tubes and their copies, as cutting
     // tools, and this frame's own tubes laid before each free end (ruling A14), whether or not an earlier one exists.
     let fits = *fit_ends && !corner.is_none();
-    let (earlier, earlier_ids, earlier_reach) = if fits { earlier::earlier_tools(doc, vals, f, st)? } else { Default::default() };
+    let (earlier, earlier_ids, earlier_reach) = if fits { earlier::earlier_tools(doc, vals, f, st, 0.0)? } else { Default::default() };
+    // What free ends are fitted to stands off by this frame's gap: the earlier tubes grown by it.
+    let grown_earlier = if fits && gap > 0.0 { Some(earlier::earlier_tools(doc, vals, f, st, gap)?.0) } else { None };
     let centre = frame::anchor_point(&regions, frame::Anchor::Center);
     if let Some(plan) = plan.as_mut() {
         free_corners(plan, &earlier, &placed, centre);
@@ -121,6 +128,7 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
             &placed,
             (plan.clone().or(crossing.clone()), &planes, &overlap_overrides),
             (sketch_x, &drawn),
+            gap,
         )?
     } else {
         Vec::new()
@@ -129,11 +137,23 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
     if fits && let Some(plan) = plan.as_mut() {
         // A chain corner that turns Free changes only its chain's members' ends, never a group member's (whose tools
         // it builds): the tools built stay right.
-        let tool = |k: usize| member_tool(&segments, &regions, &placed, &own_ends, k, coped);
+        let tool = |k: usize| member_tool(&segments, &regions, &placed, &own_ends, k, coped, 0.0);
         if free_chains(plan, &earlier, (&placed, centre), &|k, p| near_with(&own_ends, k, p), &tool, &mut tools, &segments)? {
-            own_ends =
-                frame_ends(&f.kind, corners, &segments, &regions, &placed, (Some(plan.clone()), &planes, &overlap_overrides), (sketch_x, &drawn))?;
+            own_ends = frame_ends(
+                &f.kind,
+                corners,
+                &segments,
+                &regions,
+                &placed,
+                (Some(plan.clone()), &planes, &overlap_overrides),
+                (sketch_x, &drawn),
+                gap,
+            )?;
         }
+    }
+    // Those tools are the tubes as they are; a free end is fitted to them grown by the gap.
+    if gap > 0.0 {
+        tools = vec![None; segments.len()];
     }
     let unjointed = if fits { unjointed_ends(&f.kind, &segments, plan.as_ref().or(crossing.as_ref()), (&planes, &drawn)) } else { Vec::new() };
     // This frame's own members, for its free ends: their laying order (Auto's, else the drawing order, never the
@@ -157,14 +177,14 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
     // Only an Auto frame builds by Auto's rules; an Auto override elsewhere is the frame's own type (corner_ends).
     // The cut ends each member is built with ([`frame_ends`] gives the same), for the tools of tubes that overlap others.
     let (mut cut, dropped, ends) = if let Some(plan) = plan {
-        auto_members(&segments, &regions, (&placed, &unreversed), plan, (sketch_x, &drawn), coped)?
+        auto_members(&segments, &regions, (&placed, &unreversed), plan, (sketch_x, &drawn), coped, gap)?
     } else if corner.is_none() && corners.is_empty() {
         // A frame with no corners to finish is built exactly as it always was.
         (Vec::new(), Vec::new(), Vec::new())
     } else {
         let tie = (planes.as_slice(), sketch_x, drawn.as_slice());
         let overrides = (corners.as_slice(), overlap_overrides.as_slice());
-        let ((ends, copes), fits) = corner_ends(&segments, &regions, &placed, (*corner, *flip), overrides, tie, crossing.as_ref(), coped)?;
+        let ((ends, copes), fits) = corner_ends(&segments, &regions, &placed, (*corner, *flip, gap), overrides, tie, crossing.as_ref(), coped)?;
         let mut cut = cut_members(&segments, &regions, (&placed, &|_, _| None), &ends, copes)?;
         let mut dropped = vec![false; segments.len()];
         fit_members(&segments, &regions, &placed, &ends, &fits, (&mut cut, &crossed, &mut dropped), coped)?;
@@ -189,14 +209,16 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
     let inside = regions.first().map(|r| r.interior_point()).ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;
     let middle = |m: usize| segments.get(m).map_or(Vec3::ZERO, |(_, a, b)| placed(m, (*a + *b) * 0.5).to_world(inside));
     let near = |k: usize, p: Vec3| near_with(&own_ends, k, p);
-    let tool = |k: usize| member_tool(&segments, &regions, &placed, &own_ends, k, coped);
-    fit_to_earlier(&mut made, &segments, &unjointed, &earlier, &mut Own { laid, near: &near, tool: &tool, tools }, &middle, &crossed)?;
+    let tool = |k: usize| member_tool(&segments, &regions, &placed, &own_ends, k, coped, gap);
+    let fitting = grown_earlier.as_deref().unwrap_or(&earlier);
+    fit_to_earlier(&mut made, &segments, &unjointed, fitting, &mut Own { laid, near: &near, tool: &tool, tools }, &middle, &crossed)?;
     let mut split = if resolving {
         // How far each member reaches from its line: its section, and its ends built past the line's.
         let section = section_reach(&regions, at);
         let reach: Vec<f64> =
             (0..segments.len()).map(|m| section + ends.get(m).map_or(0.0, |e| e.iter().flatten().map(|c| c.1).fold(0.0, f64::max))).collect();
-        let tool = |k: usize| member_tool(&segments, &regions, &placed, &ends, k, coped);
+        // Overlaps are notched, never welded: no gap.
+        let tool = |k: usize| member_tool(&segments, &regions, &placed, &ends, k, coped, 0.0);
         let overrides = (corners.as_slice(), overlap_overrides.as_slice());
         let earlier = Earlier { tools: &earlier, reach: &earlier_reach };
         resolve_overlaps(&mut made, &segments, (&laying, &lines, &joined, &reach), overrides, &earlier, &tool)?
@@ -256,6 +278,11 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
 /// ([`member_tool`]).
 pub(super) fn copes(kind: &FeatureKind) -> bool {
     matches!(kind, FeatureKind::FrameMember { coped: true, corner, .. } if !corner.is_none())
+}
+
+/// A weld gap as saved (none: 0), evaluated and checked, `what` naming it: a design file is hostile input.
+fn gap_value(vals: &BTreeMap<String, Value>, e: Option<&crate::Expr>, what: &str) -> Result<f64> {
+    e.map_or(Ok(0.0), |e| frame::checked_gap(val(vals, e, Kind::Length)?, what))
 }
 
 /// What cuts a tube where it overlaps another ([`resolve_overlaps`]): one of this frame's members, or an earlier Frame
@@ -489,9 +516,12 @@ fn one_solid(mut bodies: Vec<kernel::Body>, id: &str) -> Result<kernel::Body> {
 /// a Butt or Coped corner, cut square to its own line).
 type CutEnd = (Option<Cut>, f64, bool);
 
-/// Each member's cut at its [start, end] and each Coped corner's (T, U, corner point, n). Shared
+/// Each member's cut at its [start, end] and each Coped corner's (T, U, corner point, n, weld gap). Shared
 /// by [`cut_members`] and [`member_section`], so both see the same corners.
-type CornerEnds = (Vec<[Option<CutEnd>; 2]>, Vec<(usize, usize, Vec3, Vec3)>);
+type CornerEnds = (Vec<[Option<CutEnd>; 2]>, Vec<(usize, usize, Vec3, Vec3, f64)>);
+
+/// An end cut to fit ([`fit_members`]) and the weld gap it stands off by.
+type GapFit = (Fit, f64);
 
 /// What breaks a tie for which member runs through: the sketch's X axis (`None`: a 3D sketch) and
 /// each member's place in the sketch's drawing order.
@@ -506,18 +536,19 @@ type Tie<'a> = (Option<Vec3>, &'a [usize]);
 /// line (its place in the laying order, its line's length for which member of a butt runs through), a corner is named by
 /// its two lines (crossings rule: an override names lines, so one at a cut line's far end still holds), and a
 /// crossing's override names no corner. Nor does an overlap's (`overlaps`, [`overlap_overrides`]). Under `coped`
-/// ([`copes`]) every Butt, the frame's or an override's, is cut as Coped Butt.
+/// ([`copes`]) every Butt, the frame's or an override's, is cut as Coped Butt. `finish`: the frame's type, Flip and
+/// weld gap; a corner an override names takes the override's, and every fitted end the frame's gap.
 fn corner_ends(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
     placed: &dyn Fn(usize, Vec3) -> Plane,
-    finish: (CornerType, bool),
+    finish: (CornerType, bool, f64),
     (overrides, overlaps): (&[Override], &[usize]),
     (planes, sketch_x, drawn): (&[MemberPlane], Option<Vec3>, &[usize]),
     crossing: Option<&Plan>,
     coped: bool,
-) -> Result<(CornerEnds, Vec<Fit>)> {
-    let finish = (finish.0.coped(coped), finish.1);
+) -> Result<(CornerEnds, Vec<GapFit>)> {
+    let finish = (finish.0.coped(coped), finish.1, finish.2);
     // A design file is hostile input: the command checks the list, a file may not.
     if overrides.len() > MAX_MEMBERS {
         return Err(DocError::Invalid(format!("at most {MAX_MEMBERS} corner overrides in one feature")));
@@ -556,20 +587,20 @@ fn corner_ends(
         let k = at.get(&pair(a, b)).ok_or_else(|| DocError::Invalid("A corner override is not at a corner of the frame".into()))?;
         if let Some(f) = finishes.get_mut(*k) {
             // An Auto override on a frame that isn't Auto is the frame's own type, with its own Flip.
-            *f = (if o.corner == CornerType::Auto { finish.0 } else { o.corner.coped(coped) }, o.flip);
+            *f = (if o.corner == CornerType::Auto { finish.0 } else { o.corner.coped(coped) }, o.flip, o.gap);
         }
     }
     // Each member's cut ends, and each Coped Butt's (T, U): U loses T's filled shape once every plane cut is made.
     let mut out: CornerEnds = (vec![[None, None]; segments.len()], Vec::new());
-    for (c, (kind, flip)) in corners.iter().zip(finishes) {
-        let cuts = frame_corners::corner_cuts(kind, flip, c, segments, &length, placed, regions, sketch_x, drawn)?;
-        add_corner(&mut out, c, kind.flips(), cuts, segments, regions, placed)?;
+    for (c, (kind, flip, gap)) in corners.iter().zip(finishes) {
+        let cuts = frame_corners::corner_cuts(kind, flip, gap, c, segments, &length, placed, regions, sketch_x, drawn)?;
+        add_corner(&mut out, c, kind.flips(), cuts, segments, regions, placed, gap)?;
     }
     // None leaves every point as it is. No override names a point of three or more ends (Auto's alone).
     let (crowded, fits) = if finish.0.is_none() { (Vec::new(), Vec::new()) } else { stage_fits(segments, planes, drawn, crossing) };
     for c in &crowded {
-        let cuts = frame_corners::corner_cuts(finish.0, finish.1, c, segments, &length, placed, regions, sketch_x, drawn)?;
-        add_corner(&mut out, c, finish.0.flips(), cuts, segments, regions, placed)?;
+        let cuts = frame_corners::corner_cuts(finish.0, finish.1, finish.2, c, segments, &length, placed, regions, sketch_x, drawn)?;
+        add_corner(&mut out, c, finish.0.flips(), cuts, segments, regions, placed, finish.2)?;
     }
     for f in &fits {
         if let Some(e) = out.0.get_mut(f.member).and_then(|e| e.get_mut(usize::from(!f.at_start)))
@@ -578,7 +609,9 @@ fn corner_ends(
             *e = Some((None, 0.0, false));
         }
     }
-    Ok((out, fits))
+    // ponytail: every fit stands off by the frame's gap, never a crossing override's own `gap`; carry the override's
+    // gap on the plan's fits if one is wanted there.
+    Ok((out, fits.into_iter().map(|f| (f, finish.2)).collect()))
 }
 
 /// Under Mitre, Butt and Coped (#4003), each point where three or more members end and none passes through
@@ -705,7 +738,7 @@ fn joints(
 
 /// A corner's cuts as [`frame_corners::corner_cuts`] gives them, put into `ends` (each cut end with how far past
 /// its line's end it is built) and `copes`. `butt`: the first cut is a butt's T's, square to its line, which must not
-/// run back past U's far end, and is the one cut end an End Cap may go on.
+/// run back past U's far end, and is the one cut end an End Cap may go on. `gap`: the weld gap a cope stands off by.
 fn add_corner(
     (ends, copes): &mut CornerEnds,
     c: &Corner,
@@ -714,6 +747,7 @@ fn add_corner(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
     placed: &dyn Fn(usize, Vec3) -> Plane,
+    gap: f64,
 ) -> Result<()> {
     let id = |m: usize| segments.get(m).map_or("", |s| s.0.as_str());
     for (k, (m, at_start, cut)) in cuts.into_iter().enumerate() {
@@ -758,7 +792,7 @@ fn add_corner(
     if let Some(end) = ends.get_mut(u).and_then(|e| e.get_mut(usize::from(!ue.1))) {
         *end = Some((None, ext, false));
     }
-    copes.push((t, u, c.point, n));
+    copes.push((t, u, c.point, n, gap));
     Ok(())
 }
 
@@ -772,7 +806,7 @@ fn cut_members(
     regions: &[Region2],
     (placed, unreversed): Placing,
     ends: &[[Option<CutEnd>; 2]],
-    copes: Vec<(usize, usize, Vec3, Vec3)>,
+    copes: Vec<(usize, usize, Vec3, Vec3, f64)>,
 ) -> Result<Vec<Option<Traced>>> {
     let id = |m: usize| segments.get(m).map_or("", |s| s.0.as_str());
     // Member m built out at its cut ends and cut there, from `regions`.
@@ -804,12 +838,16 @@ fn cut_members(
         }
         out.push(Some(t));
     }
-    // Copes after every plane cut. T filled is T built from its outlines alone, holes closed;
-    // U keeps its largest piece on its own side of T, its centre of mass on U's side (what lies
+    // Copes after every plane cut. T filled is T built from its outlines alone, holes closed (with a weld gap, grown by
+    // it: [`member_tool`]); U keeps its largest piece on its own side of T, its centre of mass on U's side (what lies
     // past T, and slivers on T's far side, go).
     let outlines = frame_multi_trim::filled_outline(regions);
-    for (t, u, point, n) in copes {
-        let filled = crate::lineage::numbered_tool(build(t, &outlines)?.body);
+    for (t, u, point, n, gap) in copes {
+        let filled = if gap > 0.0 {
+            member_tool(segments, regions, placed, ends, t, true, gap)?
+        } else {
+            crate::lineage::numbered_tool(build(t, &outlines)?.body)
+        };
         let gone = || DocError::Invalid(format!("the member on line `{}` was cut away completely", id(u)));
         let traced = out.get_mut(u).and_then(Option::as_mut).ok_or_else(gone)?;
         let cut = kernel::boolean(&traced.body, &filled.body, BoolOp::Cut)?.ok_or_else(gone)?;
@@ -929,7 +967,7 @@ fn orders(corner: CornerType, (segments, planes, drawn, sketch_x): Lines, record
         .iter()
         .map(|r| {
             let lines: Vec<String> = r.lines().map(str::to_string).collect();
-            Override { members: if laid_pair { laid(&lines) } else { lines }, corner: r.kind, flip: false }
+            Override { members: if laid_pair { laid(&lines) } else { lines }, corner: r.kind, flip: false, gap: 0.0 }
         })
         .collect();
     let (plan, matched) = if corner.is_none() {
@@ -996,9 +1034,10 @@ fn orders(corner: CornerType, (segments, planes, drawn, sketch_x): Lines, record
     out
 }
 
-/// `records` as the build reads them: each its lines in order, its type, and Flip where its first line is not the one
-/// [`orders`] puts first of its first two.
-fn overrides(corner: CornerType, lines: Lines, records: &[CornerOverride]) -> Vec<Override> {
+/// `records` as the build reads them: each its lines in order, its type, Flip where its first line is not the one
+/// [`orders`] puts first of its first two, and its weld gap, else the frame's (`gaps`: the values to evaluate it with and
+/// the frame's gap, the gap checked; none: 0, for what cuts nothing).
+fn overrides(corner: CornerType, lines: Lines, records: &[CornerOverride], gaps: Option<(&BTreeMap<String, Value>, f64)>) -> Result<Vec<Override>> {
     let orders = orders(corner, lines, records, false);
     records
         .iter()
@@ -1006,7 +1045,12 @@ fn overrides(corner: CornerType, lines: Lines, records: &[CornerOverride]) -> Ve
         .map(|(r, order)| {
             let members: Vec<String> = r.lines().map(str::to_string).collect();
             let flip = order.is_some_and(|d| d.get(..2) != members.get(..2));
-            Override { members, corner: r.kind, flip }
+            let gap = match gaps {
+                Some((vals, _)) if r.gap.is_some() => gap_value(vals, r.gap.as_ref(), "a corner's `gap`")?,
+                Some((_, frame)) => frame,
+                None => 0.0,
+            };
+            Ok(Override { members, corner: r.kind, flip, gap })
         })
         .collect()
 }
@@ -1323,9 +1367,11 @@ fn auto_ends(
     plan: Plan,
     (sketch_x, drawn): Tie,
     coped: bool,
-) -> Result<(CornerEnds, Vec<Fit>)> {
+    gap: f64,
+) -> Result<(CornerEnds, Vec<GapFit>)> {
     let mut out: CornerEnds = (vec![[None, None]; segments.len()], Vec::new());
-    let mut fits = plan.fits;
+    // ponytail: the plan's fits stand off by the frame's gap, never a 3-member or crossing override's own `gap`.
+    let mut fits: Vec<GapFit> = plan.fits.into_iter().map(|f| (f, gap)).collect();
     // `through` only works out the Flip that keeps `long` through: any length does.
     let length = frame_corners::segment_length(segments);
     for ac in &plan.corners {
@@ -1342,22 +1388,24 @@ fn auto_ends(
         // corner_cuts runs a butt's longer member through, then Flip swaps it; `long` already is the one to run
         // through (the plan applied Flip), so ask for whichever Flip keeps it.
         let flip = frame_corners::through(segments, &c, &length, sketch_x, drawn) != 0;
-        let cuts = |kind| frame_corners::corner_cuts(kind, flip, &c, segments, &length, placed, regions, sketch_x, drawn);
+        // Its override's weld gap, else the frame's.
+        let g = ac.gap.unwrap_or(gap);
+        let cuts = |kind| frame_corners::corner_cuts(kind, flip, g, &c, segments, &length, placed, regions, sketch_x, drawn);
         match (ac.kind, ac.joint) {
             (CornerType::Auto, Joint::AngledButt) => {
-                let angled = frame_corners::angled_butt_cuts(&c, ac.long.0, ac.short.0, segments);
-                add_corner(&mut out, &c, false, (angled, None), segments, regions, placed)?;
+                let angled = frame_corners::angled_butt_cuts(&c, ac.long.0, ac.short.0, segments, g);
+                add_corner(&mut out, &c, false, (angled, None), segments, regions, placed, g)?;
             }
-            (CornerType::Auto, Joint::Mitre) => add_corner(&mut out, &c, false, cuts(CornerType::Mitre)?, segments, regions, placed)?,
-            (CornerType::Auto, _) if coped => add_corner(&mut out, &c, true, cuts(CornerType::CopedButt)?, segments, regions, placed)?,
+            (CornerType::Auto, Joint::Mitre) => add_corner(&mut out, &c, false, cuts(CornerType::Mitre)?, segments, regions, placed, g)?,
+            (CornerType::Auto, _) if coped => add_corner(&mut out, &c, true, cuts(CornerType::CopedButt)?, segments, regions, placed, g)?,
             (CornerType::Auto, _) => {
                 // A butt: the long tube runs through, cut as stage 1's T; the short one is cut to fit against it.
                 let (mut through, _) = cuts(CornerType::Butt)?;
                 through.truncate(1);
-                add_corner(&mut out, &c, true, (through, None), segments, regions, placed)?;
-                fits.push(Fit { member: ac.short.0, at_start: ac.short.1, against: vec![ac.long.0] });
+                add_corner(&mut out, &c, true, (through, None), segments, regions, placed, g)?;
+                fits.push((Fit { member: ac.short.0, at_start: ac.short.1, against: vec![ac.long.0] }, g));
             }
-            (kind, _) => add_corner(&mut out, &c, kind.flips(), cuts(kind.coped(coped))?, segments, regions, placed)?,
+            (kind, _) => add_corner(&mut out, &c, kind.flips(), cuts(kind.coped(coped))?, segments, regions, placed, g)?,
         }
     }
     // Members in no group plane, chained: mitred, or as their override says, by stage 1's rules.
@@ -1365,8 +1413,9 @@ fn auto_ends(
     for ch in &plan.chained {
         let (Some(pa), Some(pb)) = (end(ch.a), end(ch.b)) else { continue };
         let c = Corner { point: (pa + pb) * 0.5, ends: [ch.a, ch.b] };
-        let cuts = frame_corners::corner_cuts(ch.kind.coped(coped), ch.flip, &c, segments, &length, placed, regions, sketch_x, drawn)?;
-        add_corner(&mut out, &c, ch.kind.flips(), cuts, segments, regions, placed)?;
+        let g = ch.gap.unwrap_or(gap);
+        let cuts = frame_corners::corner_cuts(ch.kind.coped(coped), ch.flip, g, &c, segments, &length, placed, regions, sketch_x, drawn)?;
+        add_corner(&mut out, &c, ch.kind.flips(), cuts, segments, regions, placed, g)?;
     }
     let mut place = vec![usize::MAX; segments.len()];
     for (i, r) in plan.ranks.iter().enumerate() {
@@ -1374,8 +1423,8 @@ fn auto_ends(
             *p = i;
         }
     }
-    fits.sort_by_key(|f| place.get(f.member).copied().unwrap_or(usize::MAX));
-    for f in &fits {
+    fits.sort_by_key(|f| place.get(f.0.member).copied().unwrap_or(usize::MAX));
+    for (f, _) in &fits {
         if let Some(e) = out.0.get_mut(f.member).and_then(|e| e.get_mut(usize::from(!f.at_start)))
             && e.is_none()
         {
@@ -1393,7 +1442,7 @@ fn auto_ends(
 /// [`frame_layout::plan`], over `segments` [`pieced`] by it. A piece of a line cut where tubes cross keeps what lies
 /// past the tubes it is fitted to ([`frame_multi_trim::fit_piece_end`], ruling C4): with nothing left it is dropped, as
 /// the second list says (`true`: no body). The third: each member's cut ends, as it was built with them. `coped`:
-/// the frame copes ([`copes`]).
+/// the frame copes ([`copes`]); `gap`: its weld gap.
 pub(crate) fn auto_members(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
@@ -1401,10 +1450,11 @@ pub(crate) fn auto_members(
     plan: Plan,
     tie: Tie,
     coped: bool,
+    gap: f64,
 ) -> Result<(Vec<Option<Traced>>, Vec<bool>, Vec<[Option<CutEnd>; 2]>)> {
     let crossed = cut_pieces(&plan);
     let mut dropped = vec![false; segments.len()];
-    let ((ends, copes), fits) = auto_ends(segments, regions, placed, plan, tie, coped)?;
+    let ((ends, copes), fits) = auto_ends(segments, regions, placed, plan, tie, coped, gap)?;
     let mut out = cut_members(segments, regions, (placed, unreversed), &ends, copes)?;
     fit_members(segments, regions, placed, &ends, &fits, (&mut out, &crossed, &mut dropped), coped)?;
     Ok((out, dropped, ends))
@@ -1414,28 +1464,30 @@ pub(crate) fn auto_members(
 /// cuts (`ends`) build them (each member's cutting tool, [`member_tool`], made once). A fitted face is named for the
 /// end it finishes and the id of the member it fits, `corner_start:<member>:face:<k>` (`corner_end:…`). A piece cut
 /// where tubes cross (`crossed`) keeps what lies past them ([`frame_multi_trim::fit_piece_end`]); with nothing left it has
-/// no body, and `dropped` says so. `coped`: each tool is its member's real shape ([`member_tool`]).
+/// no body, and `dropped` says so. `coped`: each tool is its member's real shape ([`member_tool`]). Each fit stands off
+/// by its weld gap, its tools grown by it.
 fn fit_members(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
     placed: &dyn Fn(usize, Vec3) -> Plane,
     ends: &[[Option<CutEnd>; 2]],
-    fits: &[Fit],
+    fits: &[GapFit],
     (out, crossed, dropped): (&mut [Option<Traced>], &[bool], &mut [bool]),
     coped: bool,
 ) -> Result<()> {
     let no_member = |m: usize| DocError::Invalid(format!("no member {m}"));
-    let mut tools: Vec<Option<kernel::Body>> = (0..segments.len()).map(|_| None).collect();
-    for &t in fits.iter().flat_map(|f| &f.against) {
-        if let Some(slot) = tools.get_mut(t)
-            && slot.is_none()
-        {
-            *slot = Some(member_tool(segments, regions, placed, ends, t, coped)?.body);
+    // Each member's tool for each gap, by the gap's bits.
+    let mut tools: HashMap<(usize, u64), kernel::Body> = HashMap::new();
+    for (f, gap) in fits {
+        for &t in &f.against {
+            if let std::collections::hash_map::Entry::Vacant(slot) = tools.entry((t, gap.to_bits())) {
+                slot.insert(member_tool(segments, regions, placed, ends, t, coped, *gap)?.body);
+            }
         }
     }
     // A point in the section's material (a tube's wall, not its bore).
     let inside = regions.first().map(|r| r.interior_point()).ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;
-    for f in fits {
+    for (f, gap) in fits {
         if dropped.get(f.member) == Some(&true) {
             continue;
         }
@@ -1447,7 +1499,7 @@ fn fit_members(
             .against
             .iter()
             .filter_map(|&t| {
-                let (body, line) = (tools.get(t)?.as_ref()?, &segments.get(t)?.0);
+                let (body, line) = (tools.get(&(t, gap.to_bits()))?, &segments.get(t)?.0);
                 let roles = (0..body.face_count()).map(|k| vec![format!("{end_role}:{line}:face:{k}")]).collect();
                 Some(Traced::made(body.clone(), Some(roles)))
             })
@@ -1468,7 +1520,8 @@ fn fit_members(
 }
 
 /// Member m's cutting tool ([`frame_multi_trim::fit_tool`], or under `coped` its real shape, [`frame_multi_trim::coped_tool`]) as
-/// its plane cuts (`ends`) build it: a fitted or coped end stops at its line's end, inside the tube it meets.
+/// its plane cuts (`ends`) build it: a fitted or coped end stops at its line's end, inside the tube it meets. Grown by
+/// the weld gap `gap` of the end it cuts.
 fn member_tool(
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
@@ -1476,6 +1529,7 @@ fn member_tool(
     ends: &[[Option<CutEnd>; 2]],
     m: usize,
     coped: bool,
+    gap: f64,
 ) -> Result<Traced> {
     let (_, a, b) = segments.get(m).ok_or_else(|| DocError::Invalid(format!("no member {m}")))?;
     // No ends listed: a frame with no corners to finish, its members square.
@@ -1485,12 +1539,12 @@ fn member_tool(
     let cuts: Vec<Cut> = [start, end].into_iter().flatten().map(|c| c.0).collect();
     let (plane, regions) = along(placed(m, *a), regions, *b - *a);
     let tool = if coped { frame_multi_trim::coped_tool } else { frame_multi_trim::fit_tool };
-    tool(&plane, &regions, -start.map_or(0.0, |c| c.1), a.dist(*b) + end.map_or(0.0, |c| c.1), &cuts)
+    tool(&plane, &regions, -start.map_or(0.0, |c| c.1), a.dist(*b) + end.map_or(0.0, |c| c.1), &cuts, gap)
 }
 
 /// Each member's cut ends as the feature's corners make them ([`auto_ends`] for an Auto frame, `plan` its plan, else
 /// [`corner_ends`], `plan` its crossings', `overlaps` its overlaps' overrides; none for a frame with no corners to
-/// finish).
+/// finish). `gap`: the frame's weld gap.
 fn frame_ends(
     f: &FeatureKind,
     corners: &[Override],
@@ -1499,16 +1553,18 @@ fn frame_ends(
     placed: &dyn Fn(usize, Vec3) -> Plane,
     (plan, planes, overlaps): (Option<Plan>, &[MemberPlane], &[usize]),
     tie: Tie,
+    gap: f64,
 ) -> Result<Vec<[Option<CutEnd>; 2]>> {
     let FeatureKind::FrameMember { corner, flip, .. } = f else {
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
     let coped = copes(f);
     Ok(match plan {
-        Some(plan) if *corner == CornerType::Auto => auto_ends(segments, regions, placed, plan, tie, coped)?.0.0,
+        Some(plan) if *corner == CornerType::Auto => auto_ends(segments, regions, placed, plan, tie, coped, gap)?.0.0,
         _ if corner.is_none() && corners.is_empty() => Vec::new(),
         crossing => {
-            corner_ends(segments, regions, placed, (*corner, *flip), (corners, overlaps), (planes, tie.0, tie.1), crossing.as_ref(), coped)?.0.0
+            let finish = (*corner, *flip, gap);
+            corner_ends(segments, regions, placed, finish, (corners, overlaps), (planes, tie.0, tie.1), crossing.as_ref(), coped)?.0.0
         }
     })
 }
@@ -1826,11 +1882,12 @@ pub(crate) fn member_section(
     st: &ModelState,
     line: &str,
 ) -> Result<(Plane, f64, Region2, [bool; 2])> {
-    let FeatureKind::FrameMember { corner, corners, .. } = &f.kind else {
+    let FeatureKind::FrameMember { corner, corners, gap, .. } = &f.kind else {
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
     let Layout { segments, regions, at, turn, sketch_x, drawn, planes, .. } = layout(doc, vals, f, st)?;
-    let corners = &overrides(*corner, (&segments, &planes, &drawn, sketch_x), corners);
+    let gap = gap_value(vals, gap.as_ref(), "`gap`")?;
+    let corners = &overrides(*corner, (&segments, &planes, &drawn, sketch_x), corners, Some((vals, gap)))?;
     let (plan, crossing) = plans(*corner, &segments, &planes, corners, &drawn)?;
     let overlaps = overlap_overrides(*corner, &segments, &planes, corners);
     let (segments, planes, drawn) = pieced(segments, planes, drawn, plan.as_ref().or(crossing.as_ref()))?;
@@ -1850,7 +1907,7 @@ pub(crate) fn member_section(
     // Cap refuses it from the face itself).
     // ponytail: a corner or chain corner Fit Ends turns Free (inside a tube) is read here as jointed, as is an end
     // fitted to a tube as open; finding them builds every earlier tool, which End Cap would pay on every pick.
-    let ends = frame_ends(&f.kind, corners, &segments, &regions, &placed, (plan.or(crossing), &planes, &overlaps), (sketch_x, &drawn))?;
+    let ends = frame_ends(&f.kind, corners, &segments, &regions, &placed, (plan.or(crossing), &planes, &overlaps), (sketch_x, &drawn), gap)?;
     let dir = (b - a).normalized().ok_or_else(|| DocError::Invalid(format!("line `{line}` has no length")))?;
     let [start, end] = ends.get(m).copied().unwrap_or([None, None]);
     let square = |e: Option<CutEnd>, p: Vec3| match e {
@@ -1968,7 +2025,7 @@ pub fn member_parts(st: &ModelState, kind: &FeatureKind) -> Result<(Vec<String>,
                 let planes = vec![ps.sketch.wires.is_empty().then(|| (ps.plane.normal(), ps.plane.x)); segments.len()];
                 let drawn = drawn_order(&ps.sketch, &segments);
                 // The sketch's own X breaks no tie that cuts a line: only a crossing's order does.
-                let corners = overrides(*corner, (&segments, &planes, &drawn, None), corners);
+                let corners = overrides(*corner, (&segments, &planes, &drawn, None), corners, None)?;
                 let pieces = frame_layout::pieces(&segments, &planes, &drawn, &corners);
                 if pieces.len() + pairs.len() > MAX_MEMBERS {
                     return Err(too_many_pieces());

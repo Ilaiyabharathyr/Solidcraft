@@ -439,6 +439,8 @@ pub struct AutoCorner {
     /// Whether an override matched it (an Auto one included): such a corner is jointed even inside an earlier Frame
     /// Member's tube ([`Joint::Free`]).
     pub overridden: bool,
+    /// Its override's weld gap (mm); none: the frame's.
+    pub gap: Option<f64>,
 }
 
 /// A member's end cut to fit the tubes already at its point.
@@ -451,7 +453,7 @@ pub struct Fit {
 }
 
 /// A corner between two members in no group plane, chained and mitred unless an override says otherwise.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChainCorner {
     /// (member, at_start) of the earlier member's end in laying order, and the later one's.
     pub a: (usize, bool),
@@ -462,6 +464,8 @@ pub struct ChainCorner {
     pub flip: bool,
     /// Whether an override matched it: such a corner is jointed even where it lies inside a tube (ruling A15).
     pub overridden: bool,
+    /// Its override's weld gap (mm); none: the frame's.
+    pub gap: Option<f64>,
 }
 
 /// A stretch of one line between two of its cuts (or its ends): a member of its own (stage 3).
@@ -725,7 +729,7 @@ pub(crate) fn planned(
             };
             let point = points.at.get(n).copied().unwrap_or(Vec3::ZERO);
             let (kind, flip) = o.map_or((CornerType::Auto, false), |o| (o.corner, o.flip));
-            corners.push(AutoCorner { point, long, short, angle_deg, joint, kind, flip, overridden: o.is_some() });
+            corners.push(AutoCorner { point, long, short, angle_deg, joint, kind, flip, overridden: o.is_some(), gap: o.map(|o| o.gap) });
         } else if group_whole.is_empty() {
             done = group.len(); // one end alone
         }
@@ -747,7 +751,7 @@ pub(crate) fn planned(
             let o = matching(&ids).and_then(|o| overrides.get(o));
             let (kind, flip) = o.map_or((CornerType::Mitre, false), |o| (o.corner, o.flip));
             let kind = if kind == CornerType::Auto { CornerType::Mitre } else { kind };
-            chained.push(ChainCorner { a: (a.1, a.2), b: (b.1, b.2), kind, flip, overridden: o.is_some() });
+            chained.push(ChainCorner { a: (a.1, a.2), b: (b.1, b.2), kind, flip, overridden: o.is_some(), gap: o.map(|o| o.gap) });
         }
         for (j, e) in rest.iter().enumerate().skip(done) {
             let earlier = rest.iter().take(j).map(|e| e.1);
