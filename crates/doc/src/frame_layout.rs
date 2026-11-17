@@ -444,12 +444,14 @@ pub struct AutoCorner {
 }
 
 /// A member's end cut to fit the tubes already at its point.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Fit {
     pub member: usize,
     pub at_start: bool,
     /// The members to fit against, in laying order.
     pub against: Vec<usize>,
+    /// The weld gap (mm) of the override of its point or crossing; none: the frame's.
+    pub gap: Option<f64>,
 }
 
 /// A corner between two members in no group plane, chained and mitred unless an override says otherwise.
@@ -596,6 +598,8 @@ pub(crate) fn planned(
     }
     let mut cuts: Vec<HashMap<usize, usize>> = vec![HashMap::new(); segments.len()];
     let (mut crossings, mut crossing_overrides) = (Vec::new(), Vec::new());
+    // Each overridden crossing's weld gap, by node: its pieces' ends there stand off by it.
+    let mut crossing_gaps: HashMap<usize, f64> = HashMap::new();
     for (&n, ms) in &through {
         // Only a group's own lines are cut, and only by each other.
         let mut sets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -614,6 +618,9 @@ pub(crate) fn planned(
             let o = matching(&set.iter().map(|&m| id(m)).collect());
             crossing_overrides.extend(o);
             let o = o.and_then(|o| overrides.get(o));
+            if let Some(o) = o {
+                crossing_gaps.insert(n, o.gap);
+            }
             let set = pair_first(set, o, |&m| id(m));
             let flip = o.is_some_and(|o| o.flip);
             let Some(&whole) = set.get(usize::from(flip)) else { continue };
@@ -686,13 +693,14 @@ pub(crate) fn planned(
     let at = |k: usize| pos(parent(k));
     let key = |m: usize| (drawn.get(m).copied().unwrap_or(m), m);
     let (mut corners, mut fits, mut chained) = (Vec::new(), Vec::new(), Vec::new());
-    // End e fits against these pieces (not itself), in laying order; against nothing it is left alone.
-    let fit = |e: &End, against: Vec<usize>, fits: &mut Vec<Fit>| {
+    // End e fits against these pieces (not itself), in laying order, standing off by `gap`; against nothing it is left
+    // alone.
+    let fit = |e: &End, against: Vec<usize>, gap: Option<f64>, fits: &mut Vec<Fit>| {
         let mut against: Vec<usize> = against.into_iter().filter(|&k| k != e.1).collect();
         against.sort_by_key(|&k| at(k));
         against.dedup();
         if !against.is_empty() {
-            fits.push(Fit { member: e.1, at_start: e.2, against });
+            fits.push(Fit { member: e.1, at_start: e.2, against, gap });
         }
     };
     for (n, mut here) in ends {
@@ -736,10 +744,13 @@ pub(crate) fn planned(
         // Against the ends laid earlier: a sibling piece shares its line's place, so is never one. An override's own
         // pair, made the corner instead of the two laid first, is fitted against too.
         let pair: Vec<usize> = group.iter().take(done).map(|e| e.1).filter(|_| o.is_some_and(|o| o.members.len() > 2)).collect();
+        // The ends fitted here stand off by the gap of the override of this point, or of the crossing here.
+        let gap = o.map(|o| o.gap).or_else(|| crossing_gaps.get(&n).copied());
         for e in group.iter().skip(done) {
             fit(
                 e,
                 group_whole.iter().copied().chain(pair.iter().copied()).chain(group.iter().filter(|o| o.0 < e.0).map(|o| o.1)).collect(),
+                gap,
                 &mut fits,
             );
         }
@@ -755,7 +766,7 @@ pub(crate) fn planned(
         }
         for (j, e) in rest.iter().enumerate().skip(done) {
             let earlier = rest.iter().take(j).map(|e| e.1);
-            fit(e, whole.iter().copied().chain(group.iter().map(|e| e.1)).chain(earlier).collect(), &mut fits);
+            fit(e, whole.iter().copied().chain(group.iter().map(|e| e.1)).chain(earlier).collect(), gap, &mut fits);
         }
     }
     fits.sort_by_key(|f| (at(f.member), f.member));

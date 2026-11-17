@@ -5623,3 +5623,39 @@ fn a_coped_gap_beyond_the_corner_radius_never_panics() {
         assert!(e.to_string().contains("weld gap of 20 mm"), "{e}");
     }
 }
+
+#[test]
+fn a_crossing_overrides_gap_stands_its_pieces_off() {
+    // h is crossed by v and by w; only the crossing of h and v is overridden, with gap 3 on a frame with none: v's
+    // pieces stop 23 from h's line, w's 20.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Plus"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [400, 0]], "ids": ["h"]}));
+    run(&mut s, "sketch.line", json!({"points": [[100, -100], [100, 100]], "ids": ["v"]}));
+    run(&mut s, "sketch.line", json!({"points": [[300, -100], [300, 100]], "ids": ["w"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let corners = json!([{"members": ["h", "v"], "kind": "auto", "gap": 3}]);
+    let names = json!({"h": "H", "v": "V", "w": "W"});
+    run(&mut s, "frame.member", json!({"sketch": "Plus", "profile": tube(), "corner": "butt", "corners": corners, "names": names}));
+    for (name, off) in [("V", 23.0), ("V · H", 23.0), ("W", 20.0), ("W · H", 20.0)] {
+        let b = measured(&mut s, name);
+        let near_h = b.2[1].abs().min(b.3[1].abs());
+        assert!((near_h - off).abs() < 1e-6, "{name}: {b:?}");
+    }
+}
+
+#[test]
+fn a_crowded_overrides_gap_stands_its_fitted_member_off() {
+    // Three tubes end at (300, 0) on an Auto frame with no gap; the override of all three, gap 3, makes the corner of
+    // the two along X (in line, both square) and fits the upright 3 off their top faces, at y = 23.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "T"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [300, 0]], "ids": ["a"]}));
+    run(&mut s, "sketch.line", json!({"points": [[300, 0], [600, 0]], "ids": ["b"]}));
+    run(&mut s, "sketch.line", json!({"points": [[300, 0], [300, 300]], "ids": ["up"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let corners = json!([{"members": ["a", "b", "up"], "kind": "auto", "gap": 3}]);
+    run(&mut s, "frame.member", json!({"sketch": "T", "profile": tube(), "corner": "auto", "corners": corners, "names": {"up": "Up"}}));
+    let up = measured(&mut s, "Up");
+    assert!((up.2[1] - 23.0).abs() < 1e-6, "{up:?}");
+}

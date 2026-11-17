@@ -267,7 +267,7 @@ fn a_t_junction_is_a_fit_against_the_through_tube() {
     let segs = vec![seg("bar", (0.0, 0.0), (600.0, 0.0)), seg("stem", (300.0, 0.0), (300.0, 400.0))];
     let p = planned(&segs, &[]).unwrap();
     assert!(p.corners.is_empty());
-    assert_eq!(p.fits, [Fit { member: 1, at_start: true, against: vec![0] }]);
+    assert_eq!(p.fits, [Fit { member: 1, at_start: true, against: vec![0], gap: None }]);
 }
 
 /// Three lines ending at the origin: a along x (600), b along y (400), c at 45° (283).
@@ -283,7 +283,7 @@ fn three_ends_make_one_corner_and_one_fit() {
     assert_eq!(p.corners.len(), 1);
     let corner = &p.corners[0];
     assert_eq!((corner.long, corner.short, corner.joint), ((a, true), (b, false), Joint::Butt));
-    assert_eq!(p.fits, [Fit { member: c, at_start: true, against: vec![a, b] }]);
+    assert_eq!(p.fits, [Fit { member: c, at_start: true, against: vec![a, b], gap: None }]);
 }
 
 #[test]
@@ -310,7 +310,8 @@ fn an_override_at_three_ends_flips_the_long_and_short() {
     let c = at(&segs, "c");
     let p = planned(&segs, &[auto(&["c", "a", "b"], false)]).unwrap();
     assert_eq!((p.corners[0].long, p.corners[0].short), ((a, true), (c, true)));
-    assert_eq!(p.fits, [Fit { member: b, at_start: false, against: vec![a, c] }]);
+    // It stands off by the override's gap.
+    assert_eq!(p.fits, [Fit { member: b, at_start: false, against: vec![a, c], gap: Some(0.0) }]);
     // A Mitre override has nothing to flip.
     let mitre = Override { corner: CornerType::Mitre, ..auto(&["a", "b", "c"], true) };
     let corner = &planned(&segs, &[mitre]).unwrap().corners[0];
@@ -333,7 +334,10 @@ fn crossing_tubes_make_no_corner_and_the_later_is_cut() {
     let segs = vec![seg("a", (0.0, 0.0), (400.0, 400.0)), seg("b", (0.0, 400.0), (400.0, 0.0))];
     let p = planned(&segs, &[]).unwrap();
     assert!(p.corners.is_empty() && p.chained.is_empty(), "{p:?}");
-    assert_eq!(p.fits, [Fit { member: 1, at_start: false, against: vec![0] }, Fit { member: 2, at_start: true, against: vec![0] }]);
+    assert_eq!(
+        p.fits,
+        [Fit { member: 1, at_start: false, against: vec![0], gap: None }, Fit { member: 2, at_start: true, against: vec![0], gap: None }]
+    );
 }
 
 #[test]
@@ -349,7 +353,7 @@ fn tubes_in_no_plane_chain_and_mitre() {
     let p = plan(&segs, &planes, &in_order(&segs), &|_, _| true, &[]).unwrap();
     assert_eq!(p.corners.len(), 4, "the rectangle's corners only");
     assert_eq!(p.chained, [ChainCorner { a: (4, false), b: (5, true), kind: CornerType::Mitre, flip: false, overridden: false, gap: None }]);
-    assert_eq!(p.fits, [Fit { member: 4, at_start: true, against: vec![0] }]);
+    assert_eq!(p.fits, [Fit { member: 4, at_start: true, against: vec![0], gap: None }]);
     // An override at the chained corner is at a corner of the frame.
     let o = Override { members: vec!["pair1".into(), "pair2".into()], corner: CornerType::Butt, flip: false, gap: 0.0 };
     assert!(plan(&segs, &planes, &in_order(&segs), &|_, _| true, &[o]).is_ok());
@@ -394,7 +398,10 @@ fn groups_sharing_a_point_fit_the_later_group() {
     assert_eq!(origin.len(), 1);
     assert_eq!((origin[0].long, origin[0].short), ((4, true), (7, false)), "the earlier group's r1 and r4");
     assert_eq!(out.corners.len(), 7);
-    assert_eq!(out.fits, [Fit { member: 0, at_start: true, against: vec![4, 7] }, Fit { member: 3, at_start: false, against: vec![4, 7, 0] }]);
+    assert_eq!(
+        out.fits,
+        [Fit { member: 0, at_start: true, against: vec![4, 7], gap: None }, Fit { member: 3, at_start: false, against: vec![4, 7, 0], gap: None }]
+    );
 }
 
 // --- Crossings (spec A4/A6, stage 3) and A17 ---
@@ -429,8 +436,8 @@ fn an_x_brace_cuts_the_later_diagonal() {
     assert_eq!(p.crossings.len(), 1);
     assert!(p.crossings[0].dist(Vec3::new(300.0, 200.0, 0.0)) < 1e-9, "{:?}", p.crossings);
     // Each crossing end fits the whole diagonal, and only it: never its sibling.
-    assert!(p.fits.contains(&Fit { member: d2, at_start: false, against: vec![d1] }), "{:?}", p.fits);
-    assert!(p.fits.contains(&Fit { member: d2b, at_start: true, against: vec![d1] }), "{:?}", p.fits);
+    assert!(p.fits.contains(&Fit { member: d2, at_start: false, against: vec![d1], gap: None }), "{:?}", p.fits);
+    assert!(p.fits.contains(&Fit { member: d2b, at_start: true, against: vec![d1], gap: None }), "{:?}", p.fits);
     assert!(!p.fits.iter().any(|f| (f.member == d2 && f.against.contains(&d2b)) || (f.member == d2b && f.against.contains(&d2))), "{:?}", p.fits);
     // The pieces take their line's place in the laying order, in order along it.
     let order: Vec<&str> = p.ranks.iter().map(|r| p.pieces[r.member].id.as_str()).collect();
@@ -444,13 +451,20 @@ fn a_crossing_override_with_flip_keeps_the_other_whole() {
     let p = planned(&segs, &[auto(&["d1", "d2"], true)]).unwrap();
     assert_eq!(piece_ids(&p), ["bottom", "right", "top", "left", "d1", "d1>d2", "d2"]);
     let (d1, d1b, d2) = (piece(&p, "d1"), piece(&p, "d1>d2"), piece(&p, "d2"));
-    assert!(p.fits.contains(&Fit { member: d1, at_start: false, against: vec![d2] }), "{:?}", p.fits);
-    assert!(p.fits.contains(&Fit { member: d1b, at_start: true, against: vec![d2] }), "{:?}", p.fits);
+    assert!(p.fits.contains(&Fit { member: d1, at_start: false, against: vec![d2], gap: Some(0.0) }), "{:?}", p.fits);
+    assert!(p.fits.contains(&Fit { member: d1b, at_start: true, against: vec![d2], gap: Some(0.0) }), "{:?}", p.fits);
     assert_eq!(p.crossing_overrides, [0]);
-    // Without Flip it matches (a crossing's override) and changes nothing else.
-    let mut plain = planned(&segs, &[auto(&["d2", "d1"], false)]).unwrap();
+    // Without Flip it matches (a crossing's override) and changes nothing else: its pieces' ends there take its gap.
+    let mut plain = planned(&segs, &[Override { gap: 3.0, ..auto(&["d2", "d1"], false) }]).unwrap();
     assert_eq!(plain.crossing_overrides, [0]);
     plain.crossing_overrides.clear();
+    let diagonal: Vec<bool> = plain.pieces.iter().map(|pc| pc.id.starts_with('d')).collect();
+    let at_crossing = |f: &Fit| diagonal[f.member] && f.against.iter().any(|&k| diagonal[k]);
+    assert_eq!(plain.fits.iter().filter(|f| at_crossing(f)).count(), 2, "{:?}", plain.fits);
+    for f in plain.fits.iter_mut().filter(|f| at_crossing(f)) {
+        assert_eq!(f.gap, Some(3.0), "{f:?}");
+        f.gap = None;
+    }
     assert_eq!(plain, planned(&segs, &[]).unwrap());
 }
 
@@ -467,11 +481,11 @@ fn three_lines_through_one_point_and_a_fourth_ending_there() {
     assert_eq!(p.crossings.len(), 1);
     let [d, c, c2, b, b2, a] = ["d", "c", "c>a", "b", "b>a", "a"].map(|id| piece(&p, id));
     let fits = [
-        Fit { member: b, at_start: false, against: vec![a] },
-        Fit { member: b2, at_start: true, against: vec![a] },
-        Fit { member: c, at_start: false, against: vec![a, b, b2] },
-        Fit { member: c2, at_start: true, against: vec![a, b, b2] },
-        Fit { member: d, at_start: true, against: vec![a, b, b2, c, c2] },
+        Fit { member: b, at_start: false, against: vec![a], gap: None },
+        Fit { member: b2, at_start: true, against: vec![a], gap: None },
+        Fit { member: c, at_start: false, against: vec![a, b, b2], gap: None },
+        Fit { member: c2, at_start: true, against: vec![a, b, b2], gap: None },
+        Fit { member: d, at_start: true, against: vec![a, b, b2, c, c2], gap: None },
     ];
     assert_eq!(p.fits, fits);
     assert!(p.corners.is_empty() && p.chained.is_empty(), "{p:?}");
@@ -535,11 +549,17 @@ fn pair_ends_on_a_group_tube_are_fitted_not_chained() {
     // On the bottom tube's middle: pair2 (the longer) fits it, then pair1 fits it and pair2.
     let p = pairs(p3(300.0, 0.0, 0.0));
     assert!(p.chained.is_empty(), "{p:?}");
-    assert_eq!(p.fits, [Fit { member: 5, at_start: true, against: vec![0] }, Fit { member: 4, at_start: true, against: vec![0, 5] }]);
+    assert_eq!(
+        p.fits,
+        [Fit { member: 5, at_start: true, against: vec![0], gap: None }, Fit { member: 4, at_start: true, against: vec![0, 5], gap: None }]
+    );
     // At the rectangle's corner, where group ends meet.
     let p = pairs(p3(600.0, 0.0, 0.0));
     assert!(p.chained.is_empty(), "{p:?}");
-    assert_eq!(p.fits, [Fit { member: 5, at_start: true, against: vec![0, 1] }, Fit { member: 4, at_start: true, against: vec![0, 1, 5] }]);
+    assert_eq!(
+        p.fits,
+        [Fit { member: 5, at_start: true, against: vec![0, 1], gap: None }, Fit { member: 4, at_start: true, against: vec![0, 1, 5], gap: None }]
+    );
 }
 
 #[test]
