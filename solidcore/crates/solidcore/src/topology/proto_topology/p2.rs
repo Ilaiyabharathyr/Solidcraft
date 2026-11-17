@@ -271,8 +271,10 @@ pub trait ProtoBrep<O>: ProtoGeometry<O> + ProtoTopology<O> {
     /// Not upstream (docs/booleans.md, "One edge or two"): the edge of `face` between
     /// `start` and `end` that is proved to be `curve` over `interval`: the two within
     /// `tolerance` plus the edge's of each other over their whole lengths
-    /// ([`crate::geom::tools::find_edge_proved_along`]). An owner with no B-rep behind its
-    /// handles (the default body) has no such edge.
+    /// ([`crate::geom::tools::find_edge_proved_along`]). `crossing` is the face whose
+    /// surface cuts `face` in `curve`, when the curve is such an intersection: a seam of
+    /// `face` is the curve only within the curve's reach ("Seams and poles"). An owner
+    /// with no B-rep behind its handles (the default body) has no such edge.
     ///
     /// # Errors
     ///
@@ -287,6 +289,7 @@ pub trait ProtoBrep<O>: ProtoGeometry<O> + ProtoTopology<O> {
         _curve: &Curve,
         _interval: Extent1d,
         _tolerance: f64,
+        _crossing: Option<O>,
     ) -> Result<Option<O>> {
         Ok(None)
     }
@@ -1168,6 +1171,11 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
         let face_tol = brep
             .topology_tolerance(face)
             .ok_or(dangling("face handle is unknown"))?;
+        // the face whose surface cuts this one in the curve, when the other side is a face
+        let other = 3 - which;
+        let crossing = (d.src_topo_type(other) == PointClassType::Face)
+            .then(|| as_kind(d.src_topo(other), ClassObjectKind::Face))
+            .flatten();
         brep.face_edge_proved_along(
             k,
             face,
@@ -1176,6 +1184,7 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
             curve_of(brep, Some(curve))?,
             d.xsect_interval(),
             max2(face_tol, d.raw_tolerance()),
+            crossing,
         )
     }
 
@@ -1761,7 +1770,7 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
                         // Not upstream (#16637): on every error path, the points of those
                         // combined away so far stay covered where `pv` is
                         if absorbed_any {
-                            let (ends, ends_bounded) =
+                            let (ends, _, ends_bounded) =
                                 self.attached_curve_ends(k, brep, pv, &absorbed, &absorbed_defs);
                             absorbed.extend(ends);
                             self.cover_in_place(pv, &absorbed, absorbed_bounded && ends_bounded)?;
@@ -1802,10 +1811,17 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
         vds.retain(Option::is_some);
         self.write_vertex_definitions(pv, &vds)?;
         if absorbed_any {
-            let (ends, ends_bounded) =
+            let (ends, survivor_ends, ends_bounded) =
                 self.attached_curve_ends(k, brep, pv, &absorbed, &absorbed_defs);
             absorbed.extend(ends);
-            self.place_at_survivors(k, brep, pv, &absorbed, absorbed_bounded && ends_bounded)?;
+            self.place_at_survivors(
+                k,
+                brep,
+                pv,
+                &absorbed,
+                &survivor_ends,
+                absorbed_bounded && ends_bounded,
+            )?;
         }
         Ok(())
     }
@@ -1842,7 +1858,12 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
     /// points, and an object point that cannot be computed (parameters not set, an
     /// evaluation error of any kind, a non-finite result), make the result unbounded
     /// instead of an error, so the vertex does not move and a resolution that
-    /// combines definitions never fails here.
+    /// combines definitions never fails here. That includes [`SolidError::Unported`]
+    /// (an adapter that cannot resolve a topology handle): these evaluations are
+    /// measurements upstream does not make, so they must not fail a resolution upstream
+    /// completes; without them the vertex stays where upstream puts it. Point
+    /// evaluation never polls the cancel token, so [`SolidError::Cancelled`] does not
+    /// arise here; the resolution's callers poll it.
     fn absorbed_points_of(
         &self,
         k: &Kernel,
@@ -1900,9 +1921,12 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
     ///   distances rounded up by `γ_4`). Such an end is returned, to be covered.
     /// - Otherwise it traces to a definition that remains at `pv` when it lies within that
     ///   definition's tolerance of one of its computed points. It stays that definition's
-    ///   end, as upstream has it, and is not covered.
+    ///   end, as upstream has it. It is returned second, to be covered only if the vertex
+    ///   moves off upstream's position ([`Self::place_at_survivors`]): a move can take the
+    ///   vertex farther from it than the tolerance reaches.
     /// - An end that traces to neither, or that cannot be evaluated, makes the result
-    ///   unbounded (the vertex then does not move). This is never an error.
+    ///   unbounded (the vertex then does not move). This is never an error, for the
+    ///   reasons [`Self::absorbed_points_of`] gives.
     fn attached_curve_ends(
         &self,
         k: &Kernel,
@@ -1910,9 +1934,9 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
         pv: ProtoVertexId,
         absorbed: &[Point3],
         absorbed_defs: &[(f64, core::ops::Range<usize>)],
-    ) -> (Vec<Point3>, bool) {
+    ) -> (Vec<Point3>, Vec<Point3>, bool) {
         let Some(v) = self.proto_vertex(pv) else {
-            return (Vec::new(), false);
+            return (Vec::new(), Vec::new(), false);
         };
         let within = |end: Point3, points: &[Point3], tol: f64| {
             points
@@ -1929,6 +1953,7 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
         pes.sort_unstable();
         pes.dedup();
         let mut points = Vec::new();
+        let mut survivor_ends = Vec::new();
         let mut bounded = true;
         for pe in pes {
             let Some(e) = self.proto_edge(pe) else {
@@ -1964,13 +1989,15 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
                             .is_some_and(|h| within(end, h, *tol))
                     }) {
                         points.push(end);
-                    } else if !survivors.iter().any(|(tol, h)| within(end, h, *tol)) {
+                    } else if survivors.iter().any(|(tol, h)| within(end, h, *tol)) {
+                        survivor_ends.push(end);
+                    } else {
                         bounded = false;
                     }
                 }
             }
         }
-        (points, bounded)
+        (points, survivor_ends, bounded)
     }
 
     /// Not upstream (#16637): records `absorbed` (the computed points of definitions combined
@@ -1998,8 +2025,9 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
     ///
     /// The move takes `pv` off the point upstream's tolerance was set around, so it also
     /// records the computed points of every remaining definition (`absorbed_points_of`:
-    /// its position and object points). The write then widens the tolerance to reach
-    /// every point recorded, in this or an earlier resolution
+    /// its position and object points) and `survivor_ends`, the attached curve ends that
+    /// trace to a remaining definition (`attached_curve_ends`). The write then widens the
+    /// tolerance to reach every point recorded, in this or an earlier resolution
     /// ([`ProtoVertex::set_position`]).
     ///
     /// The move needs every one of those points. If one could not be computed (`bounded`
@@ -2012,6 +2040,7 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
         brep: &impl ProtoBrep<O>,
         pv: ProtoVertexId,
         absorbed: &[Point3],
+        survivor_ends: &[Point3],
         bounded: bool,
     ) -> Result<()> {
         let v = self
@@ -2021,7 +2050,7 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
         let unbounded = v.absorbed_unbounded();
         let live = v.vertex_definitions().to_vec();
         let mut position = None;
-        let mut held = Vec::new();
+        let mut held = survivor_ends.to_vec();
         if !unbounded && !live.is_empty() {
             let mut sum = Point3::new(0.0, 0.0, 0.0);
             let mut all_bounded = true;
@@ -4942,6 +4971,77 @@ mod tests {
         assert!(v.absorbed_unbounded());
         assert_eq!(v.position(), P + Vec3::new(0.0, 1e-5, 0.0), "not moved");
         assert_covers(&m, pv, &[FAR, Q]);
+    }
+
+    /// #17839 bot review: a curve end at the proto vertex that traces to a
+    /// remaining definition stays covered when the vertex moves. The definitions are
+    /// those of `the_move_to_the_survivors_covers_their_object_points` (the vertex moves
+    /// from `P` to 4e-5 above it). The end lies 9e-5 below `R_AT`, within the tolerance
+    /// 1e-4 of the remaining `s1`'s object point and 2.1e-4 from where the vertex moves:
+    /// beyond the 1.2e-4 that reaching `R_AT` gives. Without recording it the moved
+    /// vertex did not reach it.
+    #[test]
+    fn an_attached_curve_end_traced_to_a_remaining_definition_is_covered_after_a_move() {
+        let k = Kernel::default();
+        let mut geo = absorb_geo();
+        let end = R_AT + Vec3::new(0.0, -9e-5, 0.0);
+        let far_end = end + Vec3::new(1e-3, 0.0, 0.0);
+        geo.curves.push(line(end.to_array(), far_end.to_array()));
+        let mut m = manager();
+        let s1 = VertexDefinition::new(
+            &k,
+            &geo,
+            &vertex_pc_at(2, 0.0),
+            &vertex_pc_at(3, 0.0),
+            P,
+            1e-4,
+            1e-6,
+            None,
+        )
+        .unwrap();
+        let s1 = m.insert_vertex_definition(s1).unwrap();
+        let mut region_vd = |at: Point3, gap: f64| {
+            let vd = VertexDefinition::new(
+                &k,
+                &geo,
+                &region_pc(R0),
+                &region_pc(R1),
+                at,
+                1e-5,
+                gap,
+                None,
+            )
+            .unwrap();
+            m.insert_vertex_definition(vd).unwrap()
+        };
+        let s2_at = P + Vec3::new(0.0, 8e-5, 0.0);
+        let s2 = region_vd(s2_at, 1e-6);
+        let a_at = P + Vec3::new(0.0, 6e-5, 0.0);
+        let a = region_vd(a_at, 2e-6);
+        let pv = m.new_proto_vertex(P, 1e-5).unwrap();
+        m.add_proto_vertex(pv);
+        for vd in [s1, s2, a] {
+            m.add_vertex_definition(pv, vd).unwrap();
+        }
+        let other = m.new_proto_vertex(far_end, 1e-5).unwrap();
+        m.add_proto_vertex(other);
+        let mut cc = CurveClassification::new(&k);
+        cc.set_curve(Some(H(0, ClassObjectKind::Curve)), false);
+        let ivl = geo.curves[0].natural_interval();
+        let mut ci1 = CurveInterval::with_interval(&k, &ivl, Some(&cc));
+        ci1.mid = region_pc(R0);
+        let mut ci2 = CurveInterval::with_interval(&k, &ivl, Some(&cc));
+        ci2.mid = region_pc(R1);
+        m.create_proto_edge(&k, &mut geo, Some(pv), Some(other), &cc, &ci1, &cc, &ci2)
+            .unwrap();
+        m.resolve_proto_vertex(&k, &geo, pv).unwrap();
+        assert!(m.vertex_def(a).is_none());
+        let v = m.proto_vertex(pv).unwrap();
+        assert_eq!(v.vertex_definitions(), &[s1, s2]);
+        assert!(!v.absorbed_unbounded());
+        let moved = P + Vec3::new(0.0, 4e-5, 0.0);
+        assert!(v.position().distance(moved) < 1e-15);
+        assert_covers(&m, pv, &[a_at, P, s2_at, R_AT, end]);
     }
 
     /// #17839 re-review: the move to the remaining definitions also covers their own
