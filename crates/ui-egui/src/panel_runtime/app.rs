@@ -24,6 +24,12 @@ pub struct AppPanelRuntime {
     native: Box<dyn NativeHostAdapter>,
     #[cfg(not(target_arch = "wasm32"))]
     desktop: Option<super::native::DesktopNativeAdapter>,
+    /// The drag's window has its height before its panel measured its content.
+    #[cfg(not(target_arch = "wasm32"))]
+    drop_fit: bool,
+    /// A dropped window that fits its content once its panel has measured it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fit_window: Option<(InstanceId, std::time::Instant)>,
     host: Option<WorkspacePanelHost>,
     last_tick_frame: Option<u64>,
     last_error: Option<PanelError>,
@@ -44,6 +50,10 @@ impl AppPanelRuntime {
             native: Box::<InAppNativeAdapter>::default(),
             #[cfg(not(target_arch = "wasm32"))]
             desktop: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            drop_fit: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            fit_window: None,
             host: None,
             last_tick_frame: None,
             last_error: None,
@@ -538,10 +548,18 @@ impl AppPanelRuntime {
         use super::native_ui::WindowAction;
 
         let (Some(desktop), Some(state)) = (self.desktop.clone(), self.production.clone()) else { return Ok(()) };
+        // A panel window's own title bar holds the grip that drags it back and its menu.
+        // Dragged-out windows need that grip, so drag-out keeps it on.
+        let title_bar = crate::window_chrome::TitleBar { traffic_lights: app.integrated_titlebar, caption_buttons: app.custom_titlebar };
+        desktop.set_title_bar(own_title_bar(&app.preferences).then_some(title_bar));
+        self.show_drop_window(ctx, &desktop);
         if !self.runtime.layout().layout().sections.iter().any(|section| section.location.zone() == Zone::Window) {
             return Ok(());
         }
         self.reconcile(&app.session)?;
+        // Panel windows lay out as the app's panel cards do.
+        let card = super::native_ui::CardLayout::of(self.host.as_ref().and_then(|host| host.frame()));
+        let measure = self.host.as_ref().and_then(|host| host.frame()).and_then(|frame| frame.layout.geometry_policy.measure.clone());
         let windows: Vec<_> = self
             .runtime
             .layout()
@@ -569,9 +587,7 @@ impl AppPanelRuntime {
                     return Err(error(Rule::Lifecycle, "native window lost its layout registration"));
                 }
                 let title = self.runtime.instance_presentation(active)?.title;
-                let size = section.size;
-                let preferred =
-                    Size { width: size.width.max(360.0).clamp(min.width, max.width), height: size.height.max(440.0).clamp(min.height, max.height) };
+                let preferred = window_size(section.size, (min, max));
                 let Some(builder) = desktop.builder(ctx, &host, active, title, preferred, (min, max)) else { return Ok(()) };
                 let Some(viewport) = desktop.viewport_id(&host) else { return Ok(()) };
                 let action = match desktop.ready(ctx, &host, &builder) {
@@ -590,9 +606,52 @@ impl AppPanelRuntime {
                                 return Err(error(Rule::Capability, "desktop viewport became unavailable"));
                             }
                             desktop.observe(ui.ctx(), &host, active);
-                            solidcraft_ui_registry::isolated(|| {
-                                super::native_ui::paint(&mut self.runtime, &mut services, &mut content, &host, &section, ui, enabled)
-                            })
+                            let root = self.host.as_ref();
+                            let menu = |runtime: &PanelRuntime, instance: &InstanceId| {
+                                root.map_or_else(Vec::new, |root| root.window_menu(runtime, instance))
+                            };
+                            let painted = solidcraft_ui_registry::isolated(|| {
+                                super::native_ui::paint(
+                                    &mut self.runtime,
+                                    &mut services,
+                                    &mut content,
+                                    &host,
+                                    &section,
+                                    ui,
+                                    enabled,
+                                    desktop.title_bar(),
+                                    &menu,
+                                    card,
+                                )
+                            });
+                            // A window dropped before its panel measured its content fits
+                            // it once measured, as the app's side cards do.
+                            if self.fit_window.as_ref().is_some_and(|(fit, _)| fit == active) {
+                                let actions = self
+                                    .runtime
+                                    .layout()
+                                    .layout()
+                                    .instance(active)
+                                    .ok()
+                                    .and_then(|panel| self.runtime.layout().registry().get(&panel.kind).ok())
+                                    .is_some_and(|spec| !spec.header_actions.is_empty());
+                                let inner = ui.input(|input| input.viewport().inner_rect);
+                                let needed = inner.and_then(|inner| {
+                                    Some((inner, content_height(measure.as_deref(), active, inner.width(), card.window_chrome(actions))?))
+                                });
+                                if let Some((inner, needed)) = needed {
+                                    let fitted = portrait(Size { width: inner.width(), height: needed }).height;
+                                    if fitted + 0.5 < inner.height() {
+                                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(inner.width(), fitted)));
+                                    }
+                                    self.fit_window = None;
+                                } else if self.fit_window.as_ref().is_some_and(|(_, since)| since.elapsed() > std::time::Duration::from_secs(1)) {
+                                    self.fit_window = None;
+                                } else {
+                                    ui.ctx().request_repaint();
+                                }
+                            }
+                            painted
                         });
                         self.services.set_presentation_viewport(None);
                         result?
@@ -605,6 +664,19 @@ impl AppPanelRuntime {
                     WindowAction::Expand(section) => Mutation::Collapse { section, collapsed: false },
                     WindowAction::Content(instance, action) => Mutation::HeaderAction { instance, action },
                     WindowAction::Redock => Mutation::NativeClose { host },
+                    WindowAction::Layout(action) => {
+                        self.dispatch(&app.session, action)?;
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
+                        return Ok(());
+                    }
+                    WindowAction::Drag(event) => {
+                        // The app's host shows the drop place and commits the drop.
+                        if let Some(root) = self.host.as_mut() {
+                            root.queue_window_drag(event);
+                        }
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
+                        return Ok(());
+                    }
                 };
                 if let Err(reason) = self.dispatch(&app.session, LayoutAction::Apply { expected_revision: None, mutations: vec![mutation] }) {
                     if close {
@@ -620,6 +692,84 @@ impl AppPanelRuntime {
             }
         }
         failure.map_or(Ok(()), Err)
+    }
+
+    /// While a drag would pop a panel out, show the window it would open in, at
+    /// that screen place, with the panel's own paint: release opens it only where
+    /// this showed it. The panel's window then keeps that same window.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn show_drop_window(&mut self, ctx: &egui::Context, desktop: &super::native::DesktopNativeAdapter) {
+        let Some(host) = self.host.as_mut() else { return };
+        if let Some((instance, outer)) = host.take_window_landing() {
+            desktop.place(ctx, &instance, super::workspace::egui_rect(outer));
+            self.fit_window = self.drop_fit.then(|| (instance.clone(), std::time::Instant::now()));
+            let opened = self.runtime.layout().layout().containing(&instance).ok().and_then(|section| match &section.location {
+                SectionLocation::Window { host, .. } => Some(host.clone()),
+                _ => None,
+            });
+            if let Some(viewport) = opened.and_then(|opened| desktop.adopt(&opened, &instance)) {
+                ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
+            }
+        }
+        let card = super::native_ui::CardLayout::of(host.frame());
+        let Some((instance, corner)) = host.window_landing_preview() else {
+            desktop.end_drop();
+            return;
+        };
+        // From the bottom strip, the panel is painted as the side card docking it
+        // at a side would make; its window takes that card's shape.
+        let side = host.leaving_side_card().filter(|card| card.instance == instance).map(|card| (card.outer.size, card.header.size.height));
+        let in_app = host.frame().and_then(|frame| {
+            let card = frame.layout.sections.iter().find(|card| card.instance == instance)?;
+            let measure = frame.layout.geometry_policy.measure.clone();
+            Some((card.zone, card.outer.size, card.header.size.height, frame.layout.capacity.size.height, measure))
+        });
+        let mut bootstrap = false;
+        let layout = self.runtime.layout();
+        let landing = layout.layout().containing(&instance).ok().zip(layout.layout().instance(&instance).ok()).and_then(|(section, panel)| {
+            let spec = layout.registry().get(&panel.kind).ok()?;
+            let bounds = spec.size_bounds(Zone::Window);
+            let size = match in_app {
+                None => window_size(section.size, bounds),
+                Some((zone, size, header, column, measure)) => {
+                    let width = spec.default_size.width;
+                    // From the bottom strip, the window is as long as the panel's measured
+                    // content needs; unmeasured, it starts at the dock's height and fits
+                    // once measured, as a side card does.
+                    let fitted = (zone == Zone::Bottom)
+                        .then(|| content_height(measure.as_deref(), &instance, width, card.window_chrome(!spec.header_actions.is_empty())))
+                        .flatten();
+                    bootstrap = zone == Zone::Bottom && fitted.is_none();
+                    let size = match side {
+                        Some((size, header)) => drop_window_size(Zone::Left, size, header, width, column),
+                        None => drop_window_size(zone, size, header, width, fitted.map_or(column, |needed| needed.min(column))),
+                    };
+                    if zone == Zone::Bottom { portrait(size) } else { size }
+                }
+            };
+            desktop.landing(ctx, &instance, egui::pos2(corner.x, corner.y), size, bounds)
+        });
+        self.drop_fit = bootstrap;
+        let Some(outer) = landing else { return };
+        let title = self.runtime.instance_presentation(&instance).map(|presentation| presentation.title).unwrap_or_default();
+        let rtl = self.runtime.environment().direction == Direction::Rtl;
+        let (viewport, builder) = desktop.drop_window(&instance, title.clone(), outer);
+        // Drawing needs the OS window: until it exists, nothing is shown.
+        if !desktop.drop_ready(ctx, &builder).unwrap_or(false) {
+            return;
+        }
+        let title_bar = desktop.title_bar();
+        let shown = ctx.show_viewport_immediate(viewport, builder, |ui, class| {
+            super::native_ui::paint_drop(ui, title_bar, &instance, &title, rtl, host.window_card(), card);
+            class != egui::ViewportClass::EmbeddedWindow && ui.input(|input| input.viewport().native_pixels_per_point.is_some())
+        });
+        // The OS reports the window where it was before this frame's move, so
+        // release keeps the rectangle requested for it: where it is now shown.
+        if shown {
+            host.confirm_window_shown(corner, super::workspace::logical_rect(outer));
+        } else {
+            ctx.request_repaint();
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1202,6 +1352,51 @@ pub(super) fn ensure_production(app: &mut crate::SolveApp) -> PanelResult<()> {
     Ok(())
 }
 
+/// Panel windows have the app's own title bar, with the grip that drags them back
+/// and the panel's menu, unless the preference asks for the system's; windows
+/// dragged out of the app always need that grip.
+pub(super) fn own_title_bar(preferences: &crate::prefs::Prefs) -> bool {
+    preferences.panel_window_title_bar || preferences.panel_drag_out
+}
+
+/// A window from the bottom strip stays taller than wide (at least 4:3), so its
+/// panel keeps the vertical layout a side card has: a window at least as wide
+/// as tall lays its panel out wide.
+pub(super) fn portrait(size: Size) -> Size {
+    Size { height: size.height.max(size.width * 4.0 / 3.0), ..size }
+}
+
+/// The height a panel window needs at `width` around `chrome`, when its panel
+/// sizes to its content and has measured it.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn content_height(measure: Option<&dyn super::layout::HostContentMetrics>, instance: &InstanceId, width: f32, chrome: f32) -> Option<f32> {
+    let request = ContentMeasureRequest { instance: instance.clone(), width, chrome_height: chrome };
+    let measure = measure?.measure(&request).ok()?;
+    (measure.policy == SideHeightPolicy::Content && measure.needed_height.is_finite() && measure.needed_height < MAX_LOGICAL)
+        .then_some(measure.needed_height)
+}
+
+/// The size of a dragged-out panel's window: its card's size in the app, with
+/// the window's title bar in its header's place (`header` high), so the body
+/// keeps its size. A panel in the bottom strip, whose strip height leaves no
+/// room under a title bar, takes the shape of a new side column instead (as
+/// docking it at a side would): its kind's default width and the height of the
+/// app's dock area.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn drop_window_size(zone: Zone, card: Size, header: f32, side_width: f32, column_height: f32) -> Size {
+    if zone == Zone::Bottom {
+        Size { width: side_width, height: column_height }
+    } else {
+        Size { width: card.width, height: card.height - header.clamp(0.0, card.height) + crate::toolbar::APP_BAR_HEIGHT }
+    }
+}
+
+/// A panel window's first inner size: its dock size, at least a usable window.
+#[cfg(not(target_arch = "wasm32"))]
+fn window_size(size: Size, (min, max): (Size, Size)) -> Size {
+    Size { width: size.width.max(360.0).clamp(min.width, max.width), height: size.height.max(440.0).clamp(min.height, max.height) }
+}
+
 pub(crate) fn tick_app(app: &mut crate::SolveApp, ctx: &egui::Context) {
     if let Err(reason) = ensure_production(app) {
         app.set_status(solidcraft_ui_text::tr(super::workspace::rule_key(reason.rule)).to_owned(), true);
@@ -1229,6 +1424,8 @@ pub(crate) fn tick_app(app: &mut crate::SolveApp, ctx: &egui::Context) {
         {
             host.set_header_action_visible(InstanceId("history".into()), ControlId("play".into()), app.preferences.history_play_button);
             host.set_live_drag(app.preferences.live_panel_drag_preview);
+            host.set_drag_out(app.preferences.panel_drag_out);
+            host.set_window_grip(own_title_bar(&app.preferences));
         }
         let result = (|| {
             #[cfg(not(target_arch = "wasm32"))]
