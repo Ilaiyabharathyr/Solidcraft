@@ -1028,6 +1028,34 @@ fn insert_knot(
     ctrl: &[[f64; 4]],
     u: f64,
 ) -> std::result::Result<(Vec<f64>, Vec<[f64; 4]>), SegmentError> {
+    insert_knot_with(p, knots, ctrl, u, |lo, u, hi| {
+        let alpha = (u - lo) / (hi - lo);
+        (alpha, 1.0 - alpha)
+    })
+}
+
+/// Boehm insertion with separate knot differences for both blend factors.
+/// This retains the small factor beside a large homogeneous weight.
+pub(super) fn insert_guide_knot(
+    p: usize,
+    knots: &[f64],
+    ctrl: &[[f64; 4]],
+    u: f64,
+) -> std::result::Result<(Vec<f64>, Vec<[f64; 4]>), String> {
+    insert_knot_with(p, knots, ctrl, u, |lo, u, hi| {
+        let span = hi - lo;
+        ((u - lo) / span, (hi - u) / span)
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn insert_knot_with(
+    p: usize,
+    knots: &[f64],
+    ctrl: &[[f64; 4]],
+    u: f64,
+    factors: impl Fn(f64, f64, f64) -> (f64, f64),
+) -> std::result::Result<(Vec<f64>, Vec<[f64; 4]>), SegmentError> {
     let n = ctrl.len();
     if n <= p || knots.len() != n + p + 1 {
         return Err(SegmentError::Input(
@@ -1052,11 +1080,15 @@ fn insert_knot(
         } else if i > k {
             pt(i - 1)
         } else {
-            let den = kn(i + p) - kn(i);
-            let alpha = if den > 0.0 { (u - kn(i)) / den } else { 1.0 };
+            let (lo, hi) = (kn(i), kn(i + p));
+            let (alpha, beta) = if hi > lo {
+                factors(lo, u, hi)
+            } else {
+                (1.0, 0.0)
+            };
             let mut r = [0.0; 4];
             for ((r, x), y) in r.iter_mut().zip(pt(i)).zip(pt(i - 1)) {
-                *r = x * alpha + y * (1.0 - alpha);
+                *r = x * alpha + y * beta;
             }
             r
         });
