@@ -37,7 +37,6 @@ pub mod delete;
 pub mod design_properties;
 pub mod design_tab_prefs;
 pub mod design_view_ui;
-pub mod design_views;
 mod dialog_descriptor;
 pub mod dialogs;
 pub mod dialogs_appearance;
@@ -366,6 +365,7 @@ mod view_confirm;
 pub mod view_gizmo;
 mod view_memory;
 pub mod view_pick;
+mod view_tiles;
 pub mod viewport;
 mod viewport_details;
 mod viewport_layout;
@@ -4084,17 +4084,24 @@ impl SolveApp {
         // against those footprints; the render domain stays unchanged.
         self.viewport.host_windows = ui_kit::Container::host_window_regions(ui.ctx());
         if let Some(rect) = self.viewport.rect.filter(|rect| rect.is_positive() && rect.is_finite()) {
-            let mut controls = ui.new_child(egui::UiBuilder::new().id_salt("universal_panel_controls").max_rect(rect));
-            controls.set_clip_rect(controls.clip_rect().intersect(rect));
+            if view_tiles::shown(self) {
+                view_tiles::card_controls(self, ui);
+            }
+            let mut controls = view_tiles::controls_ui(ui, self.session.uid, self.docs.views.active().id, rect);
             render_workspace::host_result_overlays(self, &mut controls);
             viewport::show_host_controls(self, &mut controls, rect);
         }
         self.resolve_fit(ui.ctx());
         panel_runtime::finish_app_host(self, ui);
+        if view_tiles::focus_pressed(self) {
+            ui.ctx().request_repaint();
+        }
     }
 
     fn show_workspace(&mut self, ui: &mut egui::Ui) {
-        if render_workspace::active(self) {
+        if view_tiles::shown(self) {
+            view_tiles::show(self, ui);
+        } else if render_workspace::active(self) {
             // The model view is not drawn, so no shown dimension can be double-clicked.
             dim_view::set_model_drawn(Vec::new());
             render_workspace::show(self, ui);

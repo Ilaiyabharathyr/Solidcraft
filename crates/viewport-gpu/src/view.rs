@@ -2534,19 +2534,20 @@ struct Cut {
 pub struct Renderer {
     /// Lazily created depth-only pipelines for feedback over a live product image.
     product_depth: Option<product_highlights::DepthPipelines>,
-    /// The offscreen cache contains transparent product highlights rather than shaded colour.
-    product_highlights: bool,
     /// Why the last `prepare` could not upload a scene (the device refused a buffer), if so.
     refused_upload: Option<String>,
     /// What the last frame drew ([`Renderer::stats`]).
     stats: DrawStatsHandle,
-    /// What the frame `prepare` drew offscreen (supersampled, or for see-through surfaces),
-    /// published when `paint` copies it into the view.
-    ss_stats: DrawStats,
+    /// The picture of the view being drawn ([`Picture`]); [`Renderer::activate`] swaps in
+    /// another view's, which waits in `parked` meanwhile.
+    pic: Picture,
+    /// The view `pic` belongs to (0 for the one viewport an app without tiles has).
+    pic_slot: u32,
+    /// The other views' pictures, by view slot.
+    parked: std::collections::HashMap<u32, Picture>,
     /// The AO depth prepass resources (a 1 × 1 stand-in while ambient occlusion is off).
     ao: ao::Resources,
     ground_ao: wgpu::RenderPipeline,
-    ground_ao_key: Option<(u64, u64, bool, u32, bool)>,
     tri: wgpu::RenderPipeline,
     /// `tri` and `tri_cut` for planned bodies (positions and normals from the GPU evaluation,
     /// colours per vertex, indexed).
@@ -2618,17 +2619,10 @@ pub struct Renderer {
     /// Group 0 with a one-entry palette: draws that do not read colours (images, AO, depth).
     bind: wgpu::BindGroup,
     linear_out: bool,
-    model: Batches,
-    /// The dragged bodies ([`MovingLayer`]), drawn with their own uniform (`moving_uniform`,
-    /// bound by `moving_bind`) while `moving_on`.
-    moving: Batches,
     moving_uniform: wgpu::Buffer,
     moving_bind: wgpu::BindGroup,
-    moving_on: bool,
     product: Batches,
     empty: Batches,
-    sketch: Batches,
-    highlight: Batches,
     preview: Batches,
     image: wgpu::RenderPipeline,
     image_bgl: wgpu::BindGroupLayout,
@@ -2659,23 +2653,10 @@ pub struct Renderer {
     /// The frame drawn offscreen at the viewport's own size (for the see-through surfaces' order-
     /// independent transparency), copied as it is.
     copy_blit: wgpu::RenderPipeline,
-    /// The offscreen frame is not at the viewport's size: filtered ([`Renderer::ss_blit`]).
-    ss_scaled: bool,
     /// Order-independent transparency for the model's see-through surfaces (`None` where the
-    /// device cannot blend into float targets: they are sorted instead), and its targets.
+    /// device cannot blend into float targets: they are sorted instead).
     oit: Option<oit::Pipelines>,
-    oit_targets: Option<oit::Targets>,
     ss_bgl: wgpu::BindGroupLayout,
-    /// The supersampled frame's textures, kept while its size stays.
-    ss: Option<Supersampled>,
-    /// This frame was drawn supersampled (in `prepare`): `paint` only filters it down.
-    ss_ready: bool,
-    /// What the picture in `ss` shows ([`frame_key`]): a frame whose key matches is blitted, not
-    /// drawn again.
-    ss_key: Option<u64>,
-    /// The filtered picture at the viewport's own size, made on the first still frame and blitted
-    /// as it is until the content changes: a still view does not pay for the filter every frame.
-    cached: Option<CachedPicture>,
     /// The device refused the cached picture's texture: still frames are filtered every time.
     no_cache: bool,
     /// Most memory (bytes) an offscreen frame may take ([`frame_bytes`]): [`SS_BUDGET`], halved
@@ -2708,6 +2689,40 @@ fn fs() -> @location(0) vec4<f32> {
     return vec4<f32>(0.0);
 }
 "#;
+
+/// One view's retained scenes and offscreen picture. A redraw can reuse its uploads after
+/// another tile has been prepared. Pipelines and uniforms are still shared by the renderer.
+#[derive(Default)]
+struct Picture {
+    /// The cached picture contains only transparent product highlights.
+    product_highlights: bool,
+    model: Batches,
+    /// The dragged bodies use a separate scene so they can share uploads with this view's model.
+    moving: Batches,
+    moving_on: bool,
+    sketch: Batches,
+    highlight: Batches,
+    ground_ao_key: Option<(u64, u64, bool, u32, bool)>,
+    /// What the frame `prepare` drew offscreen (supersampled, or for see-through surfaces),
+    /// published when `paint` copies it into the view.
+    ss_stats: DrawStats,
+    /// The offscreen frame is not at the viewport's size: filtered ([`Renderer::ss_blit`]).
+    ss_scaled: bool,
+    /// The see-through surfaces' order-independent transparency targets.
+    oit_targets: Option<oit::Targets>,
+    /// The supersampled frame's textures, kept while its size stays.
+    ss: Option<Supersampled>,
+    /// This frame was drawn supersampled (in `prepare`): `paint` only filters it down.
+    ss_ready: bool,
+    /// What the picture in `ss` shows ([`frame_key`]): a frame whose key matches is blitted, not
+    /// drawn again.
+    ss_key: Option<u64>,
+    /// The filtered picture at the viewport's own size, made on the first still frame and blitted
+    /// as it is until the content changes: a still view does not pay for the filter every frame.
+    cached: Option<CachedPicture>,
+    /// Drawn for a tile ([`Renderer::prepare_view`]): only ever shown from the offscreen frame.
+    isolated: bool,
+}
 
 /// A supersampled frame: the scene drawn at a multiple of the viewport's pixels.
 struct Supersampled {
@@ -3619,11 +3634,9 @@ impl Renderer {
             environment.set(studio.join());
             Renderer {
                 product_depth: None,
-                product_highlights: false,
                 refused_upload: None,
                 ao: ao.join(),
                 ground_ao: ground_ao.join(),
-                ground_ao_key: None,
                 depth_reset,
                 section_stencil,
                 #[cfg(test)]
@@ -3634,16 +3647,12 @@ impl Renderer {
                 ss_blit,
                 ss_filter,
                 copy_blit,
-                ss_scaled: false,
                 oit,
-                oit_targets: None,
                 ss_bgl,
-                ss: None,
-                ss_ready: false,
+                pic: Picture::default(),
+                pic_slot: 0,
+                parked: Default::default(),
                 stats: DrawStatsHandle::default(),
-                ss_stats: DrawStats::default(),
-                ss_key: None,
-                cached: None,
                 no_cache: false,
                 frame_budget: SS_BUDGET,
                 lowered: false,
@@ -3698,15 +3707,10 @@ impl Renderer {
                 uniform_bgl: Group0 { layout: bgl.clone(), environment: environment.clone() },
                 bind,
                 linear_out: t.format.is_srgb(),
-                model: Batches::default(),
-                moving: Batches::default(),
                 moving_uniform,
                 moving_bind,
-                moving_on: false,
                 product: Batches::default(),
                 empty: Batches::default(),
-                sketch: Batches::default(),
-                highlight: Batches::default(),
                 preview: Batches::default(),
             }
         })
@@ -4079,33 +4083,75 @@ impl Renderer {
     /// content is the same as the picture drawn last is not drawn again: that picture is blitted
     /// instead, so pointer moves and UI animations over a still view cost no scene work.
     pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, frame: &Frame) {
+        self.activate(0);
+        self.prepare_frame(device, queue, encoder, frame, false);
+    }
+
+    /// [`Renderer::prepare`] for one of several views drawn in the same window (tiles): `slot`
+    /// names the view, and its picture is kept apart from the others'. The view is drawn
+    /// offscreen in a submission of its own, because the uniform, the culling and the glass
+    /// order are written to buffers all the views share, and a write reaches the GPU in front of
+    /// the commands submitted after it: one submission per view keeps each view's writes with
+    /// its own draws. [`Renderer::paint_view`] then shows the picture.
+    pub fn prepare_view(&mut self, slot: u32, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Frame) {
+        self.activate(slot);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sc_view") });
+        self.prepare_frame(device, queue, &mut encoder, frame, true);
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Make `slot` the view the renderer draws: its picture comes in, and the one that was in
+    /// goes to wait for its next frame.
+    fn activate(&mut self, slot: u32) {
+        if slot == self.pic_slot {
+            return;
+        }
+        let next = self.parked.remove(&slot).unwrap_or_default();
+        let before = std::mem::replace(&mut self.pic, next);
+        self.parked.insert(self.pic_slot, before);
+        self.pic_slot = slot;
+    }
+
+    /// The picture last drawn for `slot`.
+    fn picture(&self, slot: u32) -> Option<&Picture> {
+        if slot == self.pic_slot { Some(&self.pic) } else { self.parked.get(&slot) }
+    }
+
+    /// Forget the pictures of views that are gone: only `slots` (and the one being drawn) keep
+    /// their textures.
+    pub fn retain_views(&mut self, slots: &[u32]) {
+        self.parked.retain(|slot, _| slots.contains(slot));
+    }
+
+    fn prepare_frame(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, frame: &Frame, isolated: bool) {
         let res = self;
         let cb = frame;
-        if res.product_highlights {
-            res.product_highlights = false;
-            res.ss_key = None;
-            res.cached = None;
+        res.pic.isolated = isolated;
+        if res.pic.product_highlights {
+            res.pic.product_highlights = false;
+            res.pic.ss_key = None;
+            res.pic.cached = None;
         }
         res.refused_upload = None;
         let key = frame_key(cb);
-        if can_reuse(res.ss_ready && res.ss.is_some(), res.ss_key, key) {
+        if can_reuse(res.pic.ss_ready && res.pic.ss.is_some(), res.pic.ss_key, key) {
             // A still frame shows the picture as it is; the first one filters it down once.
-            let filter = res.ss_scaled && res.cached.is_none();
+            let filter = res.pic.ss_scaled && res.pic.cached.is_none();
             if filter {
                 res.cache_picture(device, encoder, cb.size_px);
             }
             // The scene isn't drawn again: `paint`'s blit (and that filter) is all this frame draws.
-            res.ss_stats = DrawStats { draw_calls: u32::from(filter), ..DrawStats::default() };
+            res.pic.ss_stats = DrawStats { draw_calls: u32::from(filter), ..DrawStats::default() };
             return;
         }
-        res.cached = None;
+        res.pic.cached = None;
         if cb.product {
             let _ = res.prepare_product_geometry(device, queue, cb);
             res.product.sort_glass(queue, cb.back);
             // The product picture goes through the window's pass too: offscreen when the targets
             // differ or it is drawn smaller, else straight into the window's pass.
-            res.ss_ready = (res.window_differs() || cb.ssaa != 1.0) && res.supersample(device, encoder, cb, false);
-            res.ss_key = (res.ss_ready && res.refused_upload.is_none()).then_some(key);
+            res.pic.ss_ready = (isolated || res.window_differs() || cb.ssaa != 1.0) && res.supersample(device, encoder, cb, false);
+            res.pic.ss_key = (res.pic.ss_ready && res.refused_upload.is_none()).then_some(key);
             return;
         }
         res.take_ready_tessellation();
@@ -4116,7 +4162,7 @@ impl Renderer {
         let mut uploads = Vec::with_capacity(5);
         if let Some(mv) = &cb.moving {
             let tess = res.tess.as_ref().map(|t| (t, &mut *encoder));
-            uploads.push(res.moving.take_sharing(
+            uploads.push(res.pic.moving.take_sharing(
                 device,
                 queue,
                 &res.moving_uniform,
@@ -4125,51 +4171,62 @@ impl Renderer {
                 &mv.slot,
                 tess,
                 oit,
-                Some(&mut res.model),
+                Some(&mut res.pic.model),
             ));
         }
         res.uniform_bgl.environment.upload(queue);
         let tess = res.tess.as_ref().map(|t| (t, &mut *encoder));
-        uploads.push(res.model.take_sharing(device, queue, &res.uniform, &res.uniform_bgl, cb.key, &cb.slot, tess, oit, Some(&mut res.moving)));
+        uploads.push(res.pic.model.take_sharing(
+            device,
+            queue,
+            &res.uniform,
+            &res.uniform_bgl,
+            cb.key,
+            &cb.slot,
+            tess,
+            oit,
+            Some(&mut res.pic.moving),
+        ));
         match &cb.moving {
             Some(mv) => {
-                res.moving.sort_glass(queue, local_direction(&mv.transform, cb.back));
+                res.pic.moving.sort_glass(queue, local_direction(&mv.transform, cb.back));
                 queue.write_buffer(&res.moving_uniform, 0, &uniform_bytes_moved(cb, res.linear_out, res.target.reversed_depth(), mv.transform));
-                res.moving_on = true;
+                res.pic.moving_on = true;
             }
             // The drag is over: its buffers go.
-            None if res.moving_on => {
-                res.moving = Batches::default();
-                res.moving_on = false;
+            None if res.pic.moving_on => {
+                res.pic.moving = Batches::default();
+                res.pic.moving_on = false;
             }
             None => {}
         }
-        uploads.push(res.sketch.take(device, queue, &res.uniform, &res.uniform_bgl, cb.sketch_key, &cb.sketch_slot, None, oit));
+        uploads.push(res.pic.sketch.take(device, queue, &res.uniform, &res.uniform_bgl, cb.sketch_key, &cb.sketch_slot, None, oit));
         // The highlight evaluates plans of its own where the model has none to draw again (in
         // Wireframe, a whole lit body's faces).
         let tess = res.tess.as_ref().map(|t| (t, &mut *encoder));
-        uploads.push(res.highlight.take(device, queue, &res.uniform, &res.uniform_bgl, cb.hl_key, &cb.hl_slot, tess, oit));
+        uploads.push(res.pic.highlight.take(device, queue, &res.uniform, &res.uniform_bgl, cb.hl_key, &cb.hl_slot, tess, oit));
         uploads.push(res.preview.take(device, queue, &res.uniform, &res.uniform_bgl, cb.pv_key, &cb.pv_slot, None, oit));
         // A refused scene leaves the previous picture; a capture must not pass it off as the new one.
         res.refused_upload = uploads.into_iter().find_map(Result::err);
         // See-through surfaces are drawn without sorting where the device can (order-independent
         // transparency, in an offscreen frame); else their triangles are sorted for the view.
         // The dragged bodies' own (their blocks' glass is drawn only there with it) count too.
-        let see_through = res.oit.is_some() && (res.model.see_through() || (res.moving_on && res.moving.see_through()));
+        let see_through = res.oit.is_some() && (res.pic.model.see_through() || (res.pic.moving_on && res.pic.moving.see_through()));
         if !see_through {
-            res.model.sort_glass(queue, cb.back);
+            res.pic.model.sort_glass(queue, cb.back);
         }
-        res.model.cull(device, queue, &cb.view_proj, cb.size_px);
-        let ground_visible = res.model.ground_input.is_some_and(|ground| ground.visible_from(cb.back));
+        res.pic.model.cull(device, queue, &cb.view_proj, cb.size_px);
+        let ground_visible = res.pic.model.ground_input.is_some_and(|ground| ground.visible_from(cb.back));
         let ground_key = (cb.key, cb.pv_key, cb.pv_hide, cb.ao_radius.to_bits(), ground_visible);
-        if res.ground_ao_key != Some(ground_key) {
+        if res.pic.ground_ao_key != Some(ground_key) {
             let preview = if cb.pv_hide { None } else { cb.preview_bounds };
-            res.model.ground_ao = res
+            res.pic.model.ground_ao = res
+                .pic
                 .model
                 .ground_input
                 .filter(|_| ground_visible)
                 .and_then(|ground| upload(device, "sc_ground_ao", &ground.vertices_with_radius(preview, cb.ao_radius), TRI_SIZE));
-            res.ground_ao_key = Some(ground_key);
+            res.pic.ground_ao_key = Some(ground_key);
         }
         queue.write_buffer(&res.uniform, 0, &uniform_bytes(cb, cb.size_px[0], cb.size_px[1], res.linear_out, res.target.reversed_depth()));
         if let Some(a) = &cb.access
@@ -4180,9 +4237,9 @@ impl Renderer {
         }
         let preview = if cb.pv_hide { &res.empty } else { &res.preview };
         // Each scene with its own palette's bind (the layer's carries its own uniform too).
-        let moving = res.moving_on.then(|| (scene_bind(&res.moving, &res.moving_bind), &res.moving));
+        let moving = res.pic.moving_on.then(|| (scene_bind(&res.pic.moving, &res.moving_bind), &res.pic.moving));
         let layers: Vec<(&wgpu::BindGroup, &Batches)> =
-            [Some((scene_bind(&res.model, &res.bind), &res.model)), moving, Some((scene_bind(preview, &res.bind), preview))]
+            [Some((scene_bind(&res.pic.model, &res.bind), &res.pic.model)), moving, Some((scene_bind(preview, &res.bind), preview))]
                 .into_iter()
                 .flatten()
                 .collect();
@@ -4237,36 +4294,46 @@ impl Renderer {
             }
         }
         res.clouds.prepare(device, queue, &res.cloud_pipes, &cb.clouds);
-        res.ss_ready = (cb.ssaa != 1.0 || see_through || res.window_differs()) && res.supersample(device, encoder, cb, see_through);
-        res.ss_key = (res.ss_ready && res.refused_upload.is_none()).then_some(key);
+        res.pic.ss_ready = (isolated || cb.ssaa != 1.0 || see_through || res.window_differs()) && res.supersample(device, encoder, cb, see_through);
+        res.pic.ss_key = (res.pic.ss_ready && res.refused_upload.is_none()).then_some(key);
     }
 
     /// Draw the frame into `pass` within `viewport` (x, y, width, height in physical pixels):
     /// filtered down from the supersampled frame [`Renderer::prepare`] drew, or drawn directly.
     pub fn paint(&self, frame: &Frame, pass: &mut wgpu::RenderPass<'static>, viewport: [f32; 4]) {
+        self.paint_view(0, frame, pass, viewport);
+    }
+
+    /// [`Renderer::paint`] for the view `slot` ([`Renderer::prepare_view`]).
+    pub fn paint_view(&self, slot: u32, frame: &Frame, pass: &mut wgpu::RenderPass<'static>, viewport: [f32; 4]) {
         let [x, y, w, h] = viewport;
         if !(w > 0.0 && h > 0.0) {
             return;
         }
+        let Some(pic) = self.picture(slot) else {
+            self.publish(DrawStats::default());
+            return;
+        };
         pass.set_viewport(x, y, w, h, 0.0, 1.0);
-        if self.ss_ready
-            && let Some(ss) = &self.ss
+        if pic.ss_ready
+            && let Some(ss) = &pic.ss
         {
             // A still view's picture is already at the viewport's size: blit it as it is.
-            if let Some(cached) = &self.cached {
+            if let Some(cached) = &pic.cached {
                 pass.set_pipeline(&self.copy_blit);
                 pass.set_bind_group(0, &cached.bind, &[]);
             } else {
-                pass.set_pipeline(if self.ss_scaled { &self.ss_blit } else { &self.copy_blit });
+                pass.set_pipeline(if pic.ss_scaled { &self.ss_blit } else { &self.copy_blit });
                 pass.set_bind_group(0, &ss.bind, &[]);
             }
             pass.draw(0..3, 0..1);
-            self.publish(DrawStats { draw_calls: self.ss_stats.draw_calls + 1, supersampled: self.ss_scaled, ..self.ss_stats });
+            self.publish(DrawStats { draw_calls: pic.ss_stats.draw_calls + 1, supersampled: pic.ss_scaled, ..pic.ss_stats });
             return;
         }
         // The pipelines draw into the scene's kind of target, not the window's pass: with no
-        // offscreen frame (the device had no memory for one, #7296) nothing can be drawn.
-        if self.window_differs() {
+        // offscreen frame (the device had no memory for one, #7296) nothing can be drawn. A
+        // tile is never drawn straight into the pass: the uniform is another view's by now.
+        if pic.isolated || self.window_differs() {
             self.publish(DrawStats::default());
             return;
         }
@@ -4287,7 +4354,7 @@ impl Renderer {
 
     /// What the model scene's last change uploaded ([`UploadStats`]).
     pub fn uploads(&self) -> UploadStats {
-        self.model.uploads
+        self.pic.model.uploads
     }
 
     fn publish(&self, drawn: DrawStats) {
@@ -4343,11 +4410,11 @@ impl Renderer {
             }
         };
         let (m, sk, h, pv) = if cb.product {
-            (&res.product, &res.empty, &res.highlight, &res.empty)
+            (&res.product, &res.empty, &res.pic.highlight, &res.empty)
         } else if cb.pv_hide {
-            (&res.model, &res.sketch, &res.highlight, &res.empty)
+            (&res.pic.model, &res.pic.sketch, &res.pic.highlight, &res.empty)
         } else {
-            (&res.model, &res.sketch, &res.highlight, &res.preview)
+            (&res.pic.model, &res.pic.sketch, &res.pic.highlight, &res.preview)
         };
         // A scene's block triangles of one class, drawn from each block's canonical vertex buffer.
         let blocks_of = |pass: &mut wgpu::RenderPass<'static>, p: &wgpu::RenderPipeline, class: TriClass, b: &Batches| {
@@ -4362,7 +4429,7 @@ impl Renderer {
         let block_class = |pass: &mut wgpu::RenderPass<'static>, p: &wgpu::RenderPipeline, class: TriClass| blocks_of(pass, p, class, m);
         // The dragged bodies ([`MovingLayer`]): drawn after the model's part of each step, with
         // their own palette and uniform. The model's bind is set again after them.
-        let moving = (res.moving_on && !cb.product).then_some(&res.moving);
+        let moving = (res.pic.moving_on && !cb.product).then_some(&res.pic.moving);
         let in_moving = |pass: &mut wgpu::RenderPass<'static>, draw: &dyn Fn(&mut wgpu::RenderPass<'static>, &Batches)| {
             if let Some(mv) = moving {
                 pass.set_bind_group(0, scene_bind(mv, &res.moving_bind), &[]);
@@ -4677,9 +4744,9 @@ impl Renderer {
     /// The model's see-through surfaces into the order-independent transparency's targets, then
     /// a drag's layer's with its own palette and uniform.
     fn draw_see_through(&self, pass: &mut wgpu::RenderPass<'static>, p: &oit::Pipelines, tally: &Tally) {
-        Self::see_through_of(&self.model, scene_bind(&self.model, &self.bind), pass, p, tally);
-        if self.moving_on {
-            Self::see_through_of(&self.moving, scene_bind(&self.moving, &self.moving_bind), pass, p, tally);
+        Self::see_through_of(&self.pic.model, scene_bind(&self.pic.model, &self.bind), pass, p, tally);
+        if self.pic.moving_on {
+            Self::see_through_of(&self.pic.moving, scene_bind(&self.pic.moving, &self.moving_bind), pass, p, tally);
         }
     }
 
@@ -4725,7 +4792,7 @@ impl Renderer {
     /// [`Renderer::cached`] keeps: still frames then blit it as it is instead of filtering it every
     /// time.
     fn cache_picture(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, size_px: [f32; 2]) {
-        let Some(ss) = &self.ss else { return };
+        let Some(ss) = &self.pic.ss else { return };
         let [w, h] = size_px;
         if !(w >= 1.0 && h >= 1.0) || self.no_cache {
             return;
@@ -4781,7 +4848,7 @@ impl Renderer {
             pass.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
             pass.draw(0..3, 0..1);
         }
-        self.cached = Some(CachedPicture { _view: view, bind });
+        self.pic.cached = Some(CachedPicture { _view: view, bind });
     }
 
     /// Draw the frame supersampled (`cb.ssaa` times the viewport's pixels each way, within the
@@ -4797,7 +4864,7 @@ impl Renderer {
         };
         // See-through surfaces (order-independent transparency) and a window pass of another kind
         // (samples, depth) need a frame of their own, even at the viewport's own size.
-        let needs_own = see_through || self.window_differs() || self.product_highlights;
+        let needs_own = see_through || self.pic.isolated || self.window_differs() || self.pic.product_highlights;
         let samples = self.target.samples;
         let mut drawn = None;
         for _ in 0..FRAME_TRIES {
@@ -4812,15 +4879,15 @@ impl Renderer {
                 })
             });
             let Some((size, filtered)) = frame else {
-                self.ss = None;
+                self.pic.ss = None;
                 return false;
             };
-            if self.ss.as_ref().is_some_and(|ss| ss.size == size) {
+            if self.pic.ss.as_ref().is_some_and(|ss| ss.size == size) {
                 drawn = Some((size, filtered));
                 break;
             }
             // The old frame goes before the new one is asked for.
-            self.ss = None;
+            self.pic.ss = None;
             match allocated(device, || self.supersampled(device, size)) {
                 Ok(ss) => {
                     let _cleared = clear_resolve_targets(encoder, ss.resolve.as_ref());
@@ -4828,7 +4895,7 @@ impl Renderer {
                     {
                         self.resolve_clears += _cleared;
                     }
-                    self.ss = Some(ss);
+                    self.pic.ss = Some(ss);
                     drawn = Some((size, filtered));
                     break;
                 }
@@ -4843,9 +4910,9 @@ impl Renderer {
             }
         }
         let Some((size, filtered)) = drawn else { return false };
-        self.ss_scaled = filtered;
-        if see_through && self.oit_targets.as_ref().is_none_or(|t| t.size != size) {
-            self.oit_targets = None;
+        self.pic.ss_scaled = filtered;
+        if see_through && self.pic.oit_targets.as_ref().is_none_or(|t| t.size != size) {
+            self.pic.oit_targets = None;
             match self.oit.as_ref().map(|p| allocated(device, || p.targets(device, size, samples))) {
                 Some(Ok(targets)) => {
                     let _cleared = clear_resolve_targets(encoder, targets.resolves());
@@ -4853,7 +4920,7 @@ impl Renderer {
                     {
                         self.resolve_clears += _cleared;
                     }
-                    self.oit_targets = Some(targets);
+                    self.pic.oit_targets = Some(targets);
                 }
                 Some(Err(e)) => {
                     log::warn!("see-through surfaces are sorted: the GPU refused their {} × {} targets: {e}", size[0], size[1]);
@@ -4863,7 +4930,7 @@ impl Renderer {
                 None => {}
             }
         }
-        let Some(ss) = &self.ss else { return false };
+        let Some(ss) = &self.pic.ss else { return false };
         let depth_format = self.target.depth;
         let stencil = depth_format.is_some_and(|f| f.has_stencil_aspect());
         // The depth is kept for the passes after the first when there are see-through surfaces.
@@ -4891,16 +4958,16 @@ impl Renderer {
                 .forget_lifetime()
         };
         let tally = Tally::default();
-        let (Some(p), Some(t), true) = (&self.oit, &self.oit_targets, see_through) else {
+        let (Some(p), Some(t), true) = (&self.oit, &self.pic.oit_targets, see_through) else {
             let mut first = pass(encoder, true);
             first.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
-            if self.product_highlights {
+            if self.pic.product_highlights {
                 self.draw_product_highlights(&mut first, &tally);
             } else {
                 self.draw(cb, &mut first, Phase::All, &tally);
             }
             drop(first);
-            self.ss_stats = tally.stats();
+            self.pic.ss_stats = tally.stats();
             return true;
         };
         {
@@ -4916,7 +4983,7 @@ impl Renderer {
             over.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
             self.draw(cb, &mut over, Phase::AfterSeeThrough, &tally);
         }
-        self.ss_stats = tally.stats();
+        self.pic.ss_stats = tally.stats();
         true
     }
 
@@ -5931,8 +5998,8 @@ mod glass_tests {
         };
         let take = |r: &mut Renderer, key: u64, sc: GpuScene| {
             let slot: SceneSlot = Arc::new(Mutex::new(Some(sc)));
-            r.model.take(&device, &queue, &r.uniform, &r.uniform_bgl, key, &slot, None, false).unwrap();
-            r.model.uploads
+            r.pic.model.take(&device, &queue, &r.uniform, &r.uniform_bgl, key, &slot, None, false).unwrap();
+            r.pic.model.uploads
         };
         let first = take(&mut r, 1, scene(&palette, &bytes));
         assert_eq!(first.geometry, (2 * 3 * TRI_SIZE) as u64, "the block's vertices and the sorted stream: {first:?}");
@@ -6029,8 +6096,8 @@ mod glass_tests {
         let (color_view, depth_view) = (color.create_view(&Default::default()), depth_tex.create_view(&Default::default()));
         let mut encoder = device.create_command_encoder(&Default::default());
         r.prepare(&device, &queue, &mut encoder, &frame);
-        if !r.model.see_through() {
-            assert!(r.ss.is_none(), "opaque geometry and the ground shadow use the direct path");
+        if !r.pic.model.see_through() {
+            assert!(r.pic.ss.is_none(), "opaque geometry and the ground shadow use the direct path");
         }
         {
             let mut pass = encoder
@@ -6215,11 +6282,15 @@ mod glass_tests {
 
     /// A frame of opaque triangles at the fixed view.
     fn test_scene() -> GpuScene {
+        test_scene_with_color([255, 0, 0, 255])
+    }
+
+    fn test_scene_with_color(rgba: [u8; 4]) -> GpuScene {
         let mut scene = GpuScene::default();
-        let red = scene.color([255, 0, 0, 255]);
-        scene.tri([-5.0, -5.0, 0.0], [0.0, 0.0, 1.0], red);
-        scene.tri([5.0, -5.0, 0.0], [0.0, 0.0, 1.0], red);
-        scene.tri([0.0, 5.0, 0.0], [0.0, 0.0, 1.0], red);
+        let color = scene.color(rgba);
+        scene.tri([-5.0, -5.0, 0.0], [0.0, 0.0, 1.0], color);
+        scene.tri([5.0, -5.0, 0.0], [0.0, 0.0, 1.0], color);
+        scene.tri([0.0, 5.0, 0.0], [0.0, 0.0, 1.0], color);
         scene
     }
 
@@ -6548,16 +6619,119 @@ mod glass_tests {
         // Supersampled: the picture is drawn into a texture, so it can be cached.
         let mut frame = test_frame(test_scene(), 2.0);
         let first = render_frame(&mut r, &device, &queue, &frame, true);
-        assert!(r.ss_ready && r.ss_scaled, "the first frame is drawn supersampled");
+        assert!(r.pic.ss_ready && r.pic.ss_scaled, "the first frame is drawn supersampled");
         let again = render_frame(&mut r, &device, &queue, &frame, true);
-        assert!(r.cached.is_some(), "the still frame's filtered picture is cached");
+        assert!(r.pic.cached.is_some(), "the still frame's filtered picture is cached");
         // The cached picture goes through one more 8-bit texture than the direct filter.
         assert!(first.iter().zip(&again).all(|(a, b)| a.abs_diff(*b) <= 1), "a reused frame draws the same picture");
         // A moved camera is a new picture: the cache is dropped and the scene drawn again.
         frame.view_proj[3][0] += 0.5;
         let moved = render_frame(&mut r, &device, &queue, &frame, true);
-        assert!(r.cached.is_none(), "a changed view cannot show the cached picture");
+        assert!(r.pic.cached.is_none(), "a changed view cannot show the cached picture");
         assert_ne!(first, moved, "the changed view is drawn");
+    }
+
+    /// Two views in one window pass each show their own camera: the picture of the view drawn
+    /// first is not overwritten by the one drawn after it (tiles).
+    #[test]
+    fn two_tiles_in_one_pass_each_show_their_own_view() {
+        let (_, device, queue) = match crate::open_headless(crate::test_env::policy()) {
+            Ok(opened) => opened,
+            Err(error) if crate::test_env::skip_unless_required(crate::test_env::required(), &error) => return,
+            Err(error) => panic!("required GPU unavailable: {error}"),
+        };
+        let depth = crate::depth_format(&device, true);
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = GpuTarget { format, depth: Some(depth), samples: 1, tess: false, oit: false };
+        let mut r = Renderer::new(&device, target, None);
+        let mut a = test_frame(test_scene(), 1.0);
+        let mut b = test_frame(test_scene_with_color([0, 0, 255, 255]), 1.0);
+        b.key = 2;
+        a.view_proj[3][0] = -0.6;
+        b.view_proj[3][0] = 0.6;
+        const SIZE: u32 = 64;
+        let texture = |format, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d { width: 2 * SIZE, height: SIZE, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let color = texture(format, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+        let color_view = color.create_view(&Default::default());
+        let depth_view = texture(depth, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default());
+        // Both tiles are prepared before either is painted, as egui does for one frame.
+        r.prepare_view(1, &device, &queue, &a);
+        r.prepare_view(2, &device, &queue, &b);
+        assert!(a.slot.lock().unwrap().is_none() && b.slot.lock().unwrap().is_none());
+        // Focus swaps the draw order and changes which view bleeds into the window.
+        // Both frames must redraw using the uploads that were already consumed.
+        a.view_proj[3][1] += 0.02;
+        b.view_proj[3][1] -= 0.02;
+        r.prepare_view(2, &device, &queue, &b);
+        r.prepare_view(1, &device, &queue, &a);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::WHITE), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(far_depth(reversed_depth(Some(depth)))),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: depth
+                            .has_stencil_aspect()
+                            .then_some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Store }),
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
+            r.paint_view(1, &a, &mut pass, [0.0, 0.0, SIZE as f32, SIZE as f32]);
+            r.paint_view(2, &b, &mut pass, [SIZE as f32, 0.0, SIZE as f32, SIZE as f32]);
+        }
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(2 * SIZE * SIZE * 4),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            color.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &read,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(2 * SIZE * 4), rows_per_image: Some(SIZE) },
+            },
+            wgpu::Extent3d { width: 2 * SIZE, height: SIZE, depth_or_array_layers: 1 },
+        );
+        queue.submit([encoder.finish()]);
+        read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        let pixels = read.slice(..).get_mapped_range().map(|m| m.to_vec()).unwrap_or_default();
+        let has_color = |x: u32, y: u32, channel: usize| {
+            let i = ((y * 2 * SIZE + x) * 4) as usize;
+            pixels[i + channel] > 200 && pixels[i + 1] < 80
+        };
+        // The triangle is drawn left of the centre in the first tile and right of it in the second.
+        let (mid, quarter) = (SIZE / 2, SIZE / 4);
+        assert!(has_color(quarter, mid + quarter / 2, 0), "the first tile draws its own camera's triangle at the left");
+        assert!(!has_color(SIZE - 4, mid + quarter / 2, 0), "the first tile does not show the second camera's picture");
+        assert!(has_color(2 * SIZE - quarter, mid + quarter / 2, 2), "the second tile draws its own camera's triangle at the right");
+        assert!(!has_color(SIZE + 4, mid + quarter / 2, 2), "the second tile does not show the first camera's picture");
     }
 
     /// A window pass of another kind (one sample, no depth) shows the same picture: the scene is
@@ -6574,7 +6748,7 @@ mod glass_tests {
         // Each renderer takes the scene out of its slot: a frame of its own for each.
         let drawn = render_frame(&mut direct, &device, &queue, &test_frame(test_scene(), 1.0), true);
         let shown = render_frame(&mut split, &device, &queue, &test_frame(test_scene(), 1.0), false);
-        assert!(split.ss_ready, "the split frame is drawn offscreen");
+        assert!(split.pic.ss_ready, "the split frame is drawn offscreen");
         let max = drawn.iter().zip(&shown).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
         assert!(max <= 1, "the blitted picture matches the direct one (max difference {max})");
     }
@@ -6602,8 +6776,8 @@ mod glass_tests {
             let mut frame = test_frame(test_scene(), ssaa);
             frame.size_px = [width as f32, 64.0];
             let shown = render_frame(&mut r, &device, &queue, &frame, false);
-            let size = r.ss.as_ref().map(|ss| ss.size);
-            assert!(r.ss_ready && size.is_some_and(|[w, _]| w <= limit), "{width} px at {ssaa}×: drawn within the device ({size:?})");
+            let size = r.pic.ss.as_ref().map(|ss| ss.size);
+            assert!(r.pic.ss_ready && size.is_some_and(|[w, _]| w <= limit), "{width} px at {ssaa}×: drawn within the device ({size:?})");
             assert!(red(&shown), "{width} px at {ssaa}×: the view shows the model");
             let stats = r.stats().lock().map(|s| *s).unwrap_or_default();
             assert!(stats.lowered, "{width} px at {ssaa}×: the lower quality is reported");
@@ -6611,7 +6785,7 @@ mod glass_tests {
             let budget = r.frame_budget;
             frame.view_proj[3][0] += 0.01;
             assert!(
-                red(&render_frame(&mut r, &device, &queue, &frame, false)) && r.frame_budget == budget && r.ss.as_ref().map(|ss| ss.size) == size
+                red(&render_frame(&mut r, &device, &queue, &frame, false)) && r.frame_budget == budget && r.pic.ss.as_ref().map(|ss| ss.size) == size
             );
         }
     }
@@ -6649,13 +6823,13 @@ mod glass_tests {
             // A new scene key, so the renderer takes the see-through scene instead of keeping its own.
             let glass = Frame { key: 2, ..test_frame(two_layers([220, 40, 40, 128], [40, 40, 220, 128], true), 1.0) };
             render_frame(&mut r, &device, &queue, &glass, false);
-            assert!(r.model.see_through() && r.oit_targets.is_some(), "the see-through frame is drawn with order-independent transparency");
+            assert!(r.pic.model.see_through() && r.pic.oit_targets.is_some(), "the see-through frame is drawn with order-independent transparency");
             assert_eq!(r.resolve_clears, 5, "the frame's colour and both see-through sums are cleared first");
         }
         // One sample: the scene's own pass clears the texture it draws into, and nothing is resolved.
         let mut single = Renderer::with_window_target(&device, GpuTarget { depth: Some(depth), samples: 1, ..window }, window, None);
         render_frame(&mut single, &device, &queue, &test_frame(test_scene(), 1.0), false);
-        assert!(single.ss_ready, "the 1x scene is drawn offscreen too");
+        assert!(single.pic.ss_ready, "the 1x scene is drawn offscreen too");
         assert_eq!(single.resolve_clears, 0, "at one sample no texture is resolved into");
     }
 
@@ -6674,7 +6848,7 @@ mod glass_tests {
         };
         let red = [220, 40, 40, 128];
         let model = middle(&render_frame(&mut r, &device, &queue, &test_frame(two_layers(red, red, true), 1.0), true));
-        assert!(r.ss_ready, "the see-through modelling frame is drawn offscreen");
+        assert!(r.pic.ss_ready, "the see-through modelling frame is drawn offscreen");
         assert!(model[0] > model[2] + 60, "the modelling frame shows its red layers: {model:?}");
         let mut product = GpuScene::default();
         let blue = product.color([40, 80, 220, 255]);
@@ -6711,7 +6885,7 @@ mod glass_tests {
                 assert_eq!(renderer.check_msaa(&device, &queue).unwrap(), super::MsaaCheck::Passed);
                 eprintln!("startup check: {} {format:?} {samples}x: {:?}", adapter.get_info().name, start.elapsed());
                 assert!(
-                    renderer.model.key.is_none() && renderer.highlight.key.is_none() && renderer.ss.is_none(),
+                    renderer.pic.model.key.is_none() && renderer.pic.highlight.key.is_none() && renderer.pic.ss.is_none(),
                     "probe uploads must not replace the first real frame"
                 );
                 assert_eq!(renderer.target().samples, samples);
