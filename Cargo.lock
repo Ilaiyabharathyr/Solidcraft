@@ -6134,6 +6134,7 @@ dependencies = [
  "sha2 0.10.9",
  "solidcore-ops",
  "solidcore-record",
+ "solidcore-step",
  "solidcore-tess",
  "solidcraft-color",
  "solidcraft-doc",
