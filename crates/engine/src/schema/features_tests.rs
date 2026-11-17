@@ -1398,6 +1398,7 @@ fn pattern_schemas_and_the_key_check_agree() {
             "reversed2",
             "skip",
             "skip_members",
+            "skip_width",
             "spacing1",
             "spacing2",
         ],
