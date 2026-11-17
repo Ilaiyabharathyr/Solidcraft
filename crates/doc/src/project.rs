@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use solidcore_record::{Plane, Seg2, Vec2, Vec3};
 use solidcraft_geom::Mesh;
-use solidcraft_sketch::linalg::{Mat, solve};
+use solidcraft_sketch::linalg::{Mat as LinalgMat, solve};
 use solidcraft_sketch::{CurveKind, Link, LinkGeom, LinkKind, LinkPlacement, LinkSource, Sketch, WireCurve};
 
 use crate::eval::ModelState;
@@ -877,7 +877,7 @@ fn ls_ellipse(samples: &[Vec2]) -> Option<(Vec2, f64, f64, Vec2)> {
     }
     // `a x^2 + b x y + c y^2 + d x + e y + f = 0`, with `a + c = 1` and the samples centred
     // and scaled: `a (x^2 - y^2) + b x y + d x + e y + f = -y^2`.
-    let mut m = Mat::zeros(5, 5);
+    let mut m = LinalgMat::zeros(5, 5);
     let mut rhs = [0.0f64; 5];
     for p in samples {
         let q = (*p - mean) / rms;
