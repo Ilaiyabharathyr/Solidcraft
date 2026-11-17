@@ -108,22 +108,31 @@ fn a_face_on_a_plane_facing_the_other_way_keeps_its_side() {
     assert!((volume(&s) - 1000.0).abs() < 1e-6, "{}", volume(&s));
 }
 
+/// A missing coedge is hostile input: no panic, and the face whose loop uses it is left out of an
+/// open surface of the others (the refusal names that face).
 #[test]
-fn a_missing_coedge_refuses_its_region_without_a_panic() {
+fn a_missing_coedge_leaves_its_face_out_without_a_panic() {
     let mut ir = cube();
     ir.model.coedges.remove(0);
     let bodies = read_bodies(&ir, None);
-    assert!(bodies.read.is_empty());
-    assert_eq!(bodies.failures.len(), 1);
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
     assert!(
-        bodies.failures[0].message.contains("missing coedge"),
+        s.sheet && s.brep.faces.len() == 5,
+        "{} faces",
+        s.brep.faces.len()
+    );
+    assert!(
+        s.notes.iter().any(|n| n.contains("missing coedge")),
         "{:?}",
-        bodies.failures
+        s.notes
     );
 }
 
+/// A vertex 5 mm from its edges: the faces the refusals name, one at a time, are left out of an
+/// open surface of the others; only faces a refusal names, and never all of them.
 #[test]
-fn a_vertex_far_from_its_edges_refuses_its_region() {
+fn a_vertex_far_from_its_edges_leaves_the_faces_at_it_out() {
     let mut ir = cube();
     let v = ir.model.vertices.first().unwrap().point.clone();
     let p = ir.model.points.iter_mut().find(|p| p.id == v).unwrap();
@@ -133,11 +142,21 @@ fn a_vertex_far_from_its_edges_refuses_its_region() {
     wire["position"]["x"] = serde_json::json!(x + 5.0);
     *p = serde_json::from_value(wire).unwrap();
     let bodies = read_bodies(&ir, None);
-    assert!(bodies.read.is_empty());
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
+    let left_out: Vec<&String> = s
+        .notes
+        .iter()
+        .filter(|n| n.starts_with("left out: "))
+        .collect();
     assert!(
-        bodies.failures[0].message.contains("off its curve"),
-        "{:?}",
-        bodies.failures
+        s.sheet && !left_out.is_empty() && s.brep.faces.len() + left_out.len() == 6,
+        "{} faces, {left_out:?}",
+        s.brep.faces.len()
+    );
+    assert!(
+        left_out.iter().all(|n| n.contains("off its curve")),
+        "{left_out:?}"
     );
 }
 
@@ -1058,6 +1077,30 @@ fn a_solid_refused_for_one_face_comes_in_as_an_open_surface_of_the_others() {
         s.notes
             .iter()
             .any(|n| n.starts_with("left out: ") && n.contains("face #0")),
+        "{:?}",
+        s.notes
+    );
+}
+
+/// A refusal that names its face by the face's id in the model (as this reader names a face it
+/// cannot read: here its surface is missing) leaves that face out as one naming it by index does.
+#[test]
+fn a_face_named_by_its_model_id_is_left_out_of_an_open_surface() {
+    let mut ir = cube();
+    let surface = ir.model.faces.first().unwrap().surface.clone();
+    ir.model.surfaces.retain(|s| s.id != surface);
+    let bodies = read_bodies(&ir, None);
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
+    assert!(
+        s.sheet && s.brep.faces.len() == 5,
+        "{} faces",
+        s.brep.faces.len()
+    );
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.starts_with("left out: ") && n.contains("missing surface")),
         "{:?}",
         s.notes
     );
