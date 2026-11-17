@@ -1355,7 +1355,7 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, proj: &Proj, pos: Pos2) {
                     let Some(link) = REPAIR.with(|l| l.borrow().clone()) else { return };
                     if app.run(cmd, json!({"link": link, "ref": r})).is_ok() {
                         REPAIR.with(|l| *l.borrow_mut() = None);
-                        app.set_status("Projection repaired", false);
+                        app.set_status(solidcraft_ui_text::tr("sketch.projection_repaired"), false);
                         ENDED.with(|e| e.set(true));
                     }
                 }

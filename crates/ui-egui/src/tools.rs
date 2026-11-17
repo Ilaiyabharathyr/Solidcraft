@@ -963,7 +963,7 @@ fn project_pick(app: &mut SolveApp, hits: &[Hit]) -> Option<(String, bool)> {
     let curve = if what == "vertex" { None } else { first("curves") };
     let picked = curve.map(|c| (c, true)).or_else(|| first("points").map(|p| (p, false)));
     if picked.is_some() {
-        app.set_status(format!("Projected the {what} into the sketch"), false);
+        app.set_status(solidcraft_ui_text::tr(&format!("sketch.projected_{what}")), false);
     }
     picked
 }
