@@ -997,7 +997,7 @@ fn a_coped_butt_frame_matches_the_old_coped_corner_type() {
     let bs = bodies(&mut s);
     assert_eq!(bs.len(), base.len(), "{bs:?}");
     for (b, (name, volume, lo, hi)) in bs.iter().zip(base) {
-        assert!(b.0 == name && rel(b.1, volume) < 1e-9 && near3(b.2, lo) && near3(b.3, hi), "{b:?} vs {name} {volume} {lo:?} {hi:?}");
+        assert!(b.0 == name && rel(b.1, volume) < 1e-8 && near3(b.2, lo) && near3(b.3, hi), "{b:?} vs {name} {volume} {lo:?} {hi:?}");
     }
 }
 
@@ -3814,7 +3814,7 @@ fn assert_stage_one_mitre_rectangle(s: &mut Session) {
     names.sort();
     for (name, v, lo, hi) in want {
         let (gv, glo, ghi) = got[name];
-        assert!(rel(gv, v) < 1e-12 && near3(glo, lo) && near3(ghi, hi), "{name}: {:?}", got[name]);
+        assert!(rel(gv, v) < 1e-8 && near3(glo, lo) && near3(ghi, hi), "{name}: {:?}", got[name]);
         assert_eq!(faces[name], names, "{name}");
     }
 }
@@ -4881,14 +4881,14 @@ fn exactly(s: &mut Session) -> Vec<String> {
     out
 }
 
-/// An [`exactly`] line with its volume rounded to 1e-6 mm³: kernel updates move a volume's last digits (1e-12
-/// relative) without changing the shape, while the bounding box and face names stay exact.
-fn volume_rounded(line: &str) -> String {
-    let Some(at) = line.find(" [") else { return line.to_string() };
+/// An [`exactly`] line split into its volume and the rest (name, bounding box): kernel updates move a volume's last
+/// digits (a few parts in 1e9, #18310) without changing the shape, while the bounding box and face names stay exact.
+fn volume_apart(line: &str) -> (String, f64) {
+    let Some(at) = line.find(" [") else { return (line.to_string(), 0.0) };
     let (head, rest) = line.split_at(at);
     match head.rsplit_once(' ').map(|(name, v)| (name, v.parse::<f64>())) {
-        Some((name, Ok(v))) => format!("{name} {v:.6}{rest}"),
-        _ => line.to_string(),
+        Some((name, Ok(v))) => (format!("{name}{rest}"), v),
+        _ => (line.to_string(), 0.0),
     }
 }
 
@@ -5013,8 +5013,11 @@ fn frames_without_overlaps_are_unchanged() {
     assert_eq!(got.len(), want.len(), "{got:#?}");
     for (((what, g, digest), (w_what, w)), (f_what, f)) in got.iter().zip(want).zip(faces) {
         assert_eq!((what, what), (w_what, &f_what));
-        let g: Vec<String> = g.iter().map(|l| volume_rounded(l)).collect();
-        assert_eq!(g, w.iter().map(|l| volume_rounded(l)).collect::<Vec<_>>(), "{what}");
+        let (g, w): (Vec<_>, Vec<_>) = (g.iter().map(|l| volume_apart(l)).collect(), w.iter().map(|l| volume_apart(l)).collect());
+        assert_eq!(g.iter().map(|l| &l.0).collect::<Vec<_>>(), w.iter().map(|l| &l.0).collect::<Vec<_>>(), "{what}");
+        for (a, b) in g.iter().zip(&w) {
+            assert!(rel(a.1, b.1) < 1e-8, "{what}: {} volume {} vs {}", a.0, a.1, b.1);
+        }
         assert_eq!(digest, f, "{what}: face names");
     }
 }
