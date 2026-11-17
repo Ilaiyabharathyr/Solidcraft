@@ -1464,6 +1464,8 @@ fn rectangular_pattern_contract_keeps_the_handlers_errors() {
             with(row(), json!({"reversed": "yes"})),
             with(row(), json!({"reversed2": "yes"})),
             with(row(), json!({"reversed2": null})),
+            with(row(), json!({"skip": [1]})),
+            with(row(), json!({"skip_width": 0})),
         ],
     );
     for p in [

@@ -1194,7 +1194,7 @@ fn rectangular_required(schema: &mut Schema) {
 }
 
 fn skipped_pattern_instances<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<usize>>, D::Error> {
-    crate::params::pattern_skip(&Value::deserialize(d)?).map(Some).map_err(D::Error::custom)
+    crate::params::pattern_skip(&Value::deserialize(d)?).map(Some).map_err(|error| D::Error::custom(whole(error)))
 }
 
 fn skipped_pattern_instances_schema(_: &mut SchemaGenerator) -> Schema {
@@ -1203,7 +1203,7 @@ fn skipped_pattern_instances_schema(_: &mut SchemaGenerator) -> Schema {
 }
 
 fn skipped_pattern_width<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
-    crate::params::pattern_skip_width(&Value::deserialize(d)?).map(Some).map_err(D::Error::custom)
+    crate::params::pattern_skip_width(&Value::deserialize(d)?).map(Some).map_err(|error| D::Error::custom(whole(error)))
 }
 
 fn skipped_pattern_width_schema(_: &mut SchemaGenerator) -> Schema {
@@ -1211,7 +1211,7 @@ fn skipped_pattern_width_schema(_: &mut SchemaGenerator) -> Schema {
 }
 
 fn skipped_pattern_members<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<solidcraft_doc::PatternMember>>, D::Error> {
-    crate::params::pattern_skip_members(&Value::deserialize(d)?).map(Some).map_err(D::Error::custom)
+    crate::params::pattern_skip_members(&Value::deserialize(d)?).map(Some).map_err(|error| D::Error::custom(whole(error)))
 }
 
 fn skipped_pattern_members_schema(_: &mut SchemaGenerator) -> Schema {
