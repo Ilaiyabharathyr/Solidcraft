@@ -251,8 +251,10 @@ fn piece_on(sk: &Sketch, ci: usize, g: &LinkGeom, tol: f64) -> bool {
 /// The deleted curves on circle piece (`c`, `r`) of a source edge, and whether they are all of
 /// it: a circle about the same centre with the same radius (within `tol`), or arcs on that
 /// circle whose angular spans together close the whole turn (a hole's rim saved as two halves,
-/// #18250, the edge now read as one circle, #17175). An arc is never the whole circle however
-/// little of it is missing: coverage is by the arcs' exact spans, not by points sampled on them.
+/// #18250, the edge now read as one circle, #17175). Coverage is by the arcs' spans, not by points
+/// sampled on them: no gap between them may be wider than `tol` along the rim, so an arc whose
+/// missing part is longer than that is not the whole circle. On a circle no larger than `tol`
+/// angles mean nothing, and only a matching circle is all of it.
 fn circle_parts(sk: &Sketch, deleted: &[usize], c: Vec2, r: f64, tol: f64) -> (Vec<usize>, bool) {
     let same = |centre: Vec2, radius: f64| centre.dist(c) <= tol && (radius - r).abs() <= tol;
     let (mut parts, mut spans, mut full) = (Vec::new(), Vec::new(), false);
@@ -271,14 +273,16 @@ fn circle_parts(sk: &Sketch, deleted: &[usize], c: Vec2, r: f64, tol: f64) -> (V
         }
     }
     // The angle `tol` is along the rim.
-    let slack = if r > tol { tol / r } else { std::f64::consts::TAU };
-    (parts, full || covers_turn(&spans, slack))
+    (parts, full || (r > tol && covers_turn(&spans, tol / r)))
 }
 
 /// Do the counter-clockwise spans `(start in [0, 2π), sweep)` together cover a whole turn, with
-/// no gap wider than `slack` (radians)? A span past 2π goes on from 0.
+/// no gap wider than `slack` (radians)? A span past 2π goes on from 0. No spans cover nothing.
 fn covers_turn(spans: &[(f64, f64)], slack: f64) -> bool {
     let tau = std::f64::consts::TAU;
+    if spans.is_empty() || !slack.is_finite() || slack >= tau {
+        return false;
+    }
     let mut on_turn: Vec<(f64, f64)> = Vec::new();
     for &(start, sweep) in spans {
         let end = start + sweep;

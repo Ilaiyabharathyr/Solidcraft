@@ -669,7 +669,8 @@ fn a_freshly_projected_hole_is_one_circle_and_stays_deleted_through_a_resize() {
 
 /// Deleted arcs are all of a projected circle only when their spans close the turn (#18250): a
 /// 350° arc whose 10° gap falls between points sampled every 45° is not, nor are halves 1°
-/// apart or an arc about another centre; arcs that meet across 0° are.
+/// apart or an arc about another centre; arcs that meet across 0° are. A circle with nothing
+/// deleted on it is not covered, nor is one no larger than the tolerance by any arcs.
 #[test]
 fn only_arcs_on_the_circle_that_close_the_turn_are_all_of_it() {
     let mut sk = Sketch::new();
@@ -687,6 +688,16 @@ fn only_arcs_on_the_circle_that_close_the_turn_are_all_of_it() {
     assert_eq!(parts(&[across]), (vec![across], false));
     assert_eq!(parts(&[upper, lower_short]), (vec![upper, lower_short], false), "halves 1° apart");
     assert_eq!(parts(&[upper, elsewhere]), (vec![upper], false), "an arc about another centre is not on the circle");
+    // With nothing deleted on it, a circle is not covered, however small.
+    assert_eq!(parts(&[]), (vec![], false));
+    let tiny = |deleted: &[usize]| super::circle_parts(&sk, deleted, Vec2::ZERO, 1e-9, 1e-7);
+    assert_eq!(tiny(&[]), (vec![], false), "a circle within the tolerance, nothing deleted on it");
+    assert_eq!(tiny(&[elsewhere]), (vec![], false), "a circle within the tolerance, an unrelated arc deleted");
+    // Spans with a slack of a whole turn (a rim no longer than the tolerance) tell nothing.
+    let (half, turn) = (std::f64::consts::PI, std::f64::consts::TAU);
+    assert!(!super::covers_turn(&[], 1e-9), "no spans");
+    assert!(!super::covers_turn(&[(0.0, half), (half, half)], turn), "a slack of a whole turn");
+    assert!(super::covers_turn(&[(0.0, half), (half, half)], 1e-9), "the two halves, with a sound slack");
 }
 
 #[test]
