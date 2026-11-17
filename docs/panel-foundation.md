@@ -335,6 +335,29 @@ controller and document stay with the panel. The desktop adapter remembers the
 panel's window size and monitor for the current app session and checks that the
 OS created the window before presenting content. On the web, the same action
 places the panel in the shared Floating zone.
+
+With the Layout preference **Drag panels out of the app into their own windows**
+(desktop only, off by default), the area outside the app window is one more
+drop target, `Window`, for a title or tab drag. It is not a fallback for a
+missed target: it follows the same prepare, preview and commit path as the dock
+targets, and uses the same destination as **Pop out to window**. While it is
+selected, the window the panel will open in is shown at that screen place, with
+the panel's body as painted in that frame. It has the panel's size in the app.
+A panel in the bottom strip has no body there to show: with live drag paint,
+which hides it in the app, its body is laid out once as the side card the app's
+left edge would dock it as (a new column of the dock's full height), and its
+window takes that card's shape and paint, kept taller than wide so the panel
+keeps that vertical layout. Before its content is measured, that card has the
+dock's height, and the window fits its content once measured, as a side card
+does. Like live drag paint, it runs no
+second body and changes no layout. Release opens the panel there, only after that
+window was shown, and the panel keeps that same window. Release over the app,
+Escape, focus loss or a changed app window cancels and closes it. With the
+preference on, panel windows use the app's own title bar (the shared window
+chrome): the panel's title with its grip sits there, and dragging it over the
+app shows the normal dock target; release docks the panel there. With the
+preference off, a drag past the app's edge keeps the panel in the app.
+
 Panels in the workspace use the ribbon's theme fill and backdrop blur. The
 system's Reduce Transparency setting keeps the panels opaque. Explicit opacity
 overrides use the panel contrast check. Captured `paint_alpha` and `contrast`
