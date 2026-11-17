@@ -5936,3 +5936,20 @@ fn a_corner_member_named_by_its_frame_is_its_own() {
     let e = reopened.model.result(fid).and_then(|r| r.error.clone()).unwrap_or_default();
     assert!(e.contains("not supported yet: a corner with a member of another frame"), "{e}");
 }
+
+#[test]
+fn multi_trim_refuses_a_crossing_piece_as_frame_member_does() {
+    // An override names lines and pairs, never a piece of a line cut where tubes cross (`d2>d1` under Auto, and under
+    // Butt, which cuts crossings too): refused with `frame.member`'s words, the design unchanged.
+    for corner in ["auto", "butt"] {
+        let mut s = Session::default();
+        x_brace_frame(&mut s);
+        run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": corner, "name": "X"}));
+        let before = bodies(&mut s);
+        assert!(before.len() >= 6, "{corner}: {before:?}");
+        let e = s.execute("frame.multi_trim", &json!({"feature": "X", "members": ["d2>d1", "d1"], "kind": "auto"})).unwrap_err().to_string();
+        assert!(e.contains("`d2>d1` is a piece of a tube cut where tubes cross"), "{corner}: {e}");
+        assert!(saved_corners(&s).is_empty(), "{corner}");
+        assert_eq!(bodies(&mut s).len(), before.len(), "{corner}");
+    }
+}

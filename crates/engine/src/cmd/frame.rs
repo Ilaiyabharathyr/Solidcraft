@@ -528,17 +528,9 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
     let (ids, later) = frame::member_parts(&st, &kind).map_err(|e| bad(cmd, e.to_string()))?;
     if let FeatureKind::FrameMember { corners, path_sketch, .. } = &kind {
         let mut pairs = std::collections::HashSet::new();
-        // An override names a corner by its lines and pairs, never by a piece of a line cut where tubes cross. A
-        // piece is told by where it is, not by its id: a sketch id may hold `>` itself.
-        let pieces: std::collections::HashSet<&str> = ids.iter().zip(&later).filter(|(_, l)| l.is_some()).map(|(id, _)| id.as_str()).collect();
         for c in corners {
             let lines: Vec<String> = c.lines().map(str::to_string).collect();
-            if let Some(piece) = lines.iter().find(|m| pieces.contains(m.as_str())) {
-                return Err(bad(
-                    cmd,
-                    format!("`corners`: `{piece}` is a piece of a tube cut where tubes cross: an override names the lines and pairs that meet"),
-                ));
-            }
+            no_piece(&lines, &ids, &later).map_err(|e| bad(cmd, format!("`corners`: {e}")))?;
             let mut sorted: Vec<&str> = c.lines().collect();
             sorted.sort();
             sorted.dedup();
@@ -574,6 +566,17 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
         o.remove("names");
     }
     add_feature(s, &p, kind)
+}
+
+/// Refused when one of an override's `lines` is a piece of a line cut where tubes cross (`ids`, `later`: the frame's
+/// [`frame::member_parts`]): an override names a corner by its lines and pairs. A piece is told by where it is, not by
+/// its id: a sketch id may hold `>` itself.
+fn no_piece(lines: &[String], ids: &[String], later: &frame::LaterPieces) -> std::result::Result<(), String> {
+    let piece = |m: &&String| ids.iter().zip(later).any(|(id, l)| l.is_some() && id == *m);
+    match lines.iter().find(piece) {
+        Some(piece) => Err(format!("`{piece}` is a piece of a tube cut where tubes cross: an override names the lines and pairs that meet")),
+        None => Ok(()),
+    }
 }
 
 /// A weld gap: a length expression within 0…[`frame::MAX_GAP`] mm, `what` naming it.
@@ -730,6 +733,10 @@ fn multi_trim(s: &mut Session, p: &Value) -> Result<Value> {
         let at = at.ok_or_else(|| bad(cmd, format!("{} has no override of {lines:?}", f.name)))?;
         new_corners.remove(at);
     } else {
+        // As `frame.member` refuses it. A frame that no longer lays out is the evaluation's to report.
+        if let Ok((ids, later)) = frame::member_parts(&s.model.state_before(id), &f.kind) {
+            no_piece(&lines, &ids, &later).map_err(|e| bad(cmd, format!("`members`: {e}")))?;
+        }
         let kind = match p.get("kind") {
             None | Some(Value::Null) => CornerType::Auto,
             Some(v) => trim_kind(v).ok_or_else(|| bad(cmd, TRIM_KIND))?,
