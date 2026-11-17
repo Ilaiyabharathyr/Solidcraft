@@ -1407,10 +1407,10 @@ fn a_picked_corner_point_becomes_an_override() {
     let members = lines_at(&app, 0.0, 0.0);
     assert_eq!(members.len(), 2);
     let c = apply_commands(&app, &d).unwrap();
-    assert_eq!(c[0].1["corners"], json!([{"members": members, "corner": "butt", "flip": false}]));
-    member(&mut d).overrides = vec![(corner, corner_type("mitre"), false)];
+    assert_eq!(c[0].1["corners"], json!([{"members": members, "kind": "butt", "flip": false}]));
+    member(&mut d).overrides = vec![Override::new(corner, corner_type("mitre"))];
     let c = apply_commands(&app, &d).unwrap();
-    assert_eq!(c[0].1["corners"], json!([{"members": members, "corner": "mitre", "flip": false}]));
+    assert_eq!(c[0].1["corners"], json!([{"members": members, "kind": "mitre"}]), "a Mitre pair has no Flip");
     run_all(&mut app, c);
     assert_eq!(body_names(&app).len(), 4);
 }
@@ -1458,9 +1458,9 @@ fn an_edit_shows_the_corner_settings_and_overrides() {
     assert!(e.extra.get("corners").is_none());
     let m = member(&mut e);
     assert_eq!((CORNER_TYPES[m.corner].0, m.flip), ("butt", true));
-    assert_eq!(m.overrides.iter().map(|o| (CORNER_TYPES[o.1].0, o.2)).collect::<Vec<_>>(), [("mitre", false)]);
+    assert_eq!(m.overrides.iter().map(|o| (CORNER_TYPES[o.corner].0, o.flip)).collect::<Vec<_>>(), [("mitre", false)]);
     let c = apply_commands(&app, &e).unwrap();
-    assert_eq!(c[0].1["params"]["corners"], corners, "{}", c[0].1);
+    assert_eq!(c[0].1["params"]["corners"], json!([{"members": saved_orders(&app, f)[0], "kind": "mitre"}]), "as saved: {}", c[0].1);
 }
 
 /// A harness window tall enough for the whole Frame Member card with its corner rows: in the
@@ -1519,7 +1519,7 @@ fn an_edit_shows_a_kept_crossing_override_as_a_crossing() {
     ] {
         h.app.run(id, p).unwrap();
     }
-    let over = json!([{"members": ["d1", "d2"], "corner": "auto", "flip": true}]);
+    let over = json!([{"members": ["d1", "d2"], "kind": "auto", "flip": true}]);
     h.app.run("frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "corners": over})).unwrap();
     let f = h.app.session.doc.features.last().unwrap().id;
     let e = edit_dialog(&h.app, f, None).unwrap();
@@ -1683,18 +1683,18 @@ fn override_rows_offer_auto_and_flip_it() {
     let on_row = |n: &egui::accesskit::Node| n.bounds().is_some_and(|b| (f64::midpoint(b.y0, b.y1) - y).abs() < 2.0);
     let flip = tree.nodes.iter().find(|(_, n)| n.label() == Some("Flip") && on_row(n));
     assert!(flip.is_some_and(|(_, n)| !n.is_disabled()), "Corner 1's Flip is enabled under Auto");
-    member(h.app.dialog.as_mut().unwrap()).overrides[0].2 = true;
+    member(h.app.dialog.as_mut().unwrap()).overrides[0].flip = true;
     let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
-    assert_eq!((&c[0].1["corners"][0]["corner"], &c[0].1["corners"][0]["flip"]), (&json!("auto"), &json!(true)), "{}", c[0].1);
+    assert_eq!((&c[0].1["corners"][0]["kind"], &c[0].1["corners"][0]["flip"]), (&json!("auto"), &json!(true)), "{}", c[0].1);
     member(h.app.dialog.as_mut().unwrap()).corner = corner_type("mitre");
     h.frames(2);
     assert!(h.widget_near("Mitre", "Corner 1").is_some());
     let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
-    assert_eq!((&c[0].1["corners"][0]["corner"], &c[0].1["corners"][0]["flip"]), (&json!("mitre"), &json!(false)), "{}", c[0].1);
+    assert_eq!((&c[0].1["corners"][0]["kind"], c[0].1["corners"][0].get("flip")), (&json!("mitre"), None), "{}", c[0].1);
     // Back on Auto, the row is Auto again.
     member(h.app.dialog.as_mut().unwrap()).corner = corner_type("auto");
     let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
-    assert_eq!(c[0].1["corners"][0]["corner"], json!("auto"));
+    assert_eq!(c[0].1["corners"][0]["kind"], json!("auto"));
 }
 
 /// The 600 × 400 rectangle with a brace `brace` from corner to corner: three lines end at (0, 0)
@@ -1723,7 +1723,7 @@ fn under_auto_a_three_tube_point_is_an_override() {
     d.pick(&app.session, corner.clone());
     assert_eq!(d.inputs[2].items, std::slice::from_ref(&corner), "{:?}", d.error);
     let c = apply_commands(&app, &d).unwrap();
-    assert_eq!(c[0].1["corners"], json!([{"members": members, "corner": "auto", "flip": false}]), "{}", c[0].1);
+    assert_eq!(c[0].1["corners"], json!([{"members": members, "kind": "auto", "flip": false}]), "{}", c[0].1);
     let mut d = dialog_on(&mut app, &lines);
     member(&mut d).corner = corner_type("mitre");
     d.active = 2;
@@ -1757,7 +1757,7 @@ fn an_auto_override_names_the_pairs_ending_at_its_corner() {
     let c = apply_commands(&app, &d).unwrap();
     let mut members = lines_at(&app, 0.0, 0.0);
     members.push("pair1".into());
-    assert_eq!(c[0].1["corners"], json!([{"members": members, "corner": "auto", "flip": false}]), "{}", c[0].1);
+    assert_eq!(c[0].1["corners"], json!([{"members": members, "kind": "auto", "flip": false}]), "{}", c[0].1);
     run_all(&mut app, c);
     let f = app.session.doc.features.last().unwrap().id;
     // The edit adds a second pair from (600, 400): its id is pair2.
@@ -1793,9 +1793,10 @@ fn an_edit_shows_a_three_tube_override() {
     assert!(e.extra.get("corners").is_none());
     let m = member(&mut e);
     assert_eq!((CORNER_TYPES[m.corner].0, m.fit_ends), ("auto", true));
-    assert_eq!(m.overrides.iter().map(|o| (CORNER_TYPES[o.1].0, o.2)).collect::<Vec<_>>(), [("auto", true)]);
+    assert_eq!(m.overrides.iter().map(|o| (CORNER_TYPES[o.corner].0, o.flip)).collect::<Vec<_>>(), [("auto", true)]);
     let p = &apply_commands(&app, &e).unwrap()[0].1["params"];
-    assert_eq!((&p["corner"], &p["fit_ends"], &p["corners"]), (&json!("auto"), &json!(true), &corners), "{p}");
+    let kept = json!([{"members": saved_orders(&app, f)[0], "kind": "auto"}]);
+    assert_eq!((&p["corner"], &p["fit_ends"], &p["corners"]), (&json!("auto"), &json!(true), &kept), "as saved: {p}");
     // Two of the three: the set of tubes there changed, so it no longer matches.
     let two = json!([{"members": members[..2], "corner": "auto", "flip": false}]);
     let doc = std::sync::Arc::make_mut(&mut app.session.doc);
@@ -1809,6 +1810,171 @@ fn an_edit_shows_a_three_tube_override() {
 /// Corner overrides as a design saves them (#17854: `{members: [{line}], kind}`, an old `flip` dropped).
 fn saved(corners: &Value) -> Value {
     serde_json::to_value(serde_json::from_value::<Vec<solidcraft_engine::doc::frame::CornerOverride>>(corners.clone()).unwrap()).unwrap()
+}
+
+/// The text fields named `label` whose middle is at height `y` (a row's): each one's left edge and whether it is
+/// greyed.
+fn fields_on_row(h: &crate::scenario::Harness, label: &str, y: f64) -> Vec<(f64, bool)> {
+    let tree = h.output.accesskit_update.as_ref().unwrap();
+    tree.nodes
+        .iter()
+        .filter(|(_, n)| n.role() == egui::accesskit::Role::TextInput && n.label() == Some(label))
+        .filter_map(|(_, n)| n.bounds().filter(|b| (f64::midpoint(b.y0, b.y1) - y).abs() < 2.0).map(|b| (b.x0, n.is_disabled())))
+        .collect()
+}
+
+/// Gap (#17854) is a field after Coped on the Fit Ends row: typed, it goes into the command as `gap`; 0 or empty
+/// sends nothing; under None it is greyed and sends nothing. An edit brings it back.
+#[test]
+fn the_gap_field_is_sent() {
+    let (mut h, _) = overrides_dialog("butt");
+    let [cx, cy] = h.widget("Coped").unwrap();
+    let gap = fields_on_row(&h, "Gap", cy);
+    assert!(matches!(gap.as_slice(), [(x, false)] if *x > cx), "one enabled Gap after Coped (at {cx}): {gap:?}");
+    let sent = |h: &crate::scenario::Harness| apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap()[0].1.get("gap").cloned();
+    assert_eq!(sent(&h), None, "Gap starts empty: nothing sent");
+    for (typed, expected) in [("3 mm", Some(json!("3 mm"))), ("0", None), ("0 mm", None), ("", None)] {
+        member(h.app.dialog.as_mut().unwrap()).gap = typed.into();
+        assert_eq!(sent(&h), expected, "Gap {typed:?}");
+    }
+    member(h.app.dialog.as_mut().unwrap()).gap = "3 mm".into();
+    member(h.app.dialog.as_mut().unwrap()).corner = corner_type("none");
+    h.frames(2);
+    let [_, cy] = h.widget("Coped").unwrap();
+    assert!(matches!(fields_on_row(&h, "Gap", cy).as_slice(), [(_, true)]), "Gap is greyed under None");
+    assert_eq!(sent(&h), None, "under None no gap is sent");
+    member(h.app.dialog.as_mut().unwrap()).corner = corner_type("butt");
+    let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+    h.app.dialog = None;
+    run_all(&mut h.app, c);
+    let f = h.app.session.doc.features.last().unwrap().id;
+    let mut e = edit_dialog(&h.app, f, None).unwrap();
+    assert_eq!(member(&mut e).gap, "3 mm");
+}
+
+/// Each Corner Overrides row has a Gap field of its own (empty: the frame's): a row sends its `kind` and its gap, a
+/// Mitre row (Flip greyed) no `flip`, a Butt row its `flip`. A kept override of tubes that overlap has no Gap field.
+#[test]
+fn an_override_row_sends_its_gap_and_kind() {
+    let (mut h, _) = overrides_dialog("butt");
+    for n in [1, 2] {
+        let [_, y] = h.widget(&format!("Corner {n}")).unwrap();
+        assert_eq!(fields_on_row(&h, "Gap", y).len(), 1, "Corner {n} has a Gap");
+    }
+    let m = member(h.app.dialog.as_mut().unwrap());
+    m.overrides[0].corner = corner_type("mitre");
+    m.overrides[0].gap = "2 mm".into();
+    let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+    let members = lines_at(&h.app, 0.0, 0.0);
+    assert_eq!(c[0].1["corners"][0], json!({"members": members, "kind": "mitre", "gap": "2 mm"}), "{}", c[0].1);
+    assert_eq!(c[0].1["corners"][1], json!({"members": lines_at(&h.app, 600.0, 400.0), "kind": "butt", "flip": false}), "{}", c[0].1);
+    h.app.dialog = None;
+    run_all(&mut h.app, c);
+    let f = h.app.session.doc.features.last().unwrap().id;
+    let mut e = edit_dialog(&h.app, f, None).unwrap();
+    assert_eq!(member(&mut e).overrides.iter().map(|o| o.gap.as_str()).collect::<Vec<_>>(), ["2 mm", ""]);
+
+    // A post whose foot stops 15 mm short of the bottom rail: its tube overlaps the rail's.
+    let mut h = tall_harness();
+    for (id, p) in [
+        ("sketch.create", json!({"plane": "XY", "name": "Frame"})),
+        ("sketch.line", json!({"points": [[0, 0], [600, 0]], "ids": ["rail"]})),
+        ("sketch.line", json!({"points": [[300, 15], [300, 300]], "ids": ["post"]})),
+        ("sketch.finish", json!({})),
+    ] {
+        h.app.run(id, p).unwrap();
+    }
+    let over = json!([{"members": ["rail", "post"], "kind": "auto"}]);
+    h.app.run("frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "corners": over})).unwrap();
+    let f = h.app.session.doc.features.last().unwrap().id;
+    let e = edit_dialog(&h.app, f, None).unwrap();
+    assert!(e.inputs[2].items.is_empty() && e.extra.get("corners").is_some(), "kept: {:?}", e.extra);
+    h.app.dialog = Some(e);
+    h.frames(2);
+    let [_, y] = h.widget("Corner 1").unwrap();
+    assert!(fields_on_row(&h, "Gap", y).is_empty(), "the overlap row has no Gap");
+}
+
+/// The Butt frame on the rectangle with an override at (0, 0) saved in today's order and one at (600, 400) saved
+/// the other way round (`flip` makes those orders), and the lines of each.
+fn flipped_frame(app: &mut SolveApp) -> [Vec<String>; 2] {
+    let (near, far) = (lines_at(app, 0.0, 0.0), lines_at(app, 600.0, 400.0));
+    let corners = json!([{"members": near, "kind": "butt", "flip": false}, {"members": far, "kind": "butt", "flip": true}]);
+    app.run("frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "butt", "corners": corners})).unwrap();
+    [near, far]
+}
+
+/// The saved order of each override of Frame Member `f`.
+fn saved_orders(app: &SolveApp, f: u64) -> Vec<Vec<String>> {
+    let FeatureKind::FrameMember { corners, .. } = &app.session.doc.feature(f).unwrap().kind else { panic!() };
+    corners.iter().map(|c| c.lines().map(String::from).collect()).collect()
+}
+
+/// Reopened, a row shows Flip ticked when its saved order is not the one today's rules give (`default_order`), and
+/// unticked when it is.
+#[test]
+fn reopening_shows_flip_from_the_saved_order() {
+    let mut app = frame_app();
+    let [near, far] = flipped_frame(&mut app);
+    let f = app.session.doc.features.last().unwrap().clone();
+    let st = app.session.model.state_before(f.id);
+    let default = |lines: &[String]| frame::default_order(&app.session.doc, &st, &f, lines).unwrap();
+    let (near, mut far) = (default(&near), default(&far));
+    far.swap(0, 1);
+    assert_eq!(saved_orders(&app, f.id), [near, far], "one in today's order, one the other way round");
+    let mut e = edit_dialog(&app, f.id, None).unwrap();
+    assert_eq!(member(&mut e).overrides.iter().map(|o| o.flip).collect::<Vec<_>>(), [false, true]);
+}
+
+/// Two Frame Members alike in every setting: editing the second reads its Flips against the model before it, not
+/// the first one's (which, moved before its sketch, has no lines to order).
+#[test]
+fn an_edit_reads_flip_for_its_own_frame_of_two_alike() {
+    let mut app = frame_app();
+    flipped_frame(&mut app);
+    flipped_frame(&mut app);
+    let doc = std::sync::Arc::make_mut(&mut app.session.doc);
+    let n = doc.features.len();
+    // Alike down to the names their tubes keep.
+    doc.features[n - 1].kind = doc.features[n - 2].kind.clone();
+    let (first, second) = (doc.features[n - 2].clone(), doc.features[n - 1].clone());
+    // The first Frame Member before every sketch.
+    doc.features.remove(n - 2);
+    doc.features.insert(0, first);
+    app.session.refresh();
+    let mut e = edit_dialog(&app, second.id, None).unwrap();
+    assert_eq!(member(&mut e).overrides.iter().map(|o| o.flip).collect::<Vec<_>>(), [false, true]);
+}
+
+/// OK on an edit leaves an override whose Flip was not touched exactly as it was saved: a three-tube corner whose
+/// first two are not the pair today's rules give keeps its order (a Flip would only swap today's first two).
+/// Unticking Flip sends `flip` against today's order.
+#[test]
+fn an_untouched_override_keeps_its_saved_order() {
+    let mut app = braced_app();
+    let members = lines_at(&app, 0.0, 0.0);
+    app.run("frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "auto"})).unwrap();
+    let f = app.session.doc.features.last().unwrap().clone();
+    let st = app.session.model.state_before(f.id);
+    let today = frame::default_order(&app.session.doc, &st, &f, &members).unwrap();
+    let order = vec![today[0].clone(), today[2].clone(), today[1].clone()];
+    let corners = json!([{"members": order, "kind": "auto"}]);
+    let params = json!({"sketch": "Frame", "profile": tube(), "corner": "auto", "corners": corners});
+    app.run("timeline.redefine", json!({"feature": f.id, "command": "frame.member", "params": params})).unwrap();
+    assert_eq!(saved_orders(&app, f.id), std::slice::from_ref(&order));
+    let mut e = edit_dialog(&app, f.id, None).unwrap();
+    assert_eq!(member(&mut e).overrides.iter().map(|o| o.flip).collect::<Vec<_>>(), [true], "not today's first two");
+    let c = apply_commands(&app, &e).unwrap();
+    assert_eq!(c[0].1["params"]["corners"], json!([{"members": order, "kind": "auto"}]), "{}", c[0].1);
+    run_all(&mut app, c);
+    assert_eq!(saved_orders(&app, f.id), std::slice::from_ref(&order), "OK changed nothing");
+    // Unticked: today's order.
+    let mut e = edit_dialog(&app, f.id, None).unwrap();
+    member(&mut e).overrides[0].flip = false;
+    let c = apply_commands(&app, &e).unwrap();
+    assert_eq!(c[0].1["params"]["corners"][0]["flip"], json!(false), "{}", c[0].1);
+    run_all(&mut app, c);
+    assert_eq!(saved_orders(&app, f.id), [today]);
 }
 
 /// With Corner Overrides active, a corner of the frame sketch (not being edited) is picked in the
@@ -1949,15 +2115,15 @@ fn overrides_dialog(corner: &str) -> (crate::scenario::Harness, [Sel; 2]) {
 fn a_corner_picked_again_starts_as_the_features_type() {
     let (mut h, [corner, _]) = overrides_dialog("mitre");
     let d = h.app.dialog.as_mut().unwrap();
-    let o = member(d).overrides.iter_mut().find(|o| o.0 == corner).unwrap();
-    (o.1, o.2) = (corner_type("butt"), true);
+    let o = member(d).overrides.iter_mut().find(|o| o.pick == corner).unwrap();
+    (o.corner, o.flip) = (corner_type("butt"), true);
     d.inputs[2].items.retain(|x| *x != corner);
     h.frames(1);
     h.app.dialog.as_mut().unwrap().pick(&h.app.session, corner.clone());
     h.frames(1);
     let m = member(h.app.dialog.as_mut().unwrap());
-    let o = m.overrides.iter().find(|o| o.0 == corner).unwrap();
-    assert_eq!((CORNER_TYPES[o.1].0, o.2), ("mitre", false), "{:?}", m.overrides);
+    let o = m.overrides.iter().find(|o| o.pick == corner).unwrap();
+    assert_eq!((CORNER_TYPES[o.corner].0, o.flip), ("mitre", false), "{:?}", m.overrides);
 }
 
 /// Each override is one row: "Corner n" (in pick order), its type, its Flip (greyed for None and
@@ -1966,7 +2132,7 @@ fn a_corner_picked_again_starts_as_the_features_type() {
 fn each_corner_override_is_one_row() {
     let (mut h, picks) = overrides_dialog("butt");
     let d = h.app.dialog.as_mut().unwrap();
-    member(d).overrides[0].1 = corner_type("mitre");
+    member(d).overrides[0].corner = corner_type("mitre");
     h.frames(2);
     let flips = h.widgets("Flip");
     for n in [1, 2] {
@@ -2133,7 +2299,7 @@ fn a_crossing_point_override_is_a_crossing_row_with_flip() {
     d.pick(&h.app.session, x.clone());
     assert_eq!(d.inputs[2].items, std::slice::from_ref(&x), "{:?}", d.error);
     let c = apply_commands(&h.app, &d).unwrap();
-    assert_eq!(c[0].1["corners"], json!([{"members": ["d1", "d2"], "corner": "auto", "flip": false}]), "{}", c[0].1);
+    assert_eq!(c[0].1["corners"], json!([{"members": ["d1", "d2"], "kind": "auto", "flip": false}]), "{}", c[0].1);
     h.app.dialog = Some(d);
     h.frames(2);
     assert!(h.widget_near("Crossing", "Corner 1").is_some(), "the row reads Crossing");
@@ -2147,15 +2313,15 @@ fn a_crossing_point_override_is_a_crossing_row_with_flip() {
         .collect();
     assert!(on_row.iter().any(|n| n.label() == Some("Flip") && !n.is_disabled()), "an enabled Flip on the row");
     assert!(!on_row.iter().any(|n| n.label() == Some("Auto") || n.value() == Some("Auto")), "no Type list on the row");
-    member(h.app.dialog.as_mut().unwrap()).overrides[0].2 = true;
+    member(h.app.dialog.as_mut().unwrap()).overrides[0].flip = true;
     let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
-    assert_eq!(c[0].1["corners"], json!([{"members": ["d1", "d2"], "corner": "auto", "flip": true}]), "{}", c[0].1);
+    assert_eq!(c[0].1["corners"], json!([{"members": ["d1", "d2"], "kind": "auto", "flip": true}]), "{}", c[0].1);
     run_all(&mut h.app, c);
     let f = h.app.session.doc.features.last().unwrap().id;
     let mut e = edit_dialog(&h.app, f, None).unwrap();
     assert_eq!(e.inputs[2].items, std::slice::from_ref(&x), "{:?}", e.extra);
     assert!(e.extra.get("corners").is_none());
-    assert_eq!(member(&mut e).overrides.iter().map(|o| o.2).collect::<Vec<_>>(), [true]);
+    assert_eq!(member(&mut e).overrides.iter().map(|o| o.flip).collect::<Vec<_>>(), [true]);
     h.app.dialog = None;
     let mut d = dialog_on(&mut h.app, &lines);
     member(&mut d).corner = corner_type("none");
@@ -2202,9 +2368,9 @@ fn a_crossing_point_on_a_mitre_frame_is_a_crossing_override() {
         .map(|(_, n)| n.clone())
         .collect();
     assert!(on_row.iter().any(|n| n.label() == Some("Flip") && !n.is_disabled()), "an enabled Flip on the row");
-    member(h.app.dialog.as_mut().unwrap()).overrides[0].2 = true;
+    member(h.app.dialog.as_mut().unwrap()).overrides[0].flip = true;
     let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
-    assert_eq!(c[0].1["corners"], json!([{"members": ["d1", "d2"], "corner": "mitre", "flip": true}]), "{}", c[0].1);
+    assert_eq!(c[0].1["corners"], json!([{"members": ["d1", "d2"], "kind": "mitre", "flip": true}]), "{}", c[0].1);
     run_all(&mut h.app, c);
     let f = h.app.session.doc.features.last().unwrap();
     let ids = frame::member_line_ids(&h.app.session.model.state(), &f.kind).unwrap();
@@ -2213,7 +2379,7 @@ fn a_crossing_point_on_a_mitre_frame_is_a_crossing_override() {
     let f = f.id;
     let mut e = edit_dialog(&h.app, f, None).unwrap();
     assert_eq!(e.inputs[2].items, std::slice::from_ref(&x), "{:?}", e.extra);
-    assert_eq!(member(&mut e).overrides.iter().map(|o| o.2).collect::<Vec<_>>(), [true]);
+    assert_eq!(member(&mut e).overrides.iter().map(|o| o.flip).collect::<Vec<_>>(), [true]);
 }
 
 /// A crossing where another tube also ends (the two diagonals, and a post from the bottom ending
@@ -2240,7 +2406,7 @@ fn a_crossing_where_a_tube_also_ends_is_a_crossing_override() {
     d.pick(&h.app.session, x.clone());
     assert_eq!(d.inputs[2].items, std::slice::from_ref(&x), "{:?}", d.error);
     let c = apply_commands(&h.app, &d).unwrap();
-    assert_eq!(c[0].1["corners"], json!([{"members": ["d1", "d2"], "corner": "auto", "flip": false}]), "{}", c[0].1);
+    assert_eq!(c[0].1["corners"], json!([{"members": ["d1", "d2"], "kind": "auto", "flip": false}]), "{}", c[0].1);
     h.app.dialog = Some(d);
     h.frames(2);
     assert!(h.widget_near("Crossing", "Corner 1").is_some(), "the row reads Crossing");
@@ -2254,7 +2420,7 @@ fn a_crossing_where_a_tube_also_ends_is_a_crossing_override() {
     run_all(&mut h.app, c);
     let plain = cut(&h.app);
     assert_eq!(plain.len(), 1, "one diagonal is cut: {plain:?}");
-    member(&mut flipped).overrides[0].2 = true;
+    member(&mut flipped).overrides[0].flip = true;
     let c = apply_commands(&h.app, &flipped).unwrap();
     assert_eq!(c[0].1["corners"][0]["flip"], json!(true), "{}", c[0].1);
     h.app.run("edit.undo", json!({})).unwrap();
