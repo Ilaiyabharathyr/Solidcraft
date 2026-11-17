@@ -1498,7 +1498,18 @@ fn edit_feature(s: &mut Session, p: &Value) -> Result<Value> {
     let f = s.doc.feature(id).cloned().ok_or_else(|| bad(cmd, "feature"))?;
     let before = serde_json::to_value(&f).map_err(|e| EngineError::Other(e.to_string()))?;
     let set = expand_dotted(set, Some(&before), cmd, 0)?;
-    let set = &numbers_as_expressions(command_profiles(&set, cmd)?, &before);
+    let mut set = numbers_as_expressions(command_profiles(&set, cmd)?, &before);
+    // A Frame Member's corner entry may give a Flip, input only: saved as an order below, as `frame.member` saves it.
+    let mut flips = Vec::new();
+    if matches!(f.kind, FeatureKind::FrameMember { .. }) {
+        for c in set.get_mut("corners").and_then(Value::as_array_mut).into_iter().flatten() {
+            flips.push(match c.as_object_mut().and_then(|c| c.remove("flip")) {
+                None | Some(Value::Null) => None,
+                Some(flip) => Some(flip.as_bool().ok_or_else(|| bad(cmd, "`corners`: `flip` must be true or false"))?),
+            });
+        }
+    }
+    let set = &set;
     let mut v = before.clone();
     merge(&mut v, set, 0);
     resolve_feature_names(&mut v, &s.doc, cmd)?;
@@ -1509,6 +1520,9 @@ fn edit_feature(s: &mut Session, p: &Value) -> Result<Value> {
     if let FeatureKind::FrameMember { corner, corners, coped, .. } = &mut nf.kind {
         solidcraft_doc::frame::read_coped(corner, corners, coped);
         own_corner_members(corners, &f.name).map_err(|e| bad(cmd, e))?;
+        if flips.iter().any(Option::is_some) {
+            super::frame::flips_as_order(&s.doc, &s.model.state_before(id), &mut nf, &flips);
+        }
     }
     // A one-sided extrude made symmetric takes the convention a new one would: its old marker
     // never read a symmetric distance.

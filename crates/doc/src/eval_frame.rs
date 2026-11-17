@@ -1054,18 +1054,30 @@ fn overrides(corner: CornerType, lines: Lines, records: &[CornerOverride], gaps:
 /// ([`orders`]): [0] runs through or stays whole. Errors as evaluation does for a set that names nothing. `f` is the
 /// Frame Member (its corner records aren't read), `st` the model before it.
 pub fn default_order(doc: &Document, st: &ModelState, f: &Feature, members: &[String]) -> Result<Vec<String>> {
-    let FeatureKind::FrameMember { corner, .. } = &f.kind else {
-        return Err(DocError::Invalid("not a frame member feature".into()));
-    };
     if members.len() < 2 {
         return Err(DocError::Invalid("A corner override names at least two members".into()));
     }
+    let order = default_orders(doc, st, f, std::slice::from_ref(&members.to_vec()))?.pop().flatten();
+    order.ok_or_else(|| DocError::Invalid("A corner override is not at a corner of the frame".into()))
+}
+
+/// [`default_order`] of each set in `sets`, the frame laid out once: `None` for a set that names no corner, crossing
+/// or overlap of the frame, or fewer than two members.
+pub fn default_orders(doc: &Document, st: &ModelState, f: &Feature, sets: &[Vec<String>]) -> Result<Vec<Option<Vec<String>>>> {
+    let FeatureKind::FrameMember { corner, .. } = &f.kind else {
+        return Err(DocError::Invalid("not a frame member feature".into()));
+    };
     let (vals, _) = super::evaluation_values(doc);
     let (segments, sketch_x, drawn, planes) = segments(doc, &vals, f, st)?;
-    let record =
-        CornerOverride { members: members.iter().map(|l| MemberRef { feature: None, line: l.clone() }).collect(), kind: CornerType::Auto, gap: None };
-    let order = orders(*corner, (&segments, &planes, &drawn, sketch_x), &[record], true).pop().flatten();
-    order.ok_or_else(|| DocError::Invalid("A corner override is not at a corner of the frame".into()))
+    let records: Vec<CornerOverride> = sets
+        .iter()
+        .map(|set| CornerOverride {
+            members: set.iter().map(|l| MemberRef { feature: None, line: l.clone() }).collect(),
+            kind: CornerType::Auto,
+            gap: None,
+        })
+        .collect();
+    Ok(orders(*corner, (&segments, &planes, &drawn, sketch_x), &records, true))
 }
 
 /// The fits of `plan` where its crossings cut a line, exactly as Auto fits them: each piece's end cut there, and each

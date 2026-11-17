@@ -5659,3 +5659,280 @@ fn a_crowded_overrides_gap_stands_its_fitted_member_off() {
     let up = measured(&mut s, "Up");
     assert!((up.2[1] - 23.0).abs() < 1e-6, "{up:?}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// frame.multi_trim (#17854)
+
+/// The 600 × 400 rectangle in [`bar45`] finished `corner`, `more` added, its bars named B (y 0), L (x 0), T and R:
+/// the session and the ids of the bottom and left lines.
+fn named_bar_rectangle(corner: &str, more: Value) -> (Session, String, String) {
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let (bottom, left) = (line_at_y(&s, "Frame", 0.0), line_at_x(&s, "Frame", 0.0));
+    let (top, right) = (line_at_y(&s, "Frame", 400.0), line_at_x(&s, "Frame", 600.0));
+    let names = json!({bottom.clone(): "B", left.clone(): "L", top: "T", right: "R"});
+    let mut p = json!({"sketch": "Frame", "profile": bar45(), "corner": corner, "names": names, "name": "Rect"});
+    for (k, v) in more.as_object().unwrap() {
+        p[k] = v.clone();
+    }
+    run(&mut s, "frame.member", p);
+    (s, bottom, left)
+}
+
+/// The volumes of bars B, L, T and R.
+fn blrt(s: &mut Session) -> [f64; 4] {
+    ["B", "L", "T", "R"].map(|n| measured(s, n).1)
+}
+
+/// The timeline's Frame Member entries.
+fn frame_entries(s: &Session) -> usize {
+    s.doc.features.iter().filter(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).count()
+}
+
+#[test]
+fn multi_trim_sets_a_corner() {
+    // Hand values. The Auto rectangle butts its square corners, the 600s running through: B and T 2025 × (600 + 45),
+    // L and R 2025 × (400 − 45). The override mitres the corner (0, 0) with gap 2: there B's and L's centre lines
+    // end at the corner point (a mitred end's volume is its centre line's length × the section), each set back 1·√2
+    // (the plane moved 1 square to itself, at 45° to the bar). Their far ends stay butts: B runs 22.5 past x 600, L
+    // stops 22.5 short of y 400. T and R are not touched.
+    let (mut s, bottom, left) = named_bar_rectangle("auto", json!({}));
+    let plain = blrt(&mut s);
+    let (a, r2) = (2025.0, 2f64.sqrt());
+    for (k, want) in [a * 645.0, a * 355.0, a * 645.0, a * 355.0].into_iter().enumerate() {
+        assert!(rel(plain[k], want) < 1e-9, "{k}: {plain:?}");
+    }
+    let r = run(&mut s, "frame.multi_trim", json!({"feature": "Rect", "members": [bottom, left], "kind": "mitre", "gap": "2 mm"}));
+    assert_eq!(r["name"], json!("Rect"), "{r}");
+    let saved = saved_corners(&s);
+    assert_eq!(saved.len(), 1, "{saved:?}");
+    assert_eq!(saved[0].lines().collect::<Vec<_>>(), [bottom.as_str(), left.as_str()]);
+    assert_eq!((saved[0].kind, saved[0].gap.as_deref()), (solidcraft_doc::frame::CornerType::Mitre, Some("2 mm")));
+    assert_eq!(frame_entries(&s), 1);
+    let got = blrt(&mut s);
+    let want = [a * (600.0 + 22.5 - r2), a * (400.0 - 22.5 - r2), plain[2], plain[3]];
+    assert!(got.iter().zip(want).all(|(g, w)| rel(*g, w) < 1e-6), "{got:?} vs {want:?}");
+}
+
+#[test]
+fn multi_trim_replaces_and_removes() {
+    let (mut s, bottom, left) = named_bar_rectangle("auto", json!({}));
+    let plain = blrt(&mut s);
+    run(&mut s, "frame.multi_trim", json!({"feature": "Rect", "members": [bottom, left], "kind": "mitre", "gap": 2}));
+    // The same members the other way round: the override is replaced, in the order given.
+    run(&mut s, "frame.multi_trim", json!({"feature": "Rect", "members": [left, bottom], "kind": "butt"}));
+    let saved = saved_corners(&s);
+    assert_eq!(saved.len(), 1, "{saved:?}");
+    assert_eq!(saved[0].lines().collect::<Vec<_>>(), [left.as_str(), bottom.as_str()]);
+    assert_eq!((saved[0].kind, saved[0].gap.clone()), (solidcraft_doc::frame::CornerType::Butt, None));
+    // `remove` with anything to set is refused, and changes nothing.
+    for extra in [json!({"kind": "auto"}), json!({"flip": false}), json!({"gap": 1})] {
+        let mut p = json!({"feature": "Rect", "members": [bottom, left], "remove": true});
+        p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let e = s.execute("frame.multi_trim", &p).unwrap_err().to_string();
+        assert!(e.contains("`remove`"), "{p}: {e}");
+        assert_eq!(saved_corners(&s), saved);
+    }
+    // Removed by its members in any order: the corner is Auto's again.
+    run(&mut s, "frame.multi_trim", json!({"feature": "Rect", "members": [bottom, left], "remove": true}));
+    assert!(saved_corners(&s).is_empty());
+    let got = blrt(&mut s);
+    assert!(got.iter().zip(plain).all(|(g, p)| rel(*g, p) < 1e-9), "{got:?} vs {plain:?}");
+    let e = s.execute("frame.multi_trim", &json!({"feature": "Rect", "members": [bottom, left], "remove": true})).unwrap_err().to_string();
+    assert!(e.contains("no override"), "{e}");
+    assert_eq!(frame_entries(&s), 1);
+}
+
+#[test]
+fn multi_trim_flips_from_todays_order() {
+    // Today's rules run the longer l1 through; Flip runs l2 through, saved as the order l2, l1.
+    let mut s = Session::default();
+    l_corner(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "L", "profile": tube(), "corner": "butt", "name": "Corner"}));
+    run(&mut s, "frame.multi_trim", json!({"feature": "Corner", "members": ["l1", "l2"], "kind": "butt", "flip": true}));
+    assert_eq!(saved_corners(&s)[0].lines().collect::<Vec<_>>(), ["l2", "l1"]);
+    run(&mut s, "frame.multi_trim", json!({"feature": "Corner", "members": ["l2", "l1"], "kind": "butt", "flip": false}));
+    assert_eq!(saved_corners(&s)[0].lines().collect::<Vec<_>>(), ["l1", "l2"]);
+    // The frame's own name on a member is its own.
+    let members = json!([{"feature": "Corner", "line": "l2"}, {"line": "l1"}]);
+    run(&mut s, "frame.multi_trim", json!({"feature": "Corner", "members": members, "kind": "butt"}));
+    let saved = saved_corners(&s);
+    assert_eq!(saved[0].lines().collect::<Vec<_>>(), ["l2", "l1"]);
+    assert!(saved[0].members.iter().all(|m| m.feature.is_none()), "{saved:?}");
+}
+
+#[test]
+fn multi_trim_refuses() {
+    let (mut s, bottom, left) = named_bar_rectangle("auto", json!({}));
+    let top = line_at_y(&s, "Frame", 400.0);
+    let many: Vec<String> = (0..1001).map(|k| format!("x{k}")).collect();
+    let trim = |more: Value| {
+        let mut p = json!({"feature": "Rect", "members": [bottom, left]});
+        p.as_object_mut().unwrap().extend(more.as_object().unwrap().clone());
+        p
+    };
+    for (p, why) in [
+        (json!({"feature": "Nowhere", "members": [bottom, left]}), "Nowhere"),
+        (json!({"feature": "Frame", "members": [bottom, left]}), "is not a Frame Member"),
+        (trim(json!({"members": [bottom, top]})), "not at a corner of the frame"),
+        (trim(json!({"members": [bottom]})), "`members`"),
+        (trim(json!({"members": many})), "`members`"),
+        (trim(json!({"members": [bottom, 3]})), "`members`"),
+        (trim(json!({"members": [bottom, bottom]})), "listed twice"),
+        (trim(json!({"members": [{"feature": "Other", "line": bottom}, left]})), "not supported yet: a corner with a member of another frame"),
+        (trim(json!({"kind": "weld"})), "`kind` must be auto, none, mitre or butt"),
+        (trim(json!({"kind": "coped_butt"})), "`kind` must be auto, none, mitre or butt"),
+        (trim(json!({"flip": "yes"})), "`flip` must be true or false"),
+        (trim(json!({"remove": 1})), "`remove` must be true or false"),
+        (trim(json!({"gap": 1001})), "0…1000 mm"),
+        (trim(json!({"gap": -1})), "0…1000 mm"),
+        (trim(json!({"gap": "nope"})), "`gap`"),
+    ] {
+        let e = s.execute("frame.multi_trim", &p).unwrap_err().to_string();
+        assert!(e.contains(why), "{p}: {e}");
+        assert!(saved_corners(&s).is_empty(), "{p}");
+    }
+    // A gap on an overlap: refused as evaluation refuses it, the design left as it was.
+    let mut s = rail_and_brace(0.0, "auto", json!({"name": "RB"}));
+    let before = bodies(&mut s);
+    let e = s.execute("frame.multi_trim", &json!({"feature": "RB", "members": ["pair1", "pair2"], "gap": 2})).unwrap_err().to_string();
+    assert!(e.contains("gap") && e.contains("overlap"), "{e}");
+    assert!(saved_corners(&s).is_empty());
+    assert_eq!(bodies(&mut s).len(), before.len());
+}
+
+#[test]
+fn multi_trim_undoes() {
+    // Review Focus 4: undo puts the overrides back exactly as they were.
+    let (mut s, bottom, left) = named_bar_rectangle("auto", json!({}));
+    let top = line_at_y(&s, "Frame", 400.0);
+    let right = line_at_x(&s, "Frame", 600.0);
+    run(&mut s, "frame.multi_trim", json!({"feature": "Rect", "members": [top, right], "kind": "butt"}));
+    let (saved, volumes) = (saved_corners(&s), blrt(&mut s));
+    for p in [
+        json!({"feature": "Rect", "members": [bottom, left], "kind": "mitre", "gap": 2}),
+        json!({"feature": "Rect", "members": [right, top], "kind": "mitre"}),
+        json!({"feature": "Rect", "members": [top, right], "remove": true}),
+    ] {
+        run(&mut s, "frame.multi_trim", p.clone());
+        assert_ne!(saved_corners(&s), saved, "{p}");
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(saved_corners(&s), saved, "{p}");
+        let got = blrt(&mut s);
+        assert!(got.iter().zip(volumes).all(|(g, v)| rel(*g, v) < 1e-9), "{p}: {got:?} vs {volumes:?}");
+        assert_eq!(frame_entries(&s), 1);
+    }
+}
+
+#[test]
+fn the_gap_follows_its_parameter() {
+    // Review Focus 3. A mitred end set back by gap g loses g/√2 of length (half of g square to the 45° plane): the
+    // frame's gap g everywhere, and 2g at the corner (0, 0) set with `frame.multi_trim`.
+    let mut s = Session::default();
+    run(&mut s, "parameters.add", json!({"name": "g", "expression": "2 mm"}));
+    rectangle_frame(&mut s);
+    let (bottom, left) = (line_at_y(&s, "Frame", 0.0), line_at_x(&s, "Frame", 0.0));
+    let (top, right) = (line_at_y(&s, "Frame", 400.0), line_at_x(&s, "Frame", 600.0));
+    let names = json!({bottom.clone(): "B", left.clone(): "L", top: "T", right: "R"});
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": bar45(), "corner": "mitre", "gap": "g", "names": names, "name": "Rect"}));
+    run(&mut s, "frame.multi_trim", json!({"feature": "Rect", "members": [bottom, left], "kind": "mitre", "gap": "2 * g"}));
+    let r2 = 2f64.sqrt();
+    for g in [2.0, 4.0] {
+        run(&mut s, "parameters.change", json!({"name": "g", "expression": format!("{g} mm")}));
+        let got = blrt(&mut s);
+        for (k, (l, ends)) in [(600.0, 3.0 * g), (400.0, 3.0 * g), (600.0, 2.0 * g), (400.0, 2.0 * g)].into_iter().enumerate() {
+            assert!(rel(got[k], 2025.0 * (l - ends / r2)) < 1e-6, "g {g}, {k}: {got:?}");
+        }
+    }
+}
+
+#[test]
+fn a_stale_override_can_be_removed() {
+    // Review Focus 5: a sketch edit takes away a line an override names; the frame fails as before, never panics,
+    // and `remove` takes the stale override away.
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "U"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [300, 0]], "ids": ["a"]}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [0, 200]], "ids": ["b"]}));
+    run(&mut s, "sketch.line", json!({"points": [[300, 0], [300, 200]], "ids": ["c"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "frame.member", json!({"sketch": "U", "profile": tube(), "corner": "butt", "name": "U frame"}));
+    run(&mut s, "frame.multi_trim", json!({"feature": "U frame", "members": ["b", "a"], "kind": "butt"}));
+    delete_line(&mut s, "U", "b");
+    let fid = first_frame(&s);
+    let e = s.model.result(fid).and_then(|r| r.error.clone()).unwrap_or_default();
+    assert!(e.contains("not at a corner of the frame"), "{e}");
+    run(&mut s, "frame.multi_trim", json!({"feature": "U frame", "members": ["a", "b"], "remove": true}));
+    assert!(saved_corners(&s).is_empty());
+    assert!(s.model.result(fid).and_then(|r| r.error.clone()).is_none());
+    assert_eq!(bodies(&mut s).len(), 2);
+}
+
+// Corner entries through the other commands (#17854).
+
+#[test]
+fn flips_of_several_corners_are_ordered_in_one_go() {
+    // A Butt rectangle runs its 600s through; Flip at two corners runs the 400s through there instead.
+    let mut s = Session::default();
+    rectangle_frame(&mut s);
+    let (bottom, left) = (line_at_y(&s, "Frame", 0.0), line_at_x(&s, "Frame", 0.0));
+    let (top, right) = (line_at_y(&s, "Frame", 400.0), line_at_x(&s, "Frame", 600.0));
+    let corners = json!([
+        {"members": [bottom, left], "kind": "butt", "flip": true},
+        {"members": [top, right], "kind": "butt"},
+        {"members": [right, bottom], "kind": "butt", "flip": true},
+    ]);
+    run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "butt", "corners": corners}));
+    let orders: Vec<Vec<String>> = saved_corners(&s).iter().map(|c| c.lines().map(str::to_string).collect()).collect();
+    assert_eq!(orders, [vec![left.clone(), bottom.clone()], vec![top, right.clone()], vec![right, bottom]]);
+}
+
+#[test]
+fn timeline_edit_saves_flip_as_an_order() {
+    let mut s = Session::default();
+    l_corner(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "L", "profile": tube(), "corner": "butt", "name": "Corner"}));
+    let set = json!({"corners": [{"members": ["l1", "l2"], "kind": "butt", "flip": true}]});
+    run(&mut s, "timeline.edit", json!({"feature": "Corner", "set": set}));
+    let saved = saved_corners(&s);
+    assert_eq!(saved[0].lines().collect::<Vec<_>>(), ["l2", "l1"]);
+    assert!(!serde_json::to_string(&saved).unwrap().contains("flip"));
+    let set = json!({"corners": [{"members": ["l2", "l1"], "kind": "butt", "flip": false}]});
+    run(&mut s, "timeline.edit", json!({"feature": "Corner", "set": set}));
+    assert_eq!(saved_corners(&s)[0].lines().collect::<Vec<_>>(), ["l1", "l2"]);
+    let set = json!({"corners": [{"members": ["l1", "l2"], "kind": "butt", "flip": 1}]});
+    let e = s.execute("timeline.edit", &json!({"feature": "Corner", "set": set})).unwrap_err().to_string();
+    assert!(e.contains("`flip` must be true or false"), "{e}");
+}
+
+#[test]
+fn a_corner_member_named_by_its_frame_is_its_own() {
+    let mut s = Session::default();
+    l_corner(&mut s);
+    run(&mut s, "frame.member", json!({"sketch": "L", "profile": tube(), "corner": "butt", "name": "Corner"}));
+    // timeline.edit: the frame's own name is dropped, another frame's refused.
+    let own = json!({"corners": [{"members": [{"feature": "Corner", "line": "l2"}, "l1"], "kind": "butt"}]});
+    run(&mut s, "timeline.edit", json!({"feature": "Corner", "set": own}));
+    let saved = saved_corners(&s);
+    assert_eq!(saved[0].lines().collect::<Vec<_>>(), ["l2", "l1"]);
+    assert!(saved[0].members.iter().all(|m| m.feature.is_none()), "{saved:?}");
+    let other = json!({"corners": [{"members": [{"feature": "Other", "line": "l2"}, "l1"], "kind": "butt"}]});
+    let e = s.execute("timeline.edit", &json!({"feature": "Corner", "set": other})).unwrap_err().to_string();
+    assert!(e.contains("not supported yet: a corner with a member of another frame"), "{e}");
+    assert_eq!(saved_corners(&s), saved);
+    // timeline.redefine: the old name stripped.
+    let corners = json!([{"members": ["l1", {"feature": "Corner", "line": "l2"}], "kind": "butt"}]);
+    let params = json!({"sketch": "L", "profile": tube(), "corner": "butt", "corners": corners});
+    run(&mut s, "timeline.redefine", json!({"feature": "Corner", "command": "frame.member", "params": params}));
+    let saved = saved_corners(&s);
+    assert_eq!(saved[0].lines().collect::<Vec<_>>(), ["l1", "l2"]);
+    assert!(saved[0].members.iter().all(|m| m.feature.is_none()), "{saved:?}");
+    // A design file naming another frame's member fails the feature with the same words.
+    let fid = first_frame(&s);
+    let json_doc = s.doc.to_json();
+    let edited = json_doc.replacen(r#""line": "l2""#, r#""feature": "Other", "line": "l2""#, 1);
+    assert_ne!(edited, json_doc);
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&edited).unwrap());
+    let e = reopened.model.result(fid).and_then(|r| r.error.clone()).unwrap_or_default();
+    assert!(e.contains("not supported yet: a corner with a member of another frame"), "{e}");
+}

@@ -3,7 +3,8 @@
 //! standard size or a profile sketch. `frame.profile.list` lists the built-in profiles and the
 //! standard sizes, `frame.profile.properties` works out a profile's section, and
 //! `frame.profile.insert` draws one into a sketch.
-//! `frame.remove_member` takes tubes out of a Frame Member (#15705).
+//! `frame.remove_member` takes tubes out of a Frame Member (#15705), and `frame.multi_trim` sets, changes or removes
+//! one of its corner overrides (#17854).
 
 use solidcraft_geom::prelude::*;
 use std::collections::BTreeMap;
@@ -13,7 +14,7 @@ use solidcore_record::{Loop2, Seg2, Vec2};
 use solidcraft_doc::construct::{DatumItem, GeoRef};
 use solidcraft_doc::frame::sizes::{self, Family};
 use solidcraft_doc::frame::{self, Anchor, CornerOverride, CornerType, MemberPair, MemberProfile, MemberRef, Profile, ProfileSpec};
-use solidcraft_doc::{FeatureKind, SketchId};
+use solidcraft_doc::{Feature, FeatureKind, ModelState, SketchId};
 use solidcraft_sketch::Sketch;
 
 use super::features::{add_feature, check_expr, sketch_id};
@@ -22,9 +23,9 @@ use super::{CommandSpec, in_sketch, not_in_sketch};
 use crate::params::{bad, bool_, expr, num, str_, string_list, vec2};
 use crate::schema::features::FeatureResult;
 use crate::schema::frame::{
-    CORNER_ENTRY, CreatedIds, FrameMemberParams, MemberFeatureDeleted, ProfileInsertParams, ProfileInsertResult, ProfileKindInfo, ProfileListParams,
-    ProfileListResult, ProfileOut, ProfilePropertiesParams, ProfilePropertiesResult, ProfileSection, RemoveMemberParams, RemoveMemberResult,
-    SizeFamilyInfo, corner_entry, removed_members,
+    CORNER_ENTRY, CreatedIds, FrameMemberParams, MemberFeatureDeleted, MultiTrimParams, ProfileInsertParams, ProfileInsertResult, ProfileKindInfo,
+    ProfileListParams, ProfileListResult, ProfileOut, ProfilePropertiesParams, ProfilePropertiesResult, ProfileSection, RemoveMemberParams,
+    RemoveMemberResult, SizeFamilyInfo, TRIM_KIND, corner_entry, removed_members, trim_kind, trim_members,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{Result, Session};
@@ -38,6 +39,7 @@ const LIST_CONTRACT: TypedContract<ProfileListParams> = TypedContract::new();
 const PROPERTIES_CONTRACT: TypedContract<ProfilePropertiesParams> = TypedContract::new();
 const INSERT_CONTRACT: TypedContract<ProfileInsertParams> = TypedContract::new();
 const REMOVE_CONTRACT: TypedContract<RemoveMemberParams> = TypedContract::new();
+const MULTI_TRIM_CONTRACT: TypedContract<MultiTrimParams> = TypedContract::new();
 
 /// The profile parameter, as every frame command documents it.
 macro_rules! profile_doc {
@@ -92,6 +94,13 @@ pub static COMMANDS: &[CommandSpec] = &[
         .contract(&REMOVE_CONTRACT)
         .output(output_schema_for::<RemoveMemberResult>)
         .params("members: [{feature: id|name, line: the tube's line or pair id}] (1…1000, all of one Frame Member). Takes those tubes out as one undo step: a pair goes from the feature's pairs, a sketch line from its lines (the line stays in its sketch; a feature on every line of its sketch lists the others from then on), and the corner overrides that name a tube taken out go too. Taking out the last tube deletes the Frame Member. Returns the edited feature as frame.member does, or {deleted: the feature's name}"),
+    // The dialog's Corner Overrides rows are its UI: no ribbon button.
+    CommandSpec::new("frame.multi_trim", "Multi-Trim Corner", crate::checked!("frame.multi_trim", multi_trim))
+        .icon("frame_member")
+        .enabled(not_in_sketch)
+        .contract(&MULTI_TRIM_CONTRACT)
+        .output(output_schema_for::<FeatureResult>)
+        .params("feature: the Frame Member (id or name); members: [2 to 1000 line or pair ids, or {feature?: the frame's own name, line}] (a corner, crossing or overlap of the frame, the members in order: the first runs through a butt, or stays whole at a crossing or overlap, and of three or more the first two make the corner); kind?: auto|none|mitre|butt (default auto: the frame's own type, with this order); flip?: bool (the first two in the order today's rules give them, swapped; without it the members are saved as given); gap?: length expr (this corner's weld gap, 0…1000 mm; default the frame's; an overlap takes none); remove?: bool (take the override of these members away, back to the frame's own rules; no kind, flip or gap with it). Replaces the override of the same members (any order) or adds one, as one undo step; the frame stays one timeline entry. Returns the edited feature as frame.member does"),
 ];
 
 /// The `profile` parameter: its kind and each dimension as given, a number or an expression; or a
@@ -501,7 +510,18 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let st = s.model.state();
     if flips.iter().any(Option::is_some) {
-        flips_as_order(s, &st, &mut kind, &flips).map_err(|e| bad(cmd, e.to_string()))?;
+        // The feature as it will be added: in the active component, whose frame it is laid out in.
+        let mut laid = kind.clone();
+        super::component::to_active_frame(s, &mut laid);
+        let mut v = serde_json::to_value(&laid).map_err(|e| bad(cmd, e.to_string()))?;
+        if let Some(o) = v.as_object_mut() {
+            o.extend([("id".to_string(), json!(0)), ("name".to_string(), json!("")), ("component".to_string(), json!(s.active_component))]);
+        }
+        let mut f: Feature = serde_json::from_value(v).map_err(|e| bad(cmd, e.to_string()))?;
+        flips_as_order(&s.doc, &st, &mut f, &flips);
+        if let (FeatureKind::FrameMember { corners: ordered, .. }, FeatureKind::FrameMember { corners, .. }) = (f.kind, &mut kind) {
+            *corners = ordered;
+        }
     }
     // Each member's name is pinned to its line as the feature is made, so deleting or adding a
     // line later leaves the other members' names alone.
@@ -562,29 +582,26 @@ fn check_gap(s: &Session, e: &str, cmd: &str, what: &str) -> Result<()> {
     frame::checked_gap(g, what).map(|_| ()).map_err(|e| bad(cmd, e.to_string()))
 }
 
-/// Each corner entry that gives a Flip (`flips`, by entry) saved as an order: the order today's rules give its members
-/// ([`frame::default_order`], the model before the feature `st`), the first two swapped when set. One that names no
-/// corner keeps its order: the checks after, or the build, say so.
-fn flips_as_order(s: &Session, st: &solidcraft_doc::ModelState, kind: &mut FeatureKind, flips: &[Option<bool>]) -> std::result::Result<(), String> {
-    // The feature as it will be added: in the active component, whose frame it is laid out in.
-    let mut laid = kind.clone();
-    super::component::to_active_frame(s, &mut laid);
-    let mut v = serde_json::to_value(&laid).map_err(|e| e.to_string())?;
-    if let Some(o) = v.as_object_mut() {
-        o.extend([("id".to_string(), json!(0)), ("name".to_string(), json!("")), ("component".to_string(), json!(s.active_component))]);
+/// Each corner of the Frame Member `f` whose entry gives a Flip (`flips`, by entry) saved as an order: the order
+/// today's rules give its members ([`frame::default_orders`], the frame laid out once in `st`, the model before it),
+/// the first two swapped when set. One that names no corner keeps its order: the checks after, or the build, say so.
+pub(super) fn flips_as_order(doc: &solidcraft_doc::Document, st: &ModelState, f: &mut Feature, flips: &[Option<bool>]) {
+    let FeatureKind::FrameMember { corners, .. } = &f.kind else { return };
+    let flipped: Vec<(usize, bool)> = flips.iter().enumerate().filter_map(|(k, flip)| Some((k, (*flip)?))).collect();
+    let sets: Vec<Vec<String>> =
+        flipped.iter().map(|(k, _)| corners.get(*k).map(|c| c.lines().map(str::to_string).collect()).unwrap_or_default()).collect();
+    if sets.is_empty() {
+        return;
     }
-    let f: solidcraft_doc::Feature = serde_json::from_value(v).map_err(|e| e.to_string())?;
-    let FeatureKind::FrameMember { corners, .. } = kind else { return Ok(()) };
-    for (c, flip) in corners.iter_mut().zip(flips) {
-        let Some(flip) = flip else { continue };
-        let lines: Vec<String> = c.lines().map(str::to_string).collect();
-        let Ok(mut order) = frame::default_order(&s.doc, st, &f, &lines) else { continue };
-        if let ([a, b, ..], true) = (order.as_mut_slice(), *flip) {
+    let Ok(orders) = frame::default_orders(doc, st, f, &sets) else { return };
+    let FeatureKind::FrameMember { corners, .. } = &mut f.kind else { return };
+    for ((k, flip), order) in flipped.into_iter().zip(orders) {
+        let (Some(c), Some(mut order)) = (corners.get_mut(k), order) else { continue };
+        if let ([a, b, ..], true) = (order.as_mut_slice(), flip) {
             std::mem::swap(a, b);
         }
         c.members = order.into_iter().map(|line| MemberRef { feature: None, line }).collect();
     }
-    Ok(())
 }
 
 fn remove_member(s: &mut Session, p: &Value) -> Result<Value> {
@@ -673,4 +690,91 @@ fn remove_member(s: &mut Session, p: &Value) -> Result<Value> {
     }
     s.refresh();
     super::features::feature_reply(s, f.id, &before, true)
+}
+
+/// `frame.multi_trim`: one corner override of a Frame Member set, changed or (`remove`) taken away, in place: the
+/// frame stays one timeline entry.
+fn multi_trim(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "frame.multi_trim";
+    let id = super::edit::feature_id(s, p.get("feature"), cmd)?;
+    let f = s.doc.feature(id).cloned().ok_or_else(|| bad(cmd, "`feature` must name a Frame Member"))?;
+    let FeatureKind::FrameMember { corners, .. } = &f.kind else {
+        return Err(bad(cmd, format!("`{}` is not a Frame Member", f.name)));
+    };
+    let given = |k: &str| !matches!(p.get(k), None | Some(Value::Null));
+    let remove = given("remove") && bool_(p, "remove").ok_or_else(|| bad(cmd, "`remove` must be true or false"))?;
+    if remove && ["kind", "flip", "gap"].into_iter().any(given) {
+        return Err(bad(cmd, "`remove` takes the override away: give no `kind`, `flip` or `gap` with it"));
+    }
+    let mut members = trim_members(p.get("members")).map_err(|e| bad(cmd, e))?;
+    for m in &mut members {
+        match &m.feature {
+            Some(n) if *n == f.name => m.feature = None,
+            Some(_) => return Err(bad(cmd, "`members`: not supported yet: a corner with a member of another frame")),
+            None => {}
+        }
+    }
+    let lines: Vec<String> = members.iter().map(|m| m.line.clone()).collect();
+    let set = |lines: &mut dyn Iterator<Item = &str>| {
+        let mut set: Vec<String> = lines.map(str::to_string).collect();
+        set.sort();
+        set
+    };
+    let sorted = set(&mut lines.iter().map(String::as_str));
+    if sorted.windows(2).any(|w| w.first() == w.get(1)) {
+        return Err(bad(cmd, format!("`members` {lines:?}: a member is listed twice")));
+    }
+    let at = corners.iter().position(|c| set(&mut c.lines()) == sorted);
+    let mut new_corners = corners.clone();
+    if remove {
+        let at = at.ok_or_else(|| bad(cmd, format!("{} has no override of {lines:?}", f.name)))?;
+        new_corners.remove(at);
+    } else {
+        let kind = match p.get("kind") {
+            None | Some(Value::Null) => CornerType::Auto,
+            Some(v) => trim_kind(v).ok_or_else(|| bad(cmd, TRIM_KIND))?,
+        };
+        let flip = match given("flip") {
+            false => None,
+            true => Some(bool_(p, "flip").ok_or_else(|| bad(cmd, "`flip` must be true or false"))?),
+        };
+        let gap = match given("gap") {
+            false => None,
+            true => {
+                let mut e = expr(p, "gap").ok_or_else(|| bad(cmd, "`gap` must be a length expression"))?;
+                // A bare length typed in an inch (or cm…) design means that unit, as a new feature's does.
+                if s.doc.units.trim() != "mm" {
+                    e = s.doc.with_design_unit(&e, solidcraft_doc::expr::Kind::Length).into();
+                }
+                check_gap(s, &e, cmd, "`gap`")?;
+                Some(e)
+            }
+        };
+        // The set must meet, as evaluation requires; its order today's rules give it, for Flip (given false: that order).
+        let order = frame::default_orders(&s.doc, &s.model.state_before(id), &f, std::slice::from_ref(&lines))
+            .map_err(|e| bad(cmd, e.to_string()))?
+            .pop()
+            .flatten()
+            .ok_or_else(|| bad(cmd, format!("`members` {lines:?}: a corner override is not at a corner of the frame")))?;
+        if let Some(flip) = flip {
+            let mut order = order;
+            if let ([a, b, ..], true) = (order.as_mut_slice(), flip) {
+                std::mem::swap(a, b);
+            }
+            members = order.into_iter().map(|line| MemberRef { feature: None, line }).collect();
+        }
+        let record = CornerOverride { members, kind, gap };
+        let full = new_corners.len() >= frame::MAX_MEMBERS;
+        match at.and_then(|k| new_corners.get_mut(k)) {
+            Some(slot) => *slot = record,
+            None if full => return Err(bad(cmd, format!("{} already has {} corner overrides", f.name, frame::MAX_MEMBERS))),
+            None => new_corners.push(record),
+        }
+    }
+    let before = s.model.state();
+    if let Some(FeatureKind::FrameMember { corners, .. }) = s.doc_mut().feature_mut(id).map(|f| &mut f.kind) {
+        *corners = new_corners;
+    }
+    s.refresh();
+    super::features::feature_reply(s, id, &before, true)
 }
