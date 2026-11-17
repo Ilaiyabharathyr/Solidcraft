@@ -501,6 +501,19 @@ impl JsonSchema for CornerParam {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CornersParam(pub Vec<CornerOverride>);
 
+/// What a `corners` entry must be.
+pub const CORNER_ENTRY: &str = "`corners` entries must be {members: [2 to 1000 line or pair ids, or {line}], kind, gap?}";
+
+/// A `corners` entry, either shape (`corner` for `kind`, members as bare ids), and its `flip` when it gives one (an
+/// older script's, or the dialog's: the handler saves it as an order). `None` for anything else.
+pub fn corner_entry(v: &Value) -> Option<(CornerOverride, Option<bool>)> {
+    let flip = match v.get("flip") {
+        None | Some(Value::Null) => None,
+        Some(f) => Some(f.as_bool()?),
+    };
+    Some((serde_json::from_value(v.clone()).ok()?, flip))
+}
+
 impl<'de> Deserialize<'de> for CornersParam {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let fail = || D::Error::custom(whole(format!("`corners` must be a list of up to {MAX_MEMBERS} corner overrides")));
@@ -508,8 +521,10 @@ impl<'de> Deserialize<'de> for CornersParam {
         if a.len() > MAX_MEMBERS {
             return Err(fail());
         }
-        let entry = || D::Error::custom(whole("`corners` entries must be {members: [2 to 1000 line or pair ids], corner, flip?}"));
-        a.into_iter().map(|v| serde_json::from_value(v).map_err(|_| entry())).collect::<Result<_, _>>().map(CornersParam)
+        a.iter()
+            .map(|v| corner_entry(v).map(|e| e.0).ok_or_else(|| D::Error::custom(whole(CORNER_ENTRY))))
+            .collect::<Result<_, _>>()
+            .map(CornersParam)
     }
 }
 
@@ -519,16 +534,21 @@ impl JsonSchema for CornersParam {
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
-            "description": "Corners finished their own way: the ids (lines' or pairs') of the 2 to 1000 members that meet there, the corner type, and whether the other member runs through.",
+            "description": "Corners, crossings and overlaps finished their own way: the 2 to 1000 members that meet there (lines' or pairs' ids), in order (the first runs through, or stays whole), and the corner type. An older script's `corner` reads as `kind`, and its `flip` is saved as today's order with the first two swapped.",
             "type": "array", "maxItems": MAX_MEMBERS,
             "items": {
                 "type": "object",
                 "properties": {
-                    "members": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": MAX_MEMBERS},
+                    "members": {"type": "array", "minItems": 2, "maxItems": MAX_MEMBERS, "items": {"anyOf": [
+                        {"type": "string"},
+                        {"type": "object", "properties": {"feature": {"type": "string"}, "line": {"type": "string"}}, "required": ["line"]}
+                    ]}},
+                    "kind": {"type": "string", "enum": ["auto", "none", "mitre", "butt"]},
                     "corner": {"type": "string", "enum": ["auto", "none", "mitre", "butt"]},
-                    "flip": {"type": "boolean"}
+                    "flip": {"type": "boolean"},
+                    "gap": {"type": ["string", "number"]}
                 },
-                "required": ["members", "corner"]
+                "required": ["members"]
             }
         })
     }

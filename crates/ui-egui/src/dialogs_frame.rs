@@ -295,8 +295,7 @@ pub(crate) fn remove_tubes(app: &mut SolveApp, ids: &[String]) {
     // `frame.remove_member` drops it: a kept one, and a picked corner whose members, as OK would
     // send them now, name it.
     let removed: std::collections::BTreeSet<&str> = all.iter().filter(|t| ids.contains(&t.id)).map(|t| t.id.as_str()).collect();
-    let names_removed =
-        |o: &Value| o.get("members").and_then(Value::as_array).is_some_and(|ms| ms.iter().any(|m| m.as_str().is_some_and(|m| removed.contains(m))));
+    let names_removed = |o: &Value| read_override(o).is_some_and(|o| o.lines().any(|m| removed.contains(m)));
     let mut gone_corners = Vec::new();
     if let Some(d) = app.dialog.as_ref()
         && let Kind::Frame(m) = &d.kind
@@ -902,10 +901,15 @@ fn kept_corner_text(o: &Value, crossing: bool) -> &str {
     if crossing {
         return tr("Crossing");
     }
-    let mut ids = o.get("members").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
-    let names_pair = ids.any(|id| frame::parse_pair_id(id).is_some());
-    let corner = CORNER_TYPES.iter().find(|c| o.get("corner").and_then(Value::as_str) == Some(c.0));
+    let o = read_override(o);
+    let names_pair = o.as_ref().is_some_and(|o| o.lines().any(|id| frame::parse_pair_id(id).is_some()));
+    let corner = o.and_then(|o| CORNER_TYPES.get(corner_index(&o.kind)));
     tr(corner.filter(|_| names_pair).map_or("Missing corner", |c| c.1))
+}
+
+/// A corner override as the dialog keeps or sends it, read in either shape (`frame.member`'s).
+fn read_override(o: &Value) -> Option<frame::CornerOverride> {
+    serde_json::from_value(o.clone()).ok()
 }
 
 fn corner_label(n: usize) -> String {
@@ -1068,8 +1072,7 @@ fn kept_crossings(s: &Session, d: &Dialog) -> Vec<bool> {
     let st = s.model.state();
     kept.iter()
         .map(|o| {
-            let members: Vec<String> =
-                o.get("members").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+            let members: Vec<String> = read_override(o).map(|o| o.lines().map(String::from).collect()).unwrap_or_default();
             auto && path.is_some_and(|ps| frame::members_cross(&st, ps.0, &members))
         })
         .collect()
@@ -1394,15 +1397,23 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
         let ends = frame::corner_at_point(&st, ps, &path_lines, &id, auto || crossed).ok()?;
         (ends.len() == members.len() && ends.iter().all(|e| members.contains(e))).then_some((ps, id))
     };
+    // Flip shows an override whose members run in another order than today's rules give them (saved as an order).
+    let feature = app.session.doc.features.iter().find(|f| f.kind == *kind);
+    let before = feature.map(|f| app.session.model.state_before(f.id));
+    let flipped = |lines: &[String]| match (feature, &before) {
+        (Some(f), Some(st)) => frame::default_order(&app.session.doc, st, f, lines).is_ok_and(|d| d.get(..2) != lines.get(..2)),
+        _ => false,
+    };
     let mut missing = Vec::new();
     for o in corners {
-        match path_sketch.and_then(|ps| matched(ps.0, &o.members)) {
+        let lines: Vec<String> = o.lines().map(str::to_string).collect();
+        match path_sketch.and_then(|ps| matched(ps.0, &lines)) {
             Some((sketch, id)) => {
                 let pick = Sel::ExternalSketchPoint { sketch, id };
                 if let Some(i) = inputs.get_mut(2) {
                     i.items.push(pick.clone());
                 }
-                m.overrides.push((pick, corner_index(&o.corner), o.flip));
+                m.overrides.push((pick, corner_index(&o.kind), flipped(&lines)));
             }
             None => missing.push(o),
         }

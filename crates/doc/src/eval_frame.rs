@@ -14,8 +14,8 @@ use solidcraft_sketch::{CurveKind, Sketch};
 
 use super::{ModelBody, ModelState, SolvedSketch, new_name, path_in_frame, select_profiles, sketch_in_feature_frame, val};
 use crate::expr::{Kind, Value};
-use crate::frame::{self, CornerOverride, CornerType, MAX_MEMBERS, MemberPair, MemberProfile};
-use crate::frame_corners::{self, Corner, Cut};
+use crate::frame::{self, CornerOverride, CornerType, MAX_MEMBERS, MemberPair, MemberProfile, MemberRef};
+use crate::frame_corners::{self, Corner, Cut, Override};
 use crate::frame_layout::{self, ChainCorner, Fit, Joint, MemberPlane, Plan};
 use crate::frame_multi_trim;
 use crate::lineage::Traced;
@@ -60,6 +60,10 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
     let Layout { segments, regions, description, at, turn, sketch_x, drawn, planes } = layout(doc, vals, f, st)?;
+    if corners.iter().flat_map(|c| &c.members).any(|m| m.feature.as_ref().is_some_and(|n| *n != f.name)) {
+        return Err(DocError::Invalid("not supported yet: a corner with a member of another frame".into()));
+    }
+    let corners = &overrides(*corner, (&segments, &planes, &drawn, sketch_x), corners);
     let coped = copes(&f.kind);
     let (mut plan, crossing) = plans(*corner, &segments, &planes, corners, &drawn)?;
     // The plan that cuts the lines into pieces: Auto's, or the crossings' of a Mitre, Butt or Coped frame.
@@ -109,7 +113,15 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
     };
     // This frame's own members' cut ends, to build their tools from, and each tool once built.
     let mut own_ends = if fits {
-        frame_ends(&f.kind, &segments, &regions, &placed, (plan.clone().or(crossing.clone()), &planes, &overlap_overrides), (sketch_x, &drawn))?
+        frame_ends(
+            &f.kind,
+            corners,
+            &segments,
+            &regions,
+            &placed,
+            (plan.clone().or(crossing.clone()), &planes, &overlap_overrides),
+            (sketch_x, &drawn),
+        )?
     } else {
         Vec::new()
     };
@@ -119,7 +131,8 @@ fn built(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut M
         // it builds): the tools built stay right.
         let tool = |k: usize| member_tool(&segments, &regions, &placed, &own_ends, k, coped);
         if free_chains(plan, &earlier, (&placed, centre), &|k, p| near_with(&own_ends, k, p), &tool, &mut tools, &segments)? {
-            own_ends = frame_ends(&f.kind, &segments, &regions, &placed, (Some(plan.clone()), &planes, &overlap_overrides), (sketch_x, &drawn))?;
+            own_ends =
+                frame_ends(&f.kind, corners, &segments, &regions, &placed, (Some(plan.clone()), &planes, &overlap_overrides), (sketch_x, &drawn))?;
         }
     }
     let unjointed = if fits { unjointed_ends(&f.kind, &segments, plan.as_ref().or(crossing.as_ref()), (&planes, &drawn)) } else { Vec::new() };
@@ -330,7 +343,7 @@ fn resolve_overlaps(
     made: &mut [Option<Traced>],
     segments: &[(String, Vec3, Vec3)],
     (place, lines, joined, reach): (&[usize], &[String], &HashSet<(usize, usize)>, &[f64]),
-    (overrides, pending): (&[CornerOverride], &[usize]),
+    (overrides, pending): (&[Override], &[usize]),
     earlier: &Earlier,
     tool: &dyn Fn(usize) -> Result<Traced>,
 ) -> Result<Split> {
@@ -344,7 +357,7 @@ fn resolve_overlaps(
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by_key(|&m| (place.get(m).copied().unwrap_or(usize::MAX), m));
     let line = |m: usize| lines.get(m).map_or("", String::as_str);
-    let names = |o: &CornerOverride, i: usize, j: usize| match o.members.as_slice() {
+    let names = |o: &Override, i: usize, j: usize| match o.members.as_slice() {
         [a, b] => (a == line(i) && b == line(j)) || (a == line(j) && b == line(i)),
         _ => false,
     };
@@ -499,7 +512,7 @@ fn corner_ends(
     regions: &[Region2],
     placed: &dyn Fn(usize, Vec3) -> Plane,
     finish: (CornerType, bool),
-    (overrides, overlaps): (&[CornerOverride], &[usize]),
+    (overrides, overlaps): (&[Override], &[usize]),
     (planes, sketch_x, drawn): (&[MemberPlane], Option<Vec3>, &[usize]),
     crossing: Option<&Plan>,
     coped: bool,
@@ -531,7 +544,7 @@ fn corner_ends(
     let length = |m: usize| line_length(segments, crossing, m);
     // A crossing's override (its Flip used by the crossing plan) names no corner, nor does an overlap's.
     let crossing_override = |k: usize| crossing.is_some_and(|p| p.crossing_overrides.contains(&k));
-    let named = |(k, _): &(usize, &CornerOverride)| !crossing_override(*k) && !overlaps.contains(k);
+    let named = |(k, _): &(usize, &Override)| !crossing_override(*k) && !overlaps.contains(k);
     for o in overrides.iter().enumerate().filter(named).map(|(_, o)| o) {
         // Two members: the corner they meet at. Three or more are an Auto frame's alone (which never comes here).
         let [a, b] = o.members.as_slice() else {
@@ -825,7 +838,7 @@ fn plans(
     corner: CornerType,
     segments: &[(String, Vec3, Vec3)],
     planes: &[MemberPlane],
-    overrides: &[CornerOverride],
+    overrides: &[Override],
     drawn: &[usize],
 ) -> Result<(Option<Plan>, Option<Plan>)> {
     if corner.is_none() {
@@ -844,7 +857,7 @@ fn plans(
         return Err(DocError::Invalid("A corner override names at least two members".into()));
     }
     // An overlap's override names no point of the plan ([`resolve_overlaps`] checks it).
-    let overrides: Vec<CornerOverride> = overrides.iter().filter(|o| !overlap_override(segments, planes, o)).cloned().collect();
+    let overrides: Vec<Override> = overrides.iter().filter(|o| !overlap_override(segments, planes, o)).cloned().collect();
     // One feature's members share one section.
     frame_layout::plan(segments, planes, drawn, &|_, _| true, &overrides).map(|p| (Some(p), None))
 }
@@ -860,7 +873,7 @@ fn ends_meet(segments: &[(String, Vec3, Vec3)], i: usize, j: usize) -> bool {
 /// Whether override `o` names two of `segments` that no end joins ([`ends_meet`]) and that don't cross in one sketch
 /// plane (a planar crossing's): an overlap's, saying which of the two gives way where their tubes overlap
 /// ([`resolve_overlaps`]), never a corner's or a crossing's.
-fn overlap_override(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], o: &CornerOverride) -> bool {
+fn overlap_override(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], o: &Override) -> bool {
     let [a, b] = o.members.as_slice() else { return false };
     let at = |id: &String| segments.iter().position(|s| s.0 == *id);
     let (Some(i), Some(j)) = (at(a), at(b)) else { return false };
@@ -881,11 +894,139 @@ fn overlap_override(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], o
 /// Which of `overrides` name an overlap ([`overlap_override`]), by index, worked out on the frame's whole lines
 /// `segments` before crossings cut them: the one list [`corner_ends`] and [`resolve_overlaps`] both go by. None under
 /// None, which resolves no overlap.
-fn overlap_overrides(corner: CornerType, segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], overrides: &[CornerOverride]) -> Vec<usize> {
+fn overlap_overrides(corner: CornerType, segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], overrides: &[Override]) -> Vec<usize> {
     if corner.is_none() {
         return Vec::new();
     }
     overrides.iter().enumerate().filter(|(_, o)| overlap_override(segments, planes, o)).map(|(k, _)| k).collect()
+}
+
+/// A frame's whole lines as laid out ([`segments`]): each with its plane, the drawing order and the sketch's X axis.
+type Lines<'a> = (&'a [(String, Vec3, Vec3)], &'a [MemberPlane], &'a [usize], Option<Vec3>);
+
+/// Each record's lines in the order today's rules lay them with no Flip (#17854): [0] runs through (a butt's through
+/// member, Auto's long tube, the line a crossing keeps whole, the tube an overlap leaves whole), [1] is the other of
+/// the pair the record's first two name (`laid_pair`: the two of its lines laid first instead), then the rest in
+/// laying order. `None` for a record that names no corner, crossing or overlap of the frame (the build says so) or
+/// fewer than two members. The one source of [`default_order`] and of the build's Flip ([`overrides`]), each corner
+/// worked out as the build works it out: Auto's plan ([`frame_layout::planned`]), stage 1's corners
+/// ([`corner_ends`]: [`frame_corners::through`] by line length), chained corners as [`auto_ends`] cuts them, and the
+/// laying order for crossings and overlaps.
+fn orders(corner: CornerType, (segments, planes, drawn, sketch_x): Lines, records: &[CornerOverride], laid_pair: bool) -> Vec<Option<Vec<String>>> {
+    let mut out = vec![None; records.len()];
+    // A design file is hostile input: past the caps the build says so.
+    if records.len() > MAX_MEMBERS || records.iter().any(|r| r.members.len() > MAX_MEMBERS) {
+        return out;
+    }
+    let place: HashMap<&str, usize> =
+        frame_layout::ranks(segments, planes, drawn).iter().enumerate().filter_map(|(i, r)| Some((segments.get(r.member)?.0.as_str(), i))).collect();
+    let laid = |lines: &[String]| {
+        let mut lines = lines.to_vec();
+        lines.sort_by_key(|l| place.get(l.as_str()).copied().unwrap_or(usize::MAX));
+        lines
+    };
+    let unflipped: Vec<Override> = records
+        .iter()
+        .map(|r| {
+            let lines: Vec<String> = r.lines().map(str::to_string).collect();
+            Override { members: if laid_pair { laid(&lines) } else { lines }, corner: r.kind, flip: false }
+        })
+        .collect();
+    let (plan, matched) = if corner.is_none() {
+        (None, Vec::new())
+    } else {
+        let (plan, matched) = frame_layout::planned(segments, planes, drawn, &|_, _| true, &unflipped);
+        (Some(plan), matched)
+    };
+    // The plan that cuts the lines into pieces, as [`plans`] keeps it.
+    let cutting = plan.as_ref().filter(|p| corner == CornerType::Auto || !p.crossings.is_empty());
+    let overlaps = overlap_overrides(corner, segments, planes, &unflipped);
+    // A member's line, a piece's its line's.
+    let line = |m: usize| match cutting {
+        Some(p) => p.pieces.get(m).and_then(|pc| segments.get(pc.parent)).map_or("", |s| s.0.as_str()),
+        None => segments.get(m).map_or("", |s| s.0.as_str()),
+    };
+    let pieces = pieced(segments.to_vec(), planes.to_vec(), drawn.to_vec(), cutting).ok();
+    let stage1 = match (&pieces, corner) {
+        (Some(p), c) if c != CornerType::Auto => frame_corners::find_corners(&p.0),
+        _ => Vec::new(),
+    };
+    // Which member of corner c runs through, as `through` picks it with `length`.
+    let through = |c: &Corner, length: &dyn Fn(usize) -> f64| {
+        let (segs, _, drawn) = pieces.as_ref()?;
+        c.ends.get(frame_corners::through(segs, c, length, sketch_x, drawn)).map(|e| e.0)
+    };
+    for (k, (o, slot)) in unflipped.iter().zip(out.iter_mut()).enumerate() {
+        let (a, b) = match o.members.get(..2) {
+            Some([a, b]) => (a.as_str(), b.as_str()),
+            _ => continue,
+        };
+        let rest = laid(o.members.get(2..).unwrap_or_default());
+        let is_pair = |x: usize, y: usize| (line(x), line(y)) == (a, b) || (line(x), line(y)) == (b, a);
+        // The pair with member `first`'s line first, then the rest.
+        let ordered = |first: usize| {
+            let first = line(first);
+            let second = if first == a { b } else { a };
+            [first.to_string(), second.to_string()].into_iter().chain(rest.iter().cloned()).collect::<Vec<String>>()
+        };
+        *slot = if overlaps.contains(&k) || cutting.is_some_and(|p| p.crossing_overrides.contains(&k)) {
+            // The one laid first stays whole.
+            Some(laid(&[a.to_string(), b.to_string()]).into_iter().chain(rest).collect())
+        } else if let (Some(plan), CornerType::Auto) = (plan.as_ref(), corner) {
+            // A chained corner's pieces are whole lines: their own lengths rank them, as `auto_ends` cuts them.
+            let chain = |ch: &ChainCorner| {
+                let length = frame_corners::segment_length(&pieces.as_ref()?.0);
+                through(&Corner { point: Vec3::ZERO, ends: [ch.a, ch.b] }, &length)
+            };
+            if let Some(c) = plan.corners.iter().find(|c| c.overridden && is_pair(c.long.0, c.short.0)) {
+                Some(ordered(c.long.0))
+            } else if let Some(m) = plan.chained.iter().find(|c| c.overridden && is_pair(c.a.0, c.b.0)).and_then(chain) {
+                Some(ordered(m))
+            } else {
+                // Matched where no corner is made (one group end alone): nothing runs through.
+                matched.get(k).is_some_and(|m| *m).then(|| laid(&o.members))
+            }
+        } else if o.members.len() == 2 {
+            let length = |m: usize| pieces.as_ref().map_or(0.0, |p| line_length(&p.0, cutting, m));
+            stage1.iter().find(|c| is_pair(c.ends[0].0, c.ends[1].0)).and_then(|c| through(c, &length)).map(ordered)
+        } else {
+            None
+        };
+    }
+    out
+}
+
+/// `records` as the build reads them: each its lines in order, its type, and Flip where its first line is not the one
+/// [`orders`] puts first of its first two.
+fn overrides(corner: CornerType, lines: Lines, records: &[CornerOverride]) -> Vec<Override> {
+    let orders = orders(corner, lines, records, false);
+    records
+        .iter()
+        .zip(orders)
+        .map(|(r, order)| {
+            let members: Vec<String> = r.lines().map(str::to_string).collect();
+            let flip = order.is_some_and(|d| d.get(..2) != members.get(..2));
+            Override { members, corner: r.kind, flip }
+        })
+        .collect()
+}
+
+/// Members of the corner, crossing or overlap `members` names (any order), in the order today's rules lay them
+/// ([`orders`]): [0] runs through or stays whole. Errors as evaluation does for a set that names nothing. `f` is the
+/// Frame Member (its corner records aren't read), `st` the model before it.
+pub fn default_order(doc: &Document, st: &ModelState, f: &Feature, members: &[String]) -> Result<Vec<String>> {
+    let FeatureKind::FrameMember { corner, .. } = &f.kind else {
+        return Err(DocError::Invalid("not a frame member feature".into()));
+    };
+    if members.len() < 2 {
+        return Err(DocError::Invalid("A corner override names at least two members".into()));
+    }
+    let (vals, _) = super::evaluation_values(doc);
+    let (segments, sketch_x, drawn, planes) = segments(doc, &vals, f, st)?;
+    let record =
+        CornerOverride { members: members.iter().map(|l| MemberRef { feature: None, line: l.clone() }).collect(), kind: CornerType::Auto, gap: None };
+    let order = orders(*corner, (&segments, &planes, &drawn, sketch_x), &[record], true).pop().flatten();
+    order.ok_or_else(|| DocError::Invalid("A corner override is not at a corner of the frame".into()))
 }
 
 /// The fits of `plan` where its crossings cut a line, exactly as Auto fits them: each piece's end cut there, and each
@@ -1352,13 +1493,14 @@ fn member_tool(
 /// finish).
 fn frame_ends(
     f: &FeatureKind,
+    corners: &[Override],
     segments: &[(String, Vec3, Vec3)],
     regions: &[Region2],
     placed: &dyn Fn(usize, Vec3) -> Plane,
     (plan, planes, overlaps): (Option<Plan>, &[MemberPlane], &[usize]),
     tie: Tie,
 ) -> Result<Vec<[Option<CutEnd>; 2]>> {
-    let FeatureKind::FrameMember { corner, flip, corners, .. } = f else {
+    let FeatureKind::FrameMember { corner, flip, .. } = f else {
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
     let coped = copes(f);
@@ -1688,6 +1830,7 @@ pub(crate) fn member_section(
         return Err(DocError::Invalid("not a frame member feature".into()));
     };
     let Layout { segments, regions, at, turn, sketch_x, drawn, planes, .. } = layout(doc, vals, f, st)?;
+    let corners = &overrides(*corner, (&segments, &planes, &drawn, sketch_x), corners);
     let (plan, crossing) = plans(*corner, &segments, &planes, corners, &drawn)?;
     let overlaps = overlap_overrides(*corner, &segments, &planes, corners);
     let (segments, planes, drawn) = pieced(segments, planes, drawn, plan.as_ref().or(crossing.as_ref()))?;
@@ -1707,7 +1850,7 @@ pub(crate) fn member_section(
     // Cap refuses it from the face itself).
     // ponytail: a corner or chain corner Fit Ends turns Free (inside a tube) is read here as jointed, as is an end
     // fitted to a tube as open; finding them builds every earlier tool, which End Cap would pay on every pick.
-    let ends = frame_ends(&f.kind, &segments, &regions, &placed, (plan.or(crossing), &planes, &overlaps), (sketch_x, &drawn))?;
+    let ends = frame_ends(&f.kind, corners, &segments, &regions, &placed, (plan.or(crossing), &planes, &overlaps), (sketch_x, &drawn))?;
     let dir = (b - a).normalized().ok_or_else(|| DocError::Invalid(format!("line `{line}` has no length")))?;
     let [start, end] = ends.get(m).copied().unwrap_or([None, None]);
     let square = |e: Option<CutEnd>, p: Vec3| match e {
@@ -1824,7 +1967,9 @@ pub fn member_parts(st: &ModelState, kind: &FeatureKind) -> Result<(Vec<String>,
                 // is, not in the feature's frame: moved as one, the lines cross where they did.
                 let planes = vec![ps.sketch.wires.is_empty().then(|| (ps.plane.normal(), ps.plane.x)); segments.len()];
                 let drawn = drawn_order(&ps.sketch, &segments);
-                let pieces = frame_layout::pieces(&segments, &planes, &drawn, corners);
+                // The sketch's own X breaks no tie that cuts a line: only a crossing's order does.
+                let corners = overrides(*corner, (&segments, &planes, &drawn, None), corners);
+                let pieces = frame_layout::pieces(&segments, &planes, &drawn, &corners);
                 if pieces.len() + pairs.len() > MAX_MEMBERS {
                     return Err(too_many_pieces());
                 }

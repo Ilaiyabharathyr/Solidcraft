@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use solidcore_record::{Plane, Region2, Seg2, Vec2, Vec3};
 use solidcraft_geom::prelude::*;
 
-use crate::{DocError, Result};
+use crate::{DocError, Expr, FeatureName, Result};
 
 /// How two members are finished where they meet.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,7 +33,7 @@ impl CornerType {
     pub fn is_none(&self) -> bool {
         *self == CornerType::None
     }
-    /// Whether Flip means anything: which member runs through.
+    /// Whether the member order means anything: which member runs through.
     pub fn flips(&self) -> bool {
         matches!(self, CornerType::Auto | CornerType::Butt | CornerType::CopedButt)
     }
@@ -47,7 +47,7 @@ impl CornerType {
 /// An older build's Coped corner type (`coped_butt`, the frame's or an override's) read as Butt with the frame-wide
 /// Coped, which copes every butt joint of the frame (#17854).
 pub fn read_coped(corner: &mut CornerType, corners: &mut [CornerOverride], coped: &mut bool) {
-    for c in std::iter::once(corner).chain(corners.iter_mut().map(|o| &mut o.corner)) {
+    for c in std::iter::once(corner).chain(corners.iter_mut().map(|o| &mut o.kind)) {
         if *c == CornerType::CopedButt {
             *c = CornerType::Butt;
             *coped = true;
@@ -55,13 +55,74 @@ pub fn read_coped(corner: &mut CornerType, corners: &mut [CornerOverride], coped
     }
 }
 
-/// One corner finished its own way, named by the ids of the two or more members that meet there (a
-/// line's, or a pair's `pair<N>`).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A member of a corner (#4003): its Frame Member (`None`, the only one taken for now: this frame's own) and its
+/// line's id, or its pair's `pair<N>`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, solidcraft_derive::Walk)]
+pub struct MemberRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature: Option<FeatureName>,
+    pub line: String,
+}
+
+/// One corner, crossing or overlap finished its own way, named by the two or more members that meet there, in order
+/// (#17854): the first runs through (a butt's through member, the line a crossing keeps whole, the tube an overlap
+/// leaves whole), the second makes the corner with it; of three or more, the rest keep their laying order. Read from
+/// a test build's shape too: a member as a bare id, `corner` for `kind`, and `flip` ignored.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, solidcraft_derive::Walk)]
+#[serde(from = "RawOverride")]
 pub struct CornerOverride {
+    pub members: Vec<MemberRef>,
+    pub kind: CornerType,
+    /// The weld gap at this corner; none: the frame's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[walk(length = "Gap")]
+    pub gap: Option<Expr>,
+}
+
+impl CornerOverride {
+    /// The members' line ids, in order.
+    pub fn lines(&self) -> impl Iterator<Item = &str> {
+        self.members.iter().map(|m| m.line.as_str())
+    }
+}
+
+/// A [`CornerOverride`] as written, in either shape.
+#[derive(Deserialize)]
+struct RawOverride {
+    members: Vec<RawMember>,
+    #[serde(alias = "corner")]
+    kind: CornerType,
+    #[serde(default)]
+    gap: Option<Expr>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawMember {
+    Line(String),
+    Ref(MemberRef),
+}
+
+impl From<RawOverride> for CornerOverride {
+    fn from(r: RawOverride) -> Self {
+        let members = r
+            .members
+            .into_iter()
+            .map(|m| match m {
+                RawMember::Line(line) => MemberRef { feature: None, line },
+                RawMember::Ref(m) => m,
+            })
+            .collect();
+        CornerOverride { members, kind: r.kind, gap: r.gap }
+    }
+}
+
+/// An override as the build reads it: its record's lines in order, its type, and Flip, whether its first line is not
+/// the one today's rules put first of its first two (`eval_frame`'s `overrides`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Override {
     pub members: Vec<String>,
     pub corner: CornerType,
-    #[serde(default)]
     pub flip: bool,
 }
 

@@ -1490,6 +1490,7 @@ fn an_edit_opens_with_an_override_whose_corner_has_gone() {
     *corners = serde_json::from_value(gone.clone()).unwrap();
     let e = edit_dialog(&h.app, f, None).unwrap();
     assert!(e.inputs[2].items.is_empty());
+    let gone = saved(&gone);
     assert_eq!(e.extra.get("corners"), Some(&gone));
     // OK keeps it (the feature then says the override is not at a corner).
     assert_eq!(apply_commands(&h.app, &e).unwrap()[0].1["params"]["corners"], gone);
@@ -1523,7 +1524,8 @@ fn an_edit_shows_a_kept_crossing_override_as_a_crossing() {
     let f = h.app.session.doc.features.last().unwrap().id;
     let e = edit_dialog(&h.app, f, None).unwrap();
     assert!(e.inputs[2].items.is_empty());
-    assert_eq!(e.extra.get("corners").and_then(|c| c[0].get("members")), Some(&json!(["d1", "d2"])));
+    // Saved as the order Flip gave: d2 stays whole.
+    assert_eq!(e.extra.get("corners").and_then(|c| c[0].get("members")), Some(&json!([{"line": "d2"}, {"line": "d1"}])));
     h.app.dialog = Some(e);
     h.frames(2);
     let texts = drawn_texts(&h);
@@ -1548,6 +1550,7 @@ fn an_edit_keeps_an_override_of_a_pair_members_corner() {
     let f = app.session.doc.features.last().unwrap().id;
     let e = edit_dialog(&app, f, None).unwrap();
     assert!(e.inputs[2].items.is_empty());
+    let over = saved(&over);
     assert_eq!(e.extra.get("corners"), Some(&over));
     assert_eq!(kept_corner_text(&over[0], false), "Mitre");
     assert_eq!(kept_corner_text(&json!({"members": [bottom, "l9"], "corner": "mitre"}), false), "Missing corner");
@@ -1800,7 +1803,12 @@ fn an_edit_shows_a_three_tube_override() {
     *corners = serde_json::from_value(two.clone()).unwrap();
     let e = edit_dialog(&app, f, None).unwrap();
     assert!(e.inputs[2].items.is_empty(), "{:?}", e.inputs[2].items);
-    assert_eq!(e.extra.get("corners"), Some(&two));
+    assert_eq!(e.extra.get("corners"), Some(&saved(&two)));
+}
+
+/// Corner overrides as a design saves them (#17854: `{members: [{line}], kind}`, an old `flip` dropped).
+fn saved(corners: &Value) -> Value {
+    serde_json::to_value(serde_json::from_value::<Vec<solidcraft_engine::doc::frame::CornerOverride>>(corners.clone()).unwrap()).unwrap()
 }
 
 /// With Corner Overrides active, a corner of the frame sketch (not being edited) is picked in the

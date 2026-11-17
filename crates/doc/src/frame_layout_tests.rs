@@ -220,7 +220,7 @@ fn a_tube_crossing_the_outline_is_in_its_group() {
 
 // --- The plan (spec A4-A6) ---
 
-fn planned(segments: &[(String, Vec3, Vec3)], overrides: &[CornerOverride]) -> Result<Plan> {
+fn planned(segments: &[(String, Vec3, Vec3)], overrides: &[Override]) -> Result<Plan> {
     plan(segments, &xy(segments), &in_order(segments), &|_, _| true, overrides)
 }
 
@@ -229,8 +229,8 @@ fn at(segments: &[(String, Vec3, Vec3)], id: &str) -> usize {
     segments.iter().position(|s| s.0 == id).unwrap()
 }
 
-fn auto(members: &[&str], flip: bool) -> CornerOverride {
-    CornerOverride { members: members.iter().map(|s| s.to_string()).collect(), corner: CornerType::Auto, flip }
+fn auto(members: &[&str], flip: bool) -> Override {
+    Override { members: members.iter().map(|s| s.to_string()).collect(), corner: CornerType::Auto, flip }
 }
 
 #[test]
@@ -303,11 +303,16 @@ fn mixed_sections_butt_instead_of_mitre() {
 fn an_override_at_three_ends_flips_the_long_and_short() {
     let segs = three_ends();
     let (a, b) = (at(&segs, "a"), at(&segs, "b"));
-    let p = planned(&segs, &[auto(&["b", "c", "a"], true)]).unwrap();
+    let p = planned(&segs, &[auto(&["a", "b", "c"], true)]).unwrap();
     let corner = &p.corners[0];
     assert_eq!((corner.long, corner.short, corner.kind, corner.flip), ((b, false), (a, true), CornerType::Auto, true));
+    // Its first two make the corner (ruling 1), here a and c, not the two laid first; b is fitted against them.
+    let c = at(&segs, "c");
+    let p = planned(&segs, &[auto(&["c", "a", "b"], false)]).unwrap();
+    assert_eq!((p.corners[0].long, p.corners[0].short), ((a, true), (c, true)));
+    assert_eq!(p.fits, [Fit { member: b, at_start: false, against: vec![a, c] }]);
     // A Mitre override has nothing to flip.
-    let mitre = CornerOverride { corner: CornerType::Mitre, ..auto(&["a", "b", "c"], true) };
+    let mitre = Override { corner: CornerType::Mitre, ..auto(&["a", "b", "c"], true) };
     let corner = &planned(&segs, &[mitre]).unwrap().corners[0];
     assert_eq!((corner.long, corner.short, corner.kind), ((a, true), (b, false), CornerType::Mitre));
 }
@@ -346,7 +351,7 @@ fn tubes_in_no_plane_chain_and_mitre() {
     assert_eq!(p.chained, [ChainCorner { a: (4, false), b: (5, true), kind: CornerType::Mitre, flip: false, overridden: false }]);
     assert_eq!(p.fits, [Fit { member: 4, at_start: true, against: vec![0] }]);
     // An override at the chained corner is at a corner of the frame.
-    let o = CornerOverride { members: vec!["pair1".into(), "pair2".into()], corner: CornerType::Butt, flip: false };
+    let o = Override { members: vec!["pair1".into(), "pair2".into()], corner: CornerType::Butt, flip: false };
     assert!(plan(&segs, &planes, &in_order(&segs), &|_, _| true, &[o]).is_ok());
 }
 
@@ -357,7 +362,7 @@ fn an_override_on_a_chained_corner_reaches_the_plan() {
         vec![("pair1".to_string(), p3(0.0, 0.0, 0.0), p3(0.0, 0.0, 300.0)), ("pair2".to_string(), p3(0.0, 0.0, 300.0), p3(300.0, 300.0, 300.0))];
     let planes = vec![None; segs.len()];
     let chained = |corner: CornerType, flip: bool| {
-        let o = CornerOverride { members: vec!["pair1".into(), "pair2".into()], corner, flip };
+        let o = Override { members: vec!["pair1".into(), "pair2".into()], corner, flip };
         plan(&segs, &planes, &in_order(&segs), &|_, _| true, &[o]).unwrap().chained
     };
     let butt = chained(CornerType::Butt, true);

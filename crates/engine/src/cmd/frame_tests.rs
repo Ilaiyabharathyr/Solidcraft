@@ -528,7 +528,7 @@ fn two_lines(s: &Session) -> (String, String) {
 
 #[test]
 fn corner_settings_are_taken_and_saved() {
-    use solidcraft_doc::frame::{CornerOverride, CornerType};
+    use solidcraft_doc::frame::{CornerOverride, CornerType, MemberRef};
     let mut s = Session::default();
     rectangle_frame(&mut s);
     let (l1, l2) = two_lines(&s);
@@ -542,7 +542,9 @@ fn corner_settings_are_taken_and_saved() {
     let kind = &reopened.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().kind;
     let solidcraft_doc::FeatureKind::FrameMember { corner, flip, corners, .. } = kind else { panic!("not a frame member") };
     assert_eq!((*corner, *flip), (CornerType::Butt, true));
-    assert_eq!(*corners, [CornerOverride { members: vec![l1, l2], corner: CornerType::Mitre, flip: false }]);
+    // Saved in the order today's rules lay them (the longer l1 runs through), with no `flip`.
+    let members = vec![MemberRef { feature: None, line: l1 }, MemberRef { feature: None, line: l2 }];
+    assert_eq!(*corners, [CornerOverride { members, kind: CornerType::Mitre, gap: None }]);
 }
 
 #[test]
@@ -600,7 +602,7 @@ fn three_at_a_point(s: &mut Session) -> [String; 3] {
 
 #[test]
 fn auto_and_fit_ends_are_taken_and_saved() {
-    use solidcraft_doc::frame::{CornerOverride, CornerType};
+    use solidcraft_doc::frame::CornerType;
     let mut s = Session::default();
     let ids = three_at_a_point(&mut s);
     run(
@@ -613,7 +615,10 @@ fn auto_and_fit_ends_are_taken_and_saved() {
     let kind = &reopened.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().kind;
     let solidcraft_doc::FeatureKind::FrameMember { corner, fit_ends, corners, .. } = kind else { panic!("not a frame member") };
     assert_eq!((*corner, *fit_ends), (CornerType::Auto, true));
-    assert_eq!(*corners, [CornerOverride { members: ids.to_vec(), corner: CornerType::Auto, flip: true }]);
+    // Flip saved as the order: the corner's two laid first, the 600 and 424 long ones, swapped (the 424 one runs
+    // through), the 400 one after them.
+    assert_eq!(corners.len(), 1);
+    assert_eq!((corners[0].lines().collect::<Vec<_>>(), corners[0].kind), (vec![&*ids[2], &*ids[0], &*ids[1]], CornerType::Auto));
 }
 
 #[test]
@@ -644,7 +649,7 @@ fn an_old_two_member_override_still_loads() {
     let mut reopened = Session::new(solidcraft_doc::Document::from_json(&doc.to_string()).unwrap());
     let kind = &reopened.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().kind;
     let solidcraft_doc::FeatureKind::FrameMember { corners, .. } = kind else { panic!("not a frame member") };
-    assert_eq!((corners[0].members.clone(), corners[0].corner, corners[0].flip), (vec![l1, l2], solidcraft_doc::frame::CornerType::Mitre, false));
+    assert_eq!((corners[0].lines().collect::<Vec<_>>(), corners[0].kind), (vec![&*l1, &*l2], solidcraft_doc::frame::CornerType::Mitre));
     assert_eq!(bodies(&mut reopened).len(), 4);
 }
 
@@ -698,9 +703,9 @@ fn a_hand_edited_three_tube_override_on_a_mitre_frame_fails() {
     run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "corners": [{"members": [a, b], "corner": "butt"}]}));
     let member = s.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().id;
     let json = serde_json::from_str::<Value>(&s.doc.to_json()).unwrap().to_string();
-    let from = format!("\"members\":[\"{a}\",\"{b}\"]");
+    let from = format!(r#""members":[{{"line":"{a}"}},{{"line":"{b}"}}]"#);
     assert!(json.contains(&from), "{json}");
-    let edited = json.replace(&from, &format!("\"members\":[\"{a}\",\"{b}\",\"{c}\"]"));
+    let edited = json.replace(&from, &format!(r#""members":[{{"line":"{a}"}},{{"line":"{b}"}},{{"line":"{c}"}}]"#));
     let reopened = Session::new(solidcraft_doc::Document::from_json(&edited).unwrap());
     let e = reopened.model.result(member).and_then(|r| r.error.clone()).unwrap_or_default();
     assert!(e.contains("A corner override is not at a corner of the frame"), "{e}");
@@ -1079,7 +1084,7 @@ fn an_old_coped_butt_design_reads_as_butt_with_coped() {
     fn read(doc: &solidcraft_doc::Document) -> (CornerType, bool, Vec<CornerType>) {
         let f = doc.features.iter().find(|f| matches!(f.kind, FeatureKind::FrameMember { .. })).unwrap();
         let FeatureKind::FrameMember { corner, coped, corners, .. } = &f.kind else { panic!("not a frame member") };
-        (*corner, *coped, corners.iter().map(|o| o.corner).collect())
+        (*corner, *coped, corners.iter().map(|o| o.kind).collect())
     }
     let mut s = Session::default();
     rectangle_frame(&mut s);
@@ -1202,6 +1207,61 @@ fn an_override_follows_its_corner_through_a_dimension_edit() {
     let left = bs.iter().find(|b| b.3[0] < 200.0 && b.3[1] > 300.0).unwrap_or_else(|| panic!("{bs:?}"));
     assert!((left.2[1] + 20.0).abs() < 1e-6, "{left:?}");
     assert!((bottom.2[0] - 20.0).abs() < 1e-6 && (bottom.3[0] - 820.0).abs() < 1e-6, "{bottom:?}");
+}
+
+/// An L of `l1` (0, 0)…(300, 0) and `l2` (0, 0)…(0, H), H = 200 mm, in sketch `L`.
+fn l_corner(s: &mut Session) {
+    run(s, "parameters.add", json!({"name": "H", "expression": "200 mm"}));
+    run(s, "sketch.create", json!({"plane": "XY", "name": "L"}));
+    run(s, "sketch.line", json!({"points": [[0, 0], [300, 0]], "ids": ["l1"]}));
+    run(s, "sketch.line", json!({"points": [[0, 0], [0, "H"]], "ids": ["l2"]}));
+    run(s, "sketch.finish", json!({}));
+}
+
+/// The saved corner overrides of the session's Frame Member.
+fn saved_corners(s: &Session) -> Vec<solidcraft_doc::frame::CornerOverride> {
+    let f = s.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap();
+    let solidcraft_doc::FeatureKind::FrameMember { corners, .. } = &f.kind else { panic!("not a frame member") };
+    corners.clone()
+}
+
+#[test]
+fn a_saved_order_fixes_the_through_member() {
+    // l2 first runs through, the shorter one: its tube reaches past the corner to l1's outer face (y from -20), and
+    // l1 stops at l2's near face (x from 20). Made longer than l1, it still runs through: the order is absolute.
+    let mut s = Session::default();
+    l_corner(&mut s);
+    let corners = json!([{"members": ["l2", "l1"], "kind": "butt"}]);
+    run(&mut s, "frame.member", json!({"sketch": "L", "profile": tube(), "corner": "butt", "corners": corners, "names": {"l1": "A", "l2": "B"}}));
+    for h in [200.0, 400.0] {
+        run(&mut s, "parameters.change", json!({"name": "H", "expression": format!("{h} mm")}));
+        let (a, b) = (measured(&mut s, "A"), measured(&mut s, "B"));
+        assert!(near3(b.2, [-20.0, -20.0, -20.0]) && near3(b.3, [20.0, h, 20.0]), "{h}: {b:?}");
+        assert!(near3(a.2, [20.0, -20.0, -20.0]) && near3(a.3, [300.0, 20.0, 20.0]), "{h}: {a:?}");
+        assert!(rel(b.1 / a.1, (h + 20.0) / 280.0) < 1e-6, "{h}: {a:?} {b:?}");
+    }
+}
+
+#[test]
+fn flip_is_turned_into_an_order() {
+    // Today's rules run the longer l1 through; Flip runs l2 through, saved as the order l2, l1, never as `flip`.
+    let mut s = Session::default();
+    l_corner(&mut s);
+    let corners = json!([{"members": ["l1", "l2"], "corner": "butt", "flip": true}]);
+    run(&mut s, "frame.member", json!({"sketch": "L", "profile": tube(), "corner": "butt", "corners": corners}));
+    let saved = saved_corners(&s);
+    assert_eq!(saved.iter().map(|c| c.lines().collect::<Vec<_>>()).collect::<Vec<_>>(), [["l2", "l1"]]);
+    let json = serde_json::to_string(&saved).unwrap();
+    assert!(!json.contains("flip") && json.contains(r#""kind":"butt""#), "{json}");
+}
+
+#[test]
+fn a_corner_member_of_another_frame_is_refused() {
+    let mut s = Session::default();
+    l_corner(&mut s);
+    let corners = json!([{"members": [{"feature": "Other", "line": "l1"}, "l2"], "kind": "butt"}]);
+    let e = s.execute("frame.member", &json!({"sketch": "L", "profile": tube(), "corner": "butt", "corners": corners})).unwrap_err().to_string();
+    assert!(e.contains("not supported yet: a corner with a member of another frame"), "{e}");
 }
 
 #[test]
@@ -2956,7 +3016,8 @@ fn an_error_about_a_piece_names_its_line() {
     run(&mut s, "sketch.line", json!({"points": [[200, -100], [200, 15]], "ids": ["v"]}));
     run(&mut s, "sketch.line", json!({"points": [[200, 15], [400, 15]], "ids": ["w"]}));
     run(&mut s, "sketch.finish", json!({}));
-    let corners = json!([{"members": ["v", "w"], "corner": "butt"}]);
+    // w first: it runs through (an override's order is absolute, #17854).
+    let corners = json!([{"members": ["w", "v"], "kind": "butt"}]);
     let p = json!({"sketch": "Plus", "profile": tube(), "corner": "auto", "coped": true, "corners": corners});
     let e = s.execute("frame.member", &p).unwrap_err().to_string();
     assert!(e.contains("the piece of `v` past `h` was cut away completely") && !e.contains("v>h"), "{e}");
@@ -3161,12 +3222,21 @@ fn a_coped_butt_x_brace_splits_one_diagonal() {
 
 #[test]
 fn a_crossing_override_with_flip_keeps_the_other_diagonal_whole_on_a_mitre_frame() {
-    // A crossing override names the lines through the point; on a Mitre frame too only its Flip counts: d2 stays
+    assert_d2_stays_whole(json!([{"members": ["d1", "d2"], "corner": "mitre", "flip": true}]));
+}
+
+#[test]
+fn an_override_order_picks_the_crossing_line_that_stays_whole() {
+    // The order alone, no Flip: d2, first, stays whole.
+    assert_d2_stays_whole(json!([{"members": ["d2", "d1"], "kind": "mitre"}]));
+}
+
+fn assert_d2_stays_whole(corners: Value) {
+    // A crossing override names the lines through the point; on a Mitre frame too only its order counts: d2 stays
     // whole and d1 is cut, `D1` and `D1 · D2`, the X brace turned over (d2 is d1 mirrored across x = 300): the same
     // volumes, d2's box x 20…580, y 20…380, d1's pieces x 20…300, y 20…200 and x 300…580, y 200…380.
     let mut s = Session::default();
     x_brace_frame(&mut s);
-    let corners = json!([{"members": ["d1", "d2"], "corner": "mitre", "flip": true}]);
     let p = json!({"sketch": "Frame", "profile": square_tube(), "corner": "mitre", "corners": corners, "names": {"d1": "D1", "d2": "D2"}});
     run(&mut s, "frame.member", p);
     assert_eq!(bodies(&mut s).len(), 7, "{:?}", bodies(&mut s));
@@ -3806,9 +3876,9 @@ fn a_three_tube_override_on_a_mitre_frame_still_fails() {
     run(&mut s, "frame.member", json!({"sketch": "Frame", "profile": tube(), "corner": "mitre", "corners": [{"members": [a, b], "corner": "auto"}]}));
     let member = s.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. })).unwrap().id;
     let json = serde_json::from_str::<Value>(&s.doc.to_json()).unwrap().to_string();
-    let from = format!("\"members\":[\"{a}\",\"{b}\"]");
+    let from = format!(r#""members":[{{"line":"{a}"}},{{"line":"{b}"}}]"#);
     assert!(json.contains(&from), "{json}");
-    let edited = json.replace(&from, &format!("\"members\":[\"{a}\",\"{b}\",\"{c}\"]"));
+    let edited = json.replace(&from, &format!(r#""members":[{{"line":"{a}"}},{{"line":"{b}"}},{{"line":"{c}"}}]"#));
     let reopened = Session::new(solidcraft_doc::Document::from_json(&edited).unwrap());
     let e = reopened.model.result(member).and_then(|r| r.error.clone()).unwrap_or_default();
     assert!(e.contains("A corner override is not at a corner of the frame"), "{e}");
@@ -4734,19 +4804,29 @@ fn a_none_frame_keeps_overlaps() {
 
 #[test]
 fn an_overlap_override_flips_who_gives_way() {
-    // The rail and brace of `a_point_pair_brace_crossing_a_rail_is_split`, their set flipped: the rail gives way,
-    // cut by the brace's tool (x 280…320) into x 0…280 and 320…600, A·280 each; the brace stays whole.
     let flip = json!({"corners": [{"members": ["pair1", "pair2"], "corner": "auto", "flip": true}]});
-    let mut s = rail_and_brace(0.0, "auto", flip);
-    let bs = bodies(&mut s);
-    assert_eq!(bs.len(), 3, "{bs:?}");
-    assert_tube(body_named(&bs, "T"), [0.0, -20.0, -20.0], [280.0, 20.0, 20.0], 280.0);
-    assert_tube(body_named(&bs, "T · T (2)"), [320.0, -20.0, -20.0], [600.0, 20.0, 20.0], 280.0);
-    assert_tube(body_named(&bs, "T (2)"), [280.0, -200.0, -20.0], [320.0, 200.0, 20.0], 400.0);
+    assert_the_rail_gives_way(flip);
     // Under Mitre too: the override names no corner, and is no error.
     let mut s = rail_and_brace(0.0, "mitre", json!({"corners": [{"members": ["pair1", "pair2"], "corner": "mitre", "flip": true}]}));
     let bs = bodies(&mut s);
     assert_eq!(bs.len(), 3, "{bs:?}");
+    assert_tube(body_named(&bs, "T (2)"), [280.0, -200.0, -20.0], [320.0, 200.0, 20.0], 400.0);
+}
+
+#[test]
+fn an_override_order_picks_who_gives_way_at_an_overlap() {
+    // The order alone, no Flip: the brace, first, stays whole.
+    assert_the_rail_gives_way(json!({"corners": [{"members": ["pair2", "pair1"], "kind": "auto"}]}));
+}
+
+fn assert_the_rail_gives_way(corners: Value) {
+    // The rail and brace of `a_point_pair_brace_crossing_a_rail_is_split`, their set flipped: the rail gives way,
+    // cut by the brace's tool (x 280…320) into x 0…280 and 320…600, A·280 each; the brace stays whole.
+    let mut s = rail_and_brace(0.0, "auto", corners);
+    let bs = bodies(&mut s);
+    assert_eq!(bs.len(), 3, "{bs:?}");
+    assert_tube(body_named(&bs, "T"), [0.0, -20.0, -20.0], [280.0, 20.0, 20.0], 280.0);
+    assert_tube(body_named(&bs, "T · T (2)"), [320.0, -20.0, -20.0], [600.0, 20.0, 20.0], 280.0);
     assert_tube(body_named(&bs, "T (2)"), [280.0, -200.0, -20.0], [320.0, 200.0, 20.0], 400.0);
 }
 

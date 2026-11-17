@@ -9,7 +9,7 @@ use std::f64::consts::{PI, TAU};
 use solidcore_record::Vec3;
 use solidcraft_geom::prelude::*;
 
-use crate::frame_corners::{CORNER_TOL, CornerOverride, CornerType, EQUAL_LENGTH, away};
+use crate::frame_corners::{CORNER_TOL, CornerType, EQUAL_LENGTH, Override, away};
 use crate::{DocError, Result};
 
 /// A member's plane: Some((normal, sketch x)) for a line of a 2D sketch, None otherwise (pairs, 3D-sketch lines).
@@ -524,16 +524,17 @@ type End = (usize, usize, bool);
 /// theirs chain (mitred, or as their override says); any other end fits every tube already there (ruling A17).
 ///
 /// An override matches the point whose ending lines, or whose crossing lines, are exactly its `members` (line ids,
-/// never piece ids; decision 3); one that matches nothing fails. `same_section` takes two line indices.
+/// never piece ids; decision 3); one that matches nothing fails. Of three or more, its first two are the two that
+/// make the corner, or that a crossing's Flip chooses between ([`pair_first`]). `same_section` takes two line indices.
 pub fn plan(
     segments: &[(String, Vec3, Vec3)],
     planes: &[MemberPlane],
     drawn: &[usize],
     same_section: &dyn Fn(usize, usize) -> bool,
-    overrides: &[CornerOverride],
+    overrides: &[Override],
 ) -> Result<Plan> {
     let (plan, matched) = planned(segments, planes, drawn, same_section, overrides);
-    if !matched {
+    if matched.contains(&false) {
         return Err(DocError::Invalid("A corner override is not at a corner of the frame".into()));
     }
     Ok(plan)
@@ -541,18 +542,18 @@ pub fn plan(
 
 /// The [`Piece`]s [`plan`] cuts the lines into, whether or not every override matches: for naming the members where
 /// only some of them are known (a sketch's lines, without the pairs).
-pub fn pieces(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: &[usize], overrides: &[CornerOverride]) -> Vec<Piece> {
+pub fn pieces(segments: &[(String, Vec3, Vec3)], planes: &[MemberPlane], drawn: &[usize], overrides: &[Override]) -> Vec<Piece> {
     planned(segments, planes, drawn, &|_, _| true, overrides).0.pieces
 }
 
-/// [`plan`], and whether every override matched.
+/// [`plan`], and whether each override matched.
 pub(crate) fn planned(
     segments: &[(String, Vec3, Vec3)],
     planes: &[MemberPlane],
     drawn: &[usize],
     same_section: &dyn Fn(usize, usize) -> bool,
-    overrides: &[CornerOverride],
-) -> (Plan, bool) {
+    overrides: &[Override],
+) -> (Plan, Vec<bool>) {
     let (laid, xs) = laying(segments, planes, drawn);
     let mut place = vec![usize::MAX; segments.len()];
     for (i, r) in laid.iter().enumerate() {
@@ -608,7 +609,9 @@ pub(crate) fn planned(
             }
             let o = matching(&set.iter().map(|&m| id(m)).collect());
             crossing_overrides.extend(o);
-            let flip = o.and_then(|o| overrides.get(o)).is_some_and(|o| o.flip);
+            let o = o.and_then(|o| overrides.get(o));
+            let set = pair_first(set, o, |&m| id(m));
+            let flip = o.is_some_and(|o| o.flip);
             let Some(&whole) = set.get(usize::from(flip)) else { continue };
             for &m in set.iter().filter(|&&m| m != whole) {
                 if let Some(c) = cuts.get_mut(m) {
@@ -692,7 +695,10 @@ pub(crate) fn planned(
         here.sort_unstable();
         let whole = whole_at.remove(&n).unwrap_or_default();
         let ids: BTreeSet<&str> = here.iter().map(|e| id(parent(e.1))).collect();
+        // The override here, if any (marked used only where it finishes a corner): its first two make the corner.
+        let o = wanted.iter().position(|w| *w == ids).and_then(|o| overrides.get(o));
         let (group, rest): (Vec<End>, Vec<End>) = here.iter().partition(|e| grouped(parent(e.1)));
+        let (group, rest) = (pair_first(group, o, |e| id(parent(e.1))), pair_first(rest, o, |e| id(parent(e.1))));
         let group_whole: Vec<usize> = whole.iter().copied().filter(|&k| grouped(parent(k))).collect();
         let mut done = 0;
         if let ([a, b, ..], true) = (group.as_slice(), group_whole.is_empty()) {
@@ -723,9 +729,15 @@ pub(crate) fn planned(
         } else if group_whole.is_empty() {
             done = group.len(); // one end alone
         }
-        // Against the ends laid earlier: a sibling piece shares its line's place, so is never one.
+        // Against the ends laid earlier: a sibling piece shares its line's place, so is never one. An override's own
+        // pair, made the corner instead of the two laid first, is fitted against too.
+        let pair: Vec<usize> = group.iter().take(done).map(|e| e.1).filter(|_| o.is_some_and(|o| o.members.len() > 2)).collect();
         for e in group.iter().skip(done) {
-            fit(e, group_whole.iter().copied().chain(group.iter().filter(|o| o.0 < e.0).map(|o| o.1)).collect(), &mut fits);
+            fit(
+                e,
+                group_whole.iter().copied().chain(pair.iter().copied()).chain(group.iter().filter(|o| o.0 < e.0).map(|o| o.1)).collect(),
+                &mut fits,
+            );
         }
         let mut done = 0;
         // A17: where a group tube passes through or group ends meet, the others are fitted, never chained.
@@ -743,7 +755,20 @@ pub(crate) fn planned(
         }
     }
     fits.sort_by_key(|f| (at(f.member), f.member));
-    (Plan { pieces, crossings, crossing_overrides, ranks, corners, fits, chained }, !used.contains(&false))
+    (Plan { pieces, crossings, crossing_overrides, ranks, corners, fits, chained }, used)
+}
+
+/// `items` (in laying order) with the two that override `o`'s first two lines name (`id`) first, in laying order, and
+/// the rest after them as they were: of three or more members its first two make the corner (ruling 1). As they were
+/// without such an override, or when those two aren't both among them.
+fn pair_first<'s, T: Copy>(items: Vec<T>, o: Option<&Override>, id: impl Fn(&T) -> &'s str) -> Vec<T> {
+    let Some(first) = o.map(|o| &o.members).filter(|m| m.len() > 2).and_then(|m| m.get(..2)) else { return items };
+    let named = |t: &T| first.iter().any(|f| f == id(t));
+    if items.iter().filter(|t| named(t)).count() != 2 {
+        return items;
+    }
+    let (pair, rest): (Vec<T>, Vec<T>) = items.into_iter().partition(|t| named(t));
+    pair.into_iter().chain(rest).collect()
 }
 
 #[cfg(test)]

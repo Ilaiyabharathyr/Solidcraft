@@ -47,7 +47,7 @@ use solidcraft_kernel::{self as kernel, PointClass};
 use super::super::{ModelState, mirror_matrix, pattern_transforms, point, val};
 use super::{
     Axes, CutEnd, Layout, Reach, copes, frame_ends, frame_member_id, layout, member_line_ids, member_tool, members_at, overlap_overrides,
-    overlap_parent, pieced, placer, plans, section_axes, section_reach,
+    overlap_parent, overrides, pieced, placer, plans, section_axes, section_reach,
 };
 use crate::expr::{Kind, Value};
 use crate::frame::MAX_MEMBERS;
@@ -321,6 +321,7 @@ impl Members {
             return Err(DocError::Invalid("not a frame member feature".into()));
         };
         let Layout { segments, regions, at, turn, sketch_x, drawn, planes, .. } = layout(doc, vals, g, st)?;
+        let corners = &overrides(*corner, (&segments, &planes, &drawn, sketch_x), corners);
         // ponytail: an earlier frame's corner or chain corner that its own Fit Ends left Free is cut here as jointed
         // (finding it would build the tools of the frames before that one too); the tool then reaches on inside the
         // tube that corner lies in, which the fitted end is cut by anyway.
@@ -332,7 +333,7 @@ impl Members {
         let inside = regions.first().map(|r| r.interior_point()).ok_or_else(|| DocError::Invalid("the member profile has no area".into()))?;
         let (ends, points) = {
             let placed = placer(&axes, at);
-            let ends = frame_ends(&g.kind, &segments, &regions, &placed, (plan.or(crossing), &planes, &overlaps), (sketch_x, &drawn))?;
+            let ends = frame_ends(&g.kind, corners, &segments, &regions, &placed, (plan.or(crossing), &planes, &overlaps), (sketch_x, &drawn))?;
             let along = |m: usize, a: Vec3, b: Vec3, t: f64| placed(m, a + (b - a) * t).to_world(inside);
             (ends, segments.iter().enumerate().map(|(m, (_, a, b))| [0.25, 0.5, 0.75].map(|t| along(m, *a, *b, t))).collect())
         };

@@ -1400,7 +1400,8 @@ pub enum FeatureKind {
         /// shape (its outline, radii kept, hole filled); mitres stay mitres.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         coped: bool,
-        /// Corners finished their own way, each named by the lines of its members.
+        /// Corners, crossings and overlaps finished their own way, each named by its members in order (the first runs
+        /// through, or stays whole).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         corners: Vec<crate::frame::CornerOverride>,
         /// How far the profile turns about the line (see `frame::member_axes`).
