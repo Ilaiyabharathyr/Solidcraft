@@ -379,7 +379,7 @@ impl eframe::App for App {
             return;
         }
         if let Some(window) = frame.winit_window() {
-            self.solve.refresh_panel_monitors(|| {
+            let monitors = || {
                 let primary = window.primary_monitor();
                 window
                     .available_monitors()
@@ -397,11 +397,13 @@ impl eframe::App for App {
                         }
                     })
                     .collect()
-            });
+            };
+            self.solve.refresh_panel_monitors(monitors);
+            solidcraft_ui_egui::view_windows::refresh_displays(&mut self.solve, monitors);
         }
         solidcraft_ui_egui::view_windows::prepare(&mut self.solve, ui.ctx());
         content_ui(&mut self.solve, ui);
-        solidcraft_ui_egui::view_windows::show(&mut self.solve, ui.ctx(), content_ui, frame.wgpu_render_state());
+        solidcraft_ui_egui::view_windows::show(&mut self.solve, ui.ctx(), frame.wgpu_render_state());
         // After the frame's UI, so a setting changed in it (Preferences' OK) is written now.
         let now = std::time::Instant::now();
         if self.prefs_writer.due(ui.input(|i| i.events.iter().any(changes_settings)), now)
