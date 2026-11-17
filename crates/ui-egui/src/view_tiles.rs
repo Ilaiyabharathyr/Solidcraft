@@ -73,7 +73,7 @@ fn from_tile(rect: TileRect) -> Rect {
 
 /// The tile's slot on the GPU: the view's own id.
 fn slot(view: u64) -> u32 {
-    u32::try_from(view).unwrap_or(u32::MAX)
+    u32::try_from(view).unwrap_or(u32::MAX).min(u32::MAX >> 1)
 }
 
 /// A view's frame: where its camera frames the model, the same whether the view is the ground or a
