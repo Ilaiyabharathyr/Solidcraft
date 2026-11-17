@@ -399,7 +399,9 @@ impl eframe::App for App {
                     .collect()
             });
         }
+        solidcraft_ui_egui::view_windows::prepare(&mut self.solve, ui.ctx());
         content_ui(&mut self.solve, ui);
+        solidcraft_ui_egui::view_windows::show(&mut self.solve, ui.ctx(), content_ui);
         // After the frame's UI, so a setting changed in it (Preferences' OK) is written now.
         let now = std::time::Instant::now();
         if self.prefs_writer.due(ui.input(|i| i.events.iter().any(changes_settings)), now)
