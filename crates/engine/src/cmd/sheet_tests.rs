@@ -8020,3 +8020,82 @@ fn a_cut_passing_a_hair_off_a_flange_corner_builds() {
     }
     assert!(failed.is_empty(), "{failed:?}");
 }
+
+#[test]
+fn the_rules_bend_relief_shape_changes_the_relief_beside_a_bend_end() {
+    // A 160 x 30 bar with a 20 x 30 leg at its left end and a 90° flange 15 high on the bar's top
+    // edge (x 20…160): the flange's bend ends beside the leg, where the rule's bend relief (2 wide,
+    // 1 deep, T 2, R 1, K 0.5) is cut. Inside, the bend line is at y = 27 and the flange's far
+    // edge at 27 + π + 12 in the flat, so the rectangular slot (x 18…20, from y = 26 to 2 past
+    // that) takes 2 x (1 + π + 12 + 2) of the leg. An obround leaves the two corners its half
+    // round misses, (2 − π/2) of area; a tear takes nothing and cuts the flat pattern instead.
+    let part = |shape: &str| {
+        let mut s = Session::default();
+        run(&mut s, "sheet.manage_rules", json!({"name": "R", "thickness": 2, "k_factor": 0.5, "bend_radius": 1,
+            "relief_width": 2, "relief_depth": 1, "bend_relief_shape": shape, "active": true}));
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Base"}));
+        run(&mut s, "sketch.line", json!({"points": [[0, 0], [160, 0], [160, 30], [20, 30], [20, 60], [0, 60]], "closed": true}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "sheet.flange", json!({"sketch": "Base"}));
+        run(&mut s, "sheet.flange", json!({"edges": [[90, 30, 2]], "height": 15, "angle": "90 deg"}));
+        let flat = run(&mut s, "sheet.flat_pattern", json!({}));
+        (volume(&mut s), flat)
+    };
+    let (square, _) = part("rectangular");
+    let (round, _) = part("obround");
+    let (torn, flat) = part("tear");
+    let pi = std::f64::consts::PI;
+    let slot = 2.0 * (1.0 + pi + 12.0 + 2.0);
+    assert!((round - square - (2.0 - pi / 2.0) * 2.0).abs() < 1e-6, "{round} vs {square}");
+    assert!((torn - square - slot * 2.0).abs() < 1e-6, "{torn} vs {square}");
+    // The tear's cut reaches in to y = 26 in the flat outline.
+    let outline = flat["outline"][0].as_array().unwrap();
+    assert!(outline.iter().any(|p| (p[0].as_f64().unwrap() - 20.0).abs() < 1e-6 && (p[1].as_f64().unwrap() - 26.0).abs() < 1e-6), "{outline:?}");
+}
+
+
+#[test]
+fn an_edge_flanges_own_bend_relief_shape_overrides_the_rules() {
+    // The bar and leg of `the_rules_bend_relief_shape_changes_the_relief_beside_a_bend_end`, the
+    // rule's relief rectangular: the flange's own shape cuts what the rule with that shape would.
+    let part = |rule: &str, own: Option<&str>| {
+        let mut s = Session::default();
+        run(&mut s, "sheet.manage_rules", json!({"name": "R", "thickness": 2, "k_factor": 0.5, "bend_radius": 1,
+            "relief_width": 2, "relief_depth": 1, "bend_relief_shape": rule, "active": true}));
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Base"}));
+        run(&mut s, "sketch.line", json!({"points": [[0, 0], [160, 0], [160, 30], [20, 30], [20, 60], [0, 60]], "closed": true}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "sheet.flange", json!({"sketch": "Base"}));
+        let mut p = json!({"edges": [[90, 30, 2]], "height": 15, "angle": "90 deg"});
+        if let Some(shape) = own {
+            p["bend_relief_shape"] = json!(shape);
+        }
+        run(&mut s, "sheet.flange", p);
+        let saved = s.doc.features.last().map(|f| serde_json::to_value(&f.kind).unwrap()).unwrap();
+        (volume(&mut s), saved)
+    };
+    for shape in ["obround", "tear"] {
+        let (by_rule, _) = part(shape, None);
+        let (own, saved) = part("rectangular", Some(shape));
+        assert!((own - by_rule).abs() < 1e-6, "{shape}: {own} vs {by_rule}");
+        assert_eq!(saved["bend_relief_shape"], shape);
+    }
+    // The flange's rectangular wins over the rule's obround, and none follows the rule (and is
+    // not saved).
+    let (square, _) = part("rectangular", None);
+    assert!((part("obround", Some("Rectangular")).0 - square).abs() < 1e-6);
+    assert!(part("rectangular", None).1.get("bend_relief_shape").is_none());
+}
+
+#[test]
+fn a_flanges_bend_relief_shape_is_refused_on_a_base_flange_or_when_unknown() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Base"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [60, 0], [60, 30], [0, 30]], "closed": true}));
+    run(&mut s, "sketch.finish", json!({}));
+    let err = s.execute("sheet.flange", &json!({"sketch": "Base", "bend_relief_shape": "obround"})).unwrap_err().to_string();
+    assert!(err.contains("bend_relief_shape"), "{err}");
+    run(&mut s, "sheet.flange", json!({"sketch": "Base"}));
+    let err = s.execute("sheet.flange", &json!({"edges": [[30, 30, 2]], "height": 15, "bend_relief_shape": "round"})).unwrap_err().to_string();
+    assert!(err.contains("rectangular, obround or tear"), "{err}");
+}
