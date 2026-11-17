@@ -45,7 +45,7 @@ pub(crate) fn normalize_request(session: &solidcraft_engine::Session, method: &s
 /// How many turned-off ids a preferences file may name.
 pub const MAX_DISABLED: usize = 256;
 /// `plugin.json` larger than this is refused.
-const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
+const MAX_MANIFEST_BYTES: u64 = solidcraft_engine::plugin::MAX_MANIFEST_BYTES as u64;
 
 /// One installed plugin, as its manifest describes it.
 #[derive(Clone, Debug)]
@@ -60,6 +60,9 @@ pub struct Plugin {
     pub disabled: bool,
     pub groups: std::collections::BTreeSet<String>,
     pub entries: Vec<solidcraft_engine::plugin::Entry>,
+    /// The images its entries name, read from the package (`plugin_images`): each relative path
+    /// with the icon name it is drawn by.
+    pub images: std::collections::BTreeMap<String, String>,
 }
 
 /// A folder under the plugins directory that is not a plugin.
@@ -122,6 +125,7 @@ fn check(m: Manifest, folder: &str) -> Result<Plugin, String> {
         disabled: false,
         groups: Default::default(),
         entries: Vec::new(),
+        images: Default::default(),
     })
 }
 
@@ -129,7 +133,7 @@ fn read_plugin(dir: &Path, folder: &str) -> Result<(Plugin, bool), String> {
     let path = dir.join("plugin.json");
     let meta = std::fs::symlink_metadata(&path).map_err(|_| "no plugin.json".to_string())?;
     if !meta.is_file() || meta.len() > MAX_MANIFEST_BYTES {
-        return Err("plugin.json is missing or larger than 16 KiB".into());
+        return Err("plugin.json is missing or larger than 64 KiB".into());
     }
     let package = solidcraft_engine::plugin::read_package(&dir.to_string_lossy()).map_err(|e| e.to_string())?;
     let parsed = package.manifest;
@@ -141,6 +145,7 @@ fn read_plugin(dir: &Path, folder: &str) -> Result<(Plugin, bool), String> {
         plugin.entries = runtime.entries;
         plugin.groups = runtime.permissions.command_groups;
     }
+    plugin.images = crate::plugin_images::load(dir, &plugin.id, &plugin.entries);
     Ok((plugin, executable))
 }
 
@@ -1433,6 +1438,7 @@ mod tests {
             disabled: false,
             groups: Default::default(),
             entries: Vec::new(),
+            images: Default::default(),
             id: "ftc-frc-parts".into(),
             name: "FTC and FRC parts".into(),
             version: "0.1.0".into(),
