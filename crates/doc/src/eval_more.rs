@@ -760,7 +760,7 @@ pub(super) fn sheet_eval(
                             others + 1 - fills
                         )));
                     }
-                    Some((ss.plane.clone(), main.clone()))
+                    Some((ss.plane, main.clone()))
                 }
                 None => None,
             };
@@ -774,7 +774,8 @@ pub(super) fn sheet_eval(
                 let pick = picks.first().copied().unwrap_or_default();
                 let (height, angle) = own.first().copied().unwrap_or((h, a));
                 let n0 = sh.flanges.len();
-                let (_, notes) = sh.add_profile_flange(sheet::EdgeFlange::at(pick, height, angle, from), plane, region, rr, position, *flip, relief)?;
+                let (_, notes) =
+                    sh.add_profile_flange(sheet::EdgeFlange::at(pick, height, angle, from), plane, region, rr, position, *flip, relief)?;
                 if !notes.is_empty() {
                     let notes = notes.join("; ");
                     *warning = Some(match warning.take() {

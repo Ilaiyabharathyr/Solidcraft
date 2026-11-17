@@ -8045,7 +8045,11 @@ fn a_drawn_profile_sketch_builds_the_same_flange_as_its_height_and_follows_the_a
         let mut drawn = Session::default();
         base(&mut drawn, 100.0, 60.0);
         let undo = drawn.undo.len();
-        run(&mut drawn, "sheet.flange", json!({"edges": [[50, 0, 2.5]], "height": 20, "angle": format!("{angle} deg"), "profile_sketch": true, "name": "Lip"}));
+        run(
+            &mut drawn,
+            "sheet.flange",
+            json!({"edges": [[50, 0, 2.5]], "height": 20, "angle": format!("{angle} deg"), "profile_sketch": true, "name": "Lip"}),
+        );
         assert_eq!(drawn.undo.len(), undo + 1, "one undo step");
         assert!(drawn.doc.find_feature("Lip Profile").is_some());
         let (a, b) = (volume(&mut plain), volume(&mut drawn));
@@ -8085,7 +8089,10 @@ fn a_profile_sketch_shapes_the_flange_cuts_its_holes_and_reopens() {
     let want_y = 60.0 - 5.0 + FRAC_PI_2 * (2.5 + 0.44 * 2.5) + 15.0;
     assert!((f["flat_size_mm"][1].as_f64().unwrap_or(0.0) - want_y).abs() < 1e-6, "{f}");
     // The hole is a true circle in the flat pattern and the DXF.
-    assert!(f["cutout_shapes"].as_array().is_some_and(|c| c.iter().any(|x| (x["circle"]["radius"].as_f64().unwrap_or(0.0) - 3.0).abs() < 1e-9)), "{f}");
+    assert!(
+        f["cutout_shapes"].as_array().is_some_and(|c| c.iter().any(|x| (x["circle"]["radius"].as_f64().unwrap_or(0.0) - 3.0).abs() < 1e-9)),
+        "{f}"
+    );
     let dxf = run(&mut b, "sheet.export_dxf", json!({}))["dxf"].as_str().unwrap_or_default().to_owned();
     assert!(dxf_count(&dxf, |g| matches!(g, DxfShape::Circle { .. })) >= 1);
     // It reopens as it was.

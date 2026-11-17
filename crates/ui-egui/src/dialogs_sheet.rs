@@ -275,7 +275,24 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
     let t = Tokens::get();
     let mut enter = false;
     match k {
-        Sm::Flange { ty, height, angle, radius, position, height_from, flip, profile_sketch, distance, reverse, rule, own, relief, relief_size, then, segments } => {
+        Sm::Flange {
+            ty,
+            height,
+            angle,
+            radius,
+            position,
+            height_from,
+            flip,
+            profile_sketch,
+            distance,
+            reverse,
+            rule,
+            own,
+            relief,
+            relief_size,
+            then,
+            segments,
+        } => {
             *ty = flange_type(inputs);
             form_row(ui, "Type", |ui| {
                 ui.label(FLANGE_TYPES.get(*ty).copied().map(solidcraft_ui_text::tr).unwrap_or(""));
@@ -844,7 +861,22 @@ pub fn commands(app: &SolveApp, k: &Sm, inputs: &[SelInput], extra: &Map<String,
     let s = &app.session;
     let (cmd, mut p): (&str, Value) = match k {
         Sm::Flange {
-            height, angle, radius, position, height_from, flip, profile_sketch, distance, reverse, rule, own, relief, relief_size, then, segments, ..
+            height,
+            angle,
+            radius,
+            position,
+            height_from,
+            flip,
+            profile_sketch,
+            distance,
+            reverse,
+            rule,
+            own,
+            relief,
+            relief_size,
+            then,
+            segments,
+            ..
         } => {
             let mut p = match flange_type(inputs) {
                 1 => {

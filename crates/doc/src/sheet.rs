@@ -1265,7 +1265,15 @@ impl SheetBody {
             return Err(DocError::Invalid("the flange's profile runs past the end of its edge".into()));
         }
         let len = f.len.max(f64::MIN_POSITIVE);
-        let snap = |x: f64| if x.abs() < 1e-9 { 0.0 } else if (x - 1.0).abs() < 1e-9 { 1.0 } else { x };
+        let snap = |x: f64| {
+            if x.abs() < 1e-9 {
+                0.0
+            } else if (x - 1.0).abs() < 1e-9 {
+                1.0
+            } else {
+                x
+            }
+        };
         let span = (snap((a / len).clamp(0.0, 1.0)), snap((b / len).clamp(0.0, 1.0)));
         // Past the bend: the profile laid flat is the panel.
         let past = rect(at(0.0, ua), at(0.0, ub), at(s_hi + 1.0, ub), at(s_hi + 1.0, ua));
@@ -1274,7 +1282,8 @@ impl SheetBody {
             return Err(DocError::Invalid("not supported yet: a flange profile that splits into separate pieces past the bend".into()));
         };
         let i = self.flanges.len();
-        let (made, mut notes) = self.add_flanges_each(&[EdgeFlange { height: s_hi + least, span, flip: None, ..e }], radius, position, flip, relief)?;
+        let (made, mut notes) =
+            self.add_flanges_each(&[EdgeFlange { height: s_hi + least, span, flip: None, ..e }], radius, position, flip, relief)?;
         // The flange made is the one read: its bend starts where the profile crosses it.
         let g = self.flanges.get(i).ok_or_else(|| DocError::Invalid("the flange was not made".into()))?;
         if (g.p - (f.p + d * a)).len() > 1e-6 || (g.len - (b - a)).abs() > 1e-6 {
@@ -11727,11 +11736,25 @@ mod tests {
         let plane = Plane { origin: Vec3::ZERO, x: Vec3::X, y: Vec3::Z };
         for (x0, x1) in [(0.0, 35.0), (5.0, 35.0)] {
             let what = format!("profile x {x0}…{x1}");
-            let mut s = base_flange("Body1", "AL2", &alu(), Plane::XY, rect(Vec2::new(0.0, 0.0), Vec2::new(w, 0.0), Vec2::new(w, 34.5), Vec2::new(0.0, 34.5)));
+            let mut s = base_flange(
+                "Body1",
+                "AL2",
+                &alu(),
+                Plane::XY,
+                rect(Vec2::new(0.0, 0.0), Vec2::new(w, 0.0), Vec2::new(w, 34.5), Vec2::new(0.0, 34.5)),
+            );
             let pick = Vec3::new(20.0, 0.0, s.t);
             let profile = rect(Vec2::new(x0, 0.0), Vec2::new(x1, 0.0), Vec2::new(x1, 53.0), Vec2::new(x0, 53.0));
             let (_, notes) = s
-                .add_profile_flange(EdgeFlange::at(pick, 53.0, std::f64::consts::FRAC_PI_2, HeightFrom::Outer), &plane, &profile, 1.0, "inside", false, ReliefOverride::default())
+                .add_profile_flange(
+                    EdgeFlange::at(pick, 53.0, std::f64::consts::FRAC_PI_2, HeightFrom::Outer),
+                    &plane,
+                    &profile,
+                    1.0,
+                    "inside",
+                    false,
+                    ReliefOverride::default(),
+                )
                 .unwrap();
             assert!(notes.is_empty(), "{what}: {notes:?}");
             let line = s.base.outer.ccw().polyline(1e-3).iter().map(|p| p.y).filter(|y| *y > 1e-9).fold(f64::MAX, f64::min);

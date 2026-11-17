@@ -256,7 +256,10 @@ fn draw_profile_sketch(s: &mut Session, p: &Value, plain: FeatureKind, cmd: &str
     let name = if taken(&base) { (2..).map(|k| format!("{base} {k}")).find(|n| !taken(n)).unwrap_or(base) } else { base };
     let checkpoint = s.checkpoint();
     let drawn = (|| -> Result<u64> {
-        let made = s.execute("sketch.create", &json!({"plane": {"origin": [o.x, o.y, o.z], "x_dir": [x.x, x.y, x.z], "y_dir": [y.x, y.y, y.z]}, "name": name}))?;
+        let made = s.execute(
+            "sketch.create",
+            &json!({"plane": {"origin": [o.x, o.y, o.z], "x_dir": [x.x, x.y, x.z], "y_dir": [y.x, y.y, y.z]}, "name": name}),
+        )?;
         let sk = made.get("sketch").and_then(Value::as_u64).ok_or_else(|| bad(cmd, "the profile sketch was not made"))?;
         // Four lines sharing their corners; `connect: false` keeps the corner at the sketch's
         // origin from being made coincident with it.
