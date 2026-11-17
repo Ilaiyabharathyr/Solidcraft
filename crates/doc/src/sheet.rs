@@ -1054,9 +1054,8 @@ impl Document {
             corner_relief_shape: ReliefShape::parse(&r.corner_relief_shape).ok_or_else(|| {
                 DocError::Invalid(format!("unknown corner relief shape `{}` (notch, round, rectangular or tear)", r.corner_relief_shape))
             })?,
-            bend_relief_shape: BendReliefShape::parse(&r.bend_relief_shape).ok_or_else(|| {
-                DocError::Invalid(format!("unknown bend relief shape `{}` (rectangular, obround or tear)", r.bend_relief_shape))
-            })?,
+            bend_relief_shape: BendReliefShape::parse(&r.bend_relief_shape)
+                .ok_or_else(|| DocError::Invalid(format!("unknown bend relief shape `{}` (rectangular, obround or tear)", r.bend_relief_shape)))?,
             hem_gap: with_t(&r.hem_gap, Kind::Length)?,
             gap: with_t(&r.gap, Kind::Length)?,
             angle_display: AngleDisplay::parse(&r.angle_display)
@@ -9073,7 +9072,8 @@ mod tests {
                 span: WHOLE_EDGE,
                 flip: None,
             });
-            let (_, notes) = s.add_flanges_each(&edges, 1.0, "inside", false, ReliefOverride { shape: Some(shape), size: Some(4.0), bend_shape: None }).unwrap();
+            let (_, notes) =
+                s.add_flanges_each(&edges, 1.0, "inside", false, ReliefOverride { shape: Some(shape), size: Some(4.0), bend_shape: None }).unwrap();
             assert!(notes.is_empty(), "{shape:?}: {notes:?}");
             assert_eq!(s.holes.len(), 1);
             assert!(!s.flat_regions().unwrap().iter().any(|region| region.contains(Vec2::new(116.0, 1.5))));
@@ -11705,8 +11705,7 @@ mod tests {
         let (ba, panel) = (std::f64::consts::PI, 12.0);
         let base_with = |shape: BendReliefShape| {
             let mut s = bar_with_leg(&RuleValues { bend_relief_shape: shape, ..alu() }, 30.0);
-            let (_, notes) =
-                s.add_flanges_noted(&[Vec3::new(90.0, 30.0, 2.0)], 15.0, std::f64::consts::FRAC_PI_2, 1.0, "inside", false).unwrap();
+            let (_, notes) = s.add_flanges_noted(&[Vec3::new(90.0, 30.0, 2.0)], 15.0, std::f64::consts::FRAC_PI_2, 1.0, "inside", false).unwrap();
             assert!(notes.is_empty(), "{shape:?}: {notes:?}");
             holds_the_flat_material(&s, shape.name());
             s
@@ -11724,7 +11723,10 @@ mod tests {
         assert!(from.dist(Vec2::new(20.0, 26.0)) < 1e-9 && to.dist(Vec2::new(20.0, end)) < 1e-6, "{from:?} {to:?}");
         let flat = torn.flat_regions().unwrap();
         let tip = Vec2::new(20.0, 26.0);
-        assert!(flat[0].outer.segs.iter().any(|g| matches!(g, Seg2::Line { a, b } if a.dist(tip) < 1e-6 || b.dist(tip) < 1e-6)), "the slit reaches y = 26");
+        assert!(
+            flat[0].outer.segs.iter().any(|g| matches!(g, Seg2::Line { a, b } if a.dist(tip) < 1e-6 || b.dist(tip) < 1e-6)),
+            "the slit reaches y = 26"
+        );
         assert!(square.bend_slits.is_empty() && round.bend_slits.is_empty());
     }
 
@@ -11735,7 +11737,8 @@ mod tests {
         let steel = SheetRule::steel();
         assert_eq!(doc.rule_values(&vals, &steel).unwrap().bend_relief_shape, BendReliefShape::Rectangular);
         assert!(serde_json::to_value(&steel).unwrap().get("bend_relief_shape").is_none());
-        for (text, shape) in [(" Obround ", BendReliefShape::Obround), ("TEAR", BendReliefShape::Tear), ("rectangular", BendReliefShape::Rectangular)] {
+        for (text, shape) in [(" Obround ", BendReliefShape::Obround), ("TEAR", BendReliefShape::Tear), ("rectangular", BendReliefShape::Rectangular)]
+        {
             let rule = SheetRule { bend_relief_shape: text.into(), ..steel.clone() };
             assert_eq!(doc.rule_values(&vals, &rule).unwrap().bend_relief_shape, shape, "{text}");
         }

@@ -283,7 +283,24 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
     let t = Tokens::get();
     let mut enter = false;
     match k {
-        Sm::Flange { ty, height, angle, radius, position, height_from, flip, distance, reverse, rule, own, relief, relief_size, bend_relief, then, segments } => {
+        Sm::Flange {
+            ty,
+            height,
+            angle,
+            radius,
+            position,
+            height_from,
+            flip,
+            distance,
+            reverse,
+            rule,
+            own,
+            relief,
+            relief_size,
+            bend_relief,
+            then,
+            segments,
+        } => {
             *ty = flange_type(inputs);
             form_row(ui, "Type", |ui| {
                 ui.label(FLANGE_TYPES.get(*ty).copied().map(solidcraft_ui_text::tr).unwrap_or(""));
@@ -857,7 +874,22 @@ pub fn commands(app: &SolveApp, k: &Sm, inputs: &[SelInput], extra: &Map<String,
     let s = &app.session;
     let (cmd, mut p): (&str, Value) = match k {
         Sm::Flange {
-            height, angle, radius, position, height_from, flip, distance, reverse, rule, own, relief, relief_size, bend_relief, then, segments, ..
+            height,
+            angle,
+            radius,
+            position,
+            height_from,
+            flip,
+            distance,
+            reverse,
+            rule,
+            own,
+            relief,
+            relief_size,
+            bend_relief,
+            then,
+            segments,
+            ..
         } => {
             let mut p = match flange_type(inputs) {
                 1 => {
@@ -1044,7 +1076,20 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
             }
             (f, curves.iter().map(|id| crate::selection::curve_pick(id, sketch.0, app.session.active_sketch)).collect())
         }
-        FeatureKind::SheetFlange { edges, height, angle, radius, position, flip, body, corner_relief_shape, corner_relief, height_from, bend_relief_shape, .. } => {
+        FeatureKind::SheetFlange {
+            edges,
+            height,
+            angle,
+            radius,
+            position,
+            flip,
+            body,
+            corner_relief_shape,
+            corner_relief,
+            height_from,
+            bend_relief_shape,
+            ..
+        } => {
             if let Some(b) = body {
                 extra.insert("body".into(), json!(b));
             }

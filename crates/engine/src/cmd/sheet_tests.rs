@@ -8031,8 +8031,12 @@ fn the_rules_bend_relief_shape_changes_the_relief_beside_a_bend_end() {
     // round misses, (2 − π/2) of area; a tear takes nothing and cuts the flat pattern instead.
     let part = |shape: &str| {
         let mut s = Session::default();
-        run(&mut s, "sheet.manage_rules", json!({"name": "R", "thickness": 2, "k_factor": 0.5, "bend_radius": 1,
-            "relief_width": 2, "relief_depth": 1, "bend_relief_shape": shape, "active": true}));
+        run(
+            &mut s,
+            "sheet.manage_rules",
+            json!({"name": "R", "thickness": 2, "k_factor": 0.5, "bend_radius": 1,
+            "relief_width": 2, "relief_depth": 1, "bend_relief_shape": shape, "active": true}),
+        );
         run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Base"}));
         run(&mut s, "sketch.line", json!({"points": [[0, 0], [160, 0], [160, 30], [20, 30], [20, 60], [0, 60]], "closed": true}));
         run(&mut s, "sketch.finish", json!({}));
@@ -8053,15 +8057,18 @@ fn the_rules_bend_relief_shape_changes_the_relief_beside_a_bend_end() {
     assert!(outline.iter().any(|p| (p[0].as_f64().unwrap() - 20.0).abs() < 1e-6 && (p[1].as_f64().unwrap() - 26.0).abs() < 1e-6), "{outline:?}");
 }
 
-
 #[test]
 fn an_edge_flanges_own_bend_relief_shape_overrides_the_rules() {
     // The bar and leg of `the_rules_bend_relief_shape_changes_the_relief_beside_a_bend_end`, the
     // rule's relief rectangular: the flange's own shape cuts what the rule with that shape would.
     let part = |rule: &str, own: Option<&str>| {
         let mut s = Session::default();
-        run(&mut s, "sheet.manage_rules", json!({"name": "R", "thickness": 2, "k_factor": 0.5, "bend_radius": 1,
-            "relief_width": 2, "relief_depth": 1, "bend_relief_shape": rule, "active": true}));
+        run(
+            &mut s,
+            "sheet.manage_rules",
+            json!({"name": "R", "thickness": 2, "k_factor": 0.5, "bend_radius": 1,
+            "relief_width": 2, "relief_depth": 1, "bend_relief_shape": rule, "active": true}),
+        );
         run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Base"}));
         run(&mut s, "sketch.line", json!({"points": [[0, 0], [160, 0], [160, 30], [20, 30], [20, 60], [0, 60]], "closed": true}));
         run(&mut s, "sketch.finish", json!({}));
