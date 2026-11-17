@@ -204,16 +204,16 @@ fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
     p.dist(a + ab * t)
 }
 
-/// Is `p` on curve `ci` of `sk`, within `tol`: on a line's segment, on an arc between its
-/// ends (not elsewhere on its circle), on a circle; on the drawn path of any other curve.
-fn on_curve(sk: &Sketch, ci: usize, p: Vec2, tol: f64) -> bool {
-    match sk.curve_link_geom(ci) {
-        Some(LinkGeom::Line(a, b)) => seg_dist(p, a, b) <= tol,
-        Some(LinkGeom::Circle(c, r)) => (p.dist(c) - r).abs() <= tol,
-        Some(LinkGeom::Arc { c, a, b }) => {
+/// Is `p` on `g`, within `tol`: on a line's segment, on an arc between its ends (not elsewhere
+/// on its circle), on a circle. None for other curves.
+fn on_geom(g: &LinkGeom, p: Vec2, tol: f64) -> Option<bool> {
+    Some(match *g {
+        LinkGeom::Line(a, b) => seg_dist(p, a, b) <= tol,
+        LinkGeom::Circle(c, r) => (p.dist(c) - r).abs() <= tol,
+        LinkGeom::Arc { c, a, b } => {
             let r = c.dist(a);
             if (p.dist(c) - r).abs() > tol || r <= tol {
-                return false;
+                return Some(false);
             }
             let tau = std::f64::consts::TAU;
             let start = (a - c).angle();
@@ -222,30 +222,52 @@ fn on_curve(sk: &Sketch, ci: usize, p: Vec2, tol: f64) -> bool {
             let slack = tol / r;
             at <= sweep + slack || at >= tau - slack
         }
-        Some(_) => {
+        _ => return None,
+    })
+}
+
+/// Is `p` on curve `ci` of `sk`, within `tol` ([`on_geom`]); on the drawn path of any other curve.
+fn on_curve(sk: &Sketch, ci: usize, p: Vec2, tol: f64) -> bool {
+    match sk.curve_link_geom(ci) {
+        Some(g) => on_geom(&g, p, tol).unwrap_or_else(|| {
             let path = sk.polyline(ci);
             let size = path.iter().zip(path.iter().skip(1)).map(|(a, b)| a.dist(*b)).sum::<f64>();
             path.windows(2).any(|w| matches!(w, [a, b] if seg_dist(p, *a, *b) <= tol.max(size * 1e-3)))
-        }
+        }),
         None => false,
     }
 }
 
-/// Does piece `g` lie on curve `ci` of `sk` (its ends and middle within `tol` of it)?
-fn piece_on(sk: &Sketch, ci: usize, g: &LinkGeom, tol: f64) -> bool {
-    // Points on the piece itself: a conic's or a control-point spline's `spot` is a control
-    // point, off the curve (a solid's exact Bézier pieces are such splines).
-    let probe = match g {
+/// Points on piece `g` that together pin it down: its ends and middle; eight points round a
+/// circle, so no half of it holds them all. A conic's or a control-point spline's `spot` is a
+/// control point, off the curve (a solid's exact Bézier pieces are such splines).
+fn probes(g: &LinkGeom) -> Vec<Vec2> {
+    match g {
         LinkGeom::Point(p) => vec![*p],
         LinkGeom::Line(a, b) | LinkGeom::Arc { a, b, .. } => vec![g.spot(), *a, *b],
         LinkGeom::Conic { a, apex, b, rho } => vec![solidcraft_sketch::conic_point(*a, *apex, *b, *rho, 0.5), *a, *b],
-        LinkGeom::Circle(c, r) => vec![g.spot(), *c - Vec2::X * *r, *c + Vec2::Y * *r],
+        LinkGeom::Circle(c, r) => (0..8_u8)
+            .map(|k| {
+                let t = f64::from(k) * std::f64::consts::FRAC_PI_4;
+                *c + Vec2::new(t.cos(), t.sin()) * *r
+            })
+            .collect(),
         LinkGeom::Ellipse { major, .. } => vec![*major],
         LinkGeom::Spline { pts, control, degree, periodic, nurbs } => {
             [0.0, 0.5, 1.0].map(|t| solidcraft_sketch::spline_point_mode(pts, *control, *degree, *periodic, nurbs.as_ref(), t)).to_vec()
         }
-    };
-    probe.iter().all(|p| on_curve(sk, ci, *p, tol))
+    }
+}
+
+/// Does piece `g` lie on curve `ci` of `sk` (all its [`probes`] within `tol` of it)?
+fn piece_on(sk: &Sketch, ci: usize, g: &LinkGeom, tol: f64) -> bool {
+    probes(g).iter().all(|p| on_curve(sk, ci, *p, tol))
+}
+
+/// Does curve `ci` of `sk` lie on piece `g`, a part of it (a hole's rim saved as two halves,
+/// #18250, each half on the one circle its source edge is now read as)?
+fn part_of(sk: &Sketch, ci: usize, g: &LinkGeom, tol: f64) -> bool {
+    sk.curve_link_geom(ci).is_some_and(|cg| probes(&cg).iter().all(|p| on_geom(g, *p, tol) == Some(true)))
 }
 
 /// Before curves and points of a sketch are deleted: each link that keeps some of its members
@@ -298,14 +320,30 @@ pub(super) fn omit_removed(
                 Some(Err(why)) => return Err(why.clone()),
                 None => return Err("its source edges are not known".into()),
             };
-            // Which deleted curve each piece of each source edge lies on, if any.
-            let on: Vec<Vec<Option<usize>>> =
-                edges.iter().map(|e| e.geom.iter().map(|g| deleted.iter().copied().find(|c| piece_on(sk, *c, g, tol))).collect()).collect();
-            let covered = |i: usize| on.get(i).is_some_and(|pieces| !pieces.is_empty() && pieces.iter().all(Option::is_some));
-            if on.iter().enumerate().any(|(i, pieces)| pieces.iter().any(Option::is_some) && !covered(i)) {
+            // The deleted curves each piece of each source edge is, and whether they are all of
+            // it: one curve it lies on, else the curves lying on it (a saved hole's two halves
+            // on the one circle its edge is read as now) when they cover it. Empty: none touch it.
+            let on: Vec<Vec<(Vec<usize>, bool)>> = edges
+                .iter()
+                .map(|e| {
+                    e.geom
+                        .iter()
+                        .map(|g| {
+                            if let Some(c) = deleted.iter().copied().find(|c| piece_on(sk, *c, g, tol)) {
+                                return (vec![c], true);
+                            }
+                            let parts: Vec<usize> = deleted.iter().copied().filter(|c| part_of(sk, *c, g, tol)).collect();
+                            let whole = !parts.is_empty() && probes(g).iter().all(|p| parts.iter().any(|c| on_curve(sk, *c, *p, tol)));
+                            (parts, whole)
+                        })
+                        .collect()
+                })
+                .collect();
+            let covered = |i: usize| on.get(i).is_some_and(|pieces| !pieces.is_empty() && pieces.iter().all(|(_, whole)| *whole));
+            if on.iter().enumerate().any(|(i, pieces)| pieces.iter().any(|(cs, _)| !cs.is_empty()) && !covered(i)) {
                 return Err("one source edge gives more curves than the ones deleted".into());
             }
-            if deleted.iter().any(|c| !on.iter().enumerate().any(|(i, pieces)| covered(i) && pieces.contains(&Some(*c)))) {
+            if deleted.iter().any(|c| !on.iter().enumerate().any(|(i, pieces)| covered(i) && pieces.iter().any(|(cs, _)| cs.contains(c)))) {
                 return Err("a deleted curve is not one of its face's source edges".into());
             }
             let mut out = Vec::new();
