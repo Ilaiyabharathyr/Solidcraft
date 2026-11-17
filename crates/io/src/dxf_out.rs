@@ -30,7 +30,9 @@ pub use file_model::{
 };
 mod length_decimal;
 mod path;
+mod text_encode;
 use length_decimal::length_decimal;
+use text_encode::{EncodedText, encode_text};
 
 pub use path::{DxfPath, DxfPathStyle, DxfVertex, admit_path, path_shapes};
 
@@ -52,6 +54,83 @@ impl DxfLinetype {
             DxfLinetype::Dashed => "DASHED",
             DxfLinetype::Hidden => "HIDDEN",
         }
+    }
+
+    /// The dash pattern in millimetres: a dash is positive, a gap negative. A file writes it in
+    /// its own unit, and the reader expects it there.
+    pub(crate) fn pattern_mm(self) -> &'static [f64] {
+        match self {
+            DxfLinetype::Continuous => &[],
+            DxfLinetype::Dashed => &[12.7, -6.35],
+            DxfLinetype::Hidden => &[2.0, -1.0],
+        }
+    }
+}
+
+/// A dash pattern's total length (the LTYPE record's group 40), in the pattern's unit.
+pub(crate) fn pattern_length(pattern: &[f64]) -> f64 {
+    pattern.iter().map(|d| d.abs()).sum()
+}
+
+/// The unit a DXF file writes its lengths in: its `$INSUNITS`. SolidCraft's model is always in
+/// millimetres; the writer scales it to the file's unit, and the reader scales it back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DxfUnits {
+    Inches,
+    Feet,
+    #[default]
+    Millimetres,
+    Centimetres,
+    Metres,
+}
+
+impl DxfUnits {
+    const ALL: [DxfUnits; 5] = [DxfUnits::Inches, DxfUnits::Feet, DxfUnits::Millimetres, DxfUnits::Centimetres, DxfUnits::Metres];
+
+    /// The `$INSUNITS` code, from the DXF reference: 1 inches, 2 feet, 4 millimetres,
+    /// 5 centimetres, 6 metres.
+    pub fn insunits(self) -> i16 {
+        match self {
+            DxfUnits::Inches => 1,
+            DxfUnits::Feet => 2,
+            DxfUnits::Millimetres => 4,
+            DxfUnits::Centimetres => 5,
+            DxfUnits::Metres => 6,
+        }
+    }
+
+    /// The millimetres in one of this unit.
+    pub fn mm_per_unit(self) -> f64 {
+        match self {
+            DxfUnits::Inches => 25.4,
+            DxfUnits::Feet => 304.8,
+            DxfUnits::Millimetres => 1.0,
+            DxfUnits::Centimetres => 10.0,
+            DxfUnits::Metres => 1000.0,
+        }
+    }
+
+    /// The unit with this `$INSUNITS` code; none for unitless (0) and the codes SolidCraft
+    /// doesn't write.
+    pub fn from_insunits(code: i32) -> Option<DxfUnits> {
+        DxfUnits::ALL.into_iter().find(|units| i32::from(units.insunits()) == code)
+    }
+
+    /// The unit named `mm`, `cm`, `m`, `in`, `inch` or `ft`, in any case.
+    pub fn from_name(name: &str) -> Option<DxfUnits> {
+        match name.to_ascii_lowercase().as_str() {
+            "in" | "inch" => Some(DxfUnits::Inches),
+            "ft" => Some(DxfUnits::Feet),
+            "mm" => Some(DxfUnits::Millimetres),
+            "cm" => Some(DxfUnits::Centimetres),
+            "m" => Some(DxfUnits::Metres),
+            _ => None,
+        }
+    }
+
+    /// Inches and feet: the header's `$MEASUREMENT` is 0 (imperial), otherwise 1 (metric).
+    fn imperial(self) -> bool {
+        matches!(self, DxfUnits::Inches | DxfUnits::Feet)
     }
 }
 
@@ -128,6 +207,26 @@ impl DxfTextVerticalAlignment {
             _ => Err(IoError::Invalid("not supported yet: DXF vertical TEXT alignment outside baseline/middle/top".into())),
         }
     }
+}
+
+/// MTEXT's attachment point 71: rows top, middle and bottom (1-3, 4-6, 7-9), each left, centre,
+/// right. MTEXT has no baseline, so its bottom row stands for TEXT's baseline both ways.
+fn mtext_attachment(horizontal: DxfTextHorizontalAlignment, vertical: DxfTextVerticalAlignment) -> i16 {
+    let row = match vertical {
+        DxfTextVerticalAlignment::Top => 0,
+        DxfTextVerticalAlignment::Middle => 1,
+        DxfTextVerticalAlignment::Baseline => 2,
+    };
+    row * 3 + horizontal.group72() + 1
+}
+
+/// The alignment an MTEXT attachment point stands for, or `None` outside 1-9.
+pub(crate) fn alignment_from_mtext_attachment(code: f64) -> Option<(DxfTextHorizontalAlignment, DxfTextVerticalAlignment)> {
+    use {DxfTextHorizontalAlignment as H, DxfTextVerticalAlignment as V};
+    let index = (1..=9_u8).position(|n| f64::from(n) == code)?;
+    let vertical = [V::Top, V::Middle, V::Baseline].get(index / 3).copied()?;
+    let horizontal = [H::Left, H::Centre, H::Right].get(index % 3).copied()?;
+    Some((horizontal, vertical))
 }
 
 /// The geometry of one entity (millimetres).
@@ -224,10 +323,10 @@ pub enum DxfShape {
         ctrl: Vec<Vec2>,
         weights: Option<Vec<f64>>,
     },
-    /// One line of text, centred on `at` (its baseline) and turned `angle_deg` counter-clockwise.
-    /// `%%d`, `%%p` and `%%c` are AutoCAD's degree, plus-minus and diameter signs; other letters
-    /// outside ASCII through U+FFFF are written as `\U+XXXX`. Characters beyond U+FFFF
-    /// are refused by [`write_dxf_file`], never substituted with `?`.
+    /// Text as a person typed it, centred on `at` (its baseline) and turned `angle_deg`
+    /// counter-clockwise. One line of at most 256 characters is written as TEXT; a longer text,
+    /// or one with line breaks, as MTEXT. `%` and `\` are literal; `°` is the degree sign.
+    /// Characters beyond U+FFFF are refused by [`write_dxf_file`], never substituted with `?`.
     Text {
         at: Vec2,
         height: f64,
@@ -258,32 +357,34 @@ pub struct DxfEntity {
 
 /// The closed loop as one AutoCAD `LWPOLYLINE` entity, with circular arc segments represented
 /// by their DXF bulge (tan of a quarter of the included angle). Free-form curves are sampled as lines.
-pub fn loop_lwpolyline_scaled(lp: &Loop2, scale: f64) -> DxfShape {
+/// Each piece's start is a vertex, so a loop whose pieces meet only to within rounding is still one
+/// closed polyline; `path_shapes` with `DxfPathStyle::Polyline` joins only equal endpoints.
+pub fn loop_lwpolyline(lp: &Loop2) -> DxfShape {
     let mut verts: Vec<(Vec2, f64)> = Vec::new();
     for s in &lp.segs {
         match *s {
             Seg2::Line { a, .. } => {
-                verts.push((a * scale, 0.0));
+                verts.push((a, 0.0));
             }
             Seg2::Arc { center, radius, start, sweep } => {
                 if (sweep.abs() - TAU).abs() < 1e-9 {
                     // Full circle: split into two 180° semicircles.
                     let b = if sweep >= 0.0 { 1.0 } else { -1.0 };
-                    let p0 = (center + Vec2::from_angle(start) * radius) * scale;
-                    let p1 = (center + Vec2::from_angle(start + std::f64::consts::PI) * radius) * scale;
+                    let p0 = center + Vec2::from_angle(start) * radius;
+                    let p1 = center + Vec2::from_angle(start + std::f64::consts::PI) * radius;
                     verts.push((p0, b));
                     verts.push((p1, b));
                 } else if sweep.abs() > std::f64::consts::PI + 1e-9 {
                     // Arc larger than 180°: split into two pieces.
                     let half = sweep * 0.5;
                     let b = (half / 4.0).tan();
-                    let p0 = (center + Vec2::from_angle(start) * radius) * scale;
-                    let p1 = (center + Vec2::from_angle(start + half) * radius) * scale;
+                    let p0 = center + Vec2::from_angle(start) * radius;
+                    let p1 = center + Vec2::from_angle(start + half) * radius;
                     verts.push((p0, b));
                     verts.push((p1, b));
                 } else {
                     let b = (sweep / 4.0).tan();
-                    let p0 = (center + Vec2::from_angle(start) * radius) * scale;
+                    let p0 = center + Vec2::from_angle(start) * radius;
                     verts.push((p0, b));
                 }
             }
@@ -291,17 +392,12 @@ pub fn loop_lwpolyline_scaled(lp: &Loop2, scale: f64) -> DxfShape {
                 let poly = s.polyline(0.01);
                 let count = poly.len().saturating_sub(1);
                 for p in poly.iter().take(count) {
-                    verts.push((*p * scale, 0.0));
+                    verts.push((*p, 0.0));
                 }
             }
         }
     }
     DxfShape::LwPolyline { verts, closed: true }
-}
-
-/// [`loop_lwpolyline_scaled`] at scale 1.0 (millimetres).
-pub fn loop_lwpolyline(lp: &Loop2) -> DxfShape {
-    loop_lwpolyline_scaled(lp, 1.0)
 }
 
 impl DxfShape {
@@ -358,11 +454,15 @@ impl DxfShape {
             }
             // A spline lies within the hull of its control points.
             DxfShape::Spline { ctrl, .. } => out.extend(ctrl.iter().copied()),
-            // Where a viewer puts the letters depends on its font: 0.8 heights for each.
+            // Where a viewer puts the letters depends on its font: 0.8 heights for each, along the
+            // longest line, and MTEXT's default spacing of 5/3 heights for each line below the first.
             DxfShape::Text { at, height, angle_deg, text } => {
                 let (along, up) = (Vec2::from_angle(angle_deg.to_radians()), Vec2::from_angle(angle_deg.to_radians()).perp());
-                let half = 0.4 * height * text.chars().count() as f64;
-                out.extend([-half, half].map(|s| *at + along * s));
+                let lines = text.lines().count().max(1);
+                let longest = text.lines().map(|line| line.chars().count()).max().unwrap_or(0);
+                let half = 0.4 * height * longest as f64;
+                let below = up * (-5.0 / 3.0 * height * (lines - 1) as f64);
+                out.extend([-half, half].map(|s| *at + along * s + below));
                 out.extend([-half, half].map(|s| *at + along * s + up * *height));
             }
         }
@@ -685,28 +785,6 @@ struct LayoutObject<'a> {
     paper: bool,
 }
 
-/// A text on one line, as a TEXT entity holds it: at most 250 characters, control characters as
-/// spaces, letters outside ASCII through U+FFFF as `\U+XXXX`. Refuse characters beyond
-/// U+FFFF anywhere in the source, including past the existing 250-character output limit.
-/// AC1015 uses CIF escapes, not UTF-8; surrogate-pair escapes are not portable across readers.
-fn text_value(s: &str) -> Result<String> {
-    if let Some((i, c)) = s.chars().enumerate().find(|(_, c)| u32::from(*c) > 0xffff) {
-        return Err(IoError::Invalid(format!(
-            "character {c:?} (U+{:04X}) at position {} cannot be written as DXF AC1015 text; only characters through U+FFFF are supported",
-            u32::from(c),
-            i + 1
-        )));
-    }
-    Ok(s.chars()
-        .take(250)
-        .map(|c| match c {
-            c if c.is_ascii_control() => " ".to_string(),
-            c if c.is_ascii() => c.to_string(),
-            c => format!("\\U+{:04X}", u32::from(c)),
-        })
-        .collect())
-}
-
 /// A DXF drawing (AutoCAD 2000, millimetres) of `entities`. `layers` are the layers they are on
 /// (layer `0` is always there). A TEXT character beyond U+FFFF returns an error naming the
 /// character, its position, the entity and its layer; no drawing is returned on failure.
@@ -768,6 +846,7 @@ pub fn legacy_dxf_baseline(layers: &[DxfLayer], entities: &[DxfEntity]) -> Resul
 
 /// The existing drawing API with explicit DXF units, using the owned writer's same backend.
 pub fn write_dxf_drawing_units(layers: &[DxfLayer], entities: &[DxfEntity], insunits: i32) -> Result<String> {
+    let units = DxfUnits::from_insunits(insunits).ok_or_else(|| IoError::Invalid(format!("not supported yet: DXF $INSUNITS {insunits}")))?;
     let mut extents = None;
     let mut samples = Vec::new();
     for (index, entity) in entities.iter().enumerate() {
@@ -788,7 +867,7 @@ pub fn write_dxf_drawing_units(layers: &[DxfLayer], entities: &[DxfEntity], insu
     }
     let layers = layer_list.iter().map(|l| LayerView { name: &l.name, color: l.color, linetype: l.linetype, weight: None });
     let entities = entities.iter().map(|e| Ok(EntityView { layer: &e.layer, shape: &e.shape, weight: None, source_text: None }));
-    write_drawing_views(layers, entities, None, extents.unwrap_or((Vec2::ZERO, Vec2::ZERO)), insunits)
+    write_drawing_views(layers, entities, None, extents.unwrap_or((Vec2::ZERO, Vec2::ZERO)), units)
 }
 
 // These limits bound the ordinary strict owned-file entry point. Explicit
@@ -821,10 +900,46 @@ struct EntityView<'a> {
 /// AlignedText needs write_dxf_file_with_text_bounds and actual caller metrics.
 /// Extents remain the existing sampled/control-polygon approximation.
 pub fn write_dxf_file(file: &DxfFile<DxfShape>) -> Result<String> {
-    if let Some(budget) = file.compatibility {
-        return export_compatibility::write(file, budget);
+    write_dxf_file_as(file, DxfOutput::default())
+}
+
+/// Which DXF release a file is written as.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DxfVersion {
+    /// AutoCAD 2000 (`AC1015`): every entity the model holds, with the sections, tables and
+    /// objects release 2000 needs.
+    #[default]
+    Ac1015,
+    /// Release 12: a header with `$INSUNITS`, then the ENTITIES section alone. It holds POINT,
+    /// LINE, CIRCLE, ARC and one-line TEXT; anything else is refused by name, never dropped.
+    R12,
+}
+
+/// How a file is written: its unit and its release. The default is millimetres, AutoCAD 2000.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DxfOutput {
+    pub units: DxfUnits,
+    pub version: DxfVersion,
+}
+
+/// Write owned geometry (in millimetres) in `output`'s unit and release. The lengths are scaled
+/// to the unit once, before the checks, so the checks certify what is written; the header, the
+/// extents and the linetype patterns are in the same unit. [`write_dxf_file`] is the default.
+pub fn write_dxf_file_as(file: &DxfFile<DxfShape>, output: DxfOutput) -> Result<String> {
+    let scaled;
+    let file = if output.units == DxfUnits::Millimetres {
+        file
+    } else {
+        scaled = file.translated_scaled(Vec2::ZERO, 1.0 / output.units.mm_per_unit())?;
+        &scaled
+    };
+    match (output.version, file.compatibility) {
+        (DxfVersion::R12, _) => write_r12(file, output.units),
+        (DxfVersion::Ac1015, Some(budget)) => export_compatibility::write(file, budget, output.units),
+        (DxfVersion::Ac1015, None) => {
+            write_dxf_file_limited_with_text_bounds(file, crate::MAX_DRAWING_BYTES, MAX_DXF_FILE_VALUES, no_text_bounds, output.units)
+        }
     }
-    write_dxf_file_limited(file, crate::MAX_DRAWING_BYTES, MAX_DXF_FILE_VALUES)
 }
 
 /// Write owned geometry including explicit TEXT alignments. For AlignedText,
@@ -837,17 +952,127 @@ where
     F: FnMut(&DxfShape) -> Result<DxfGeometryBounds>,
 {
     if let Some(budget) = file.compatibility {
-        return export_compatibility::write(file, budget);
+        return export_compatibility::write(file, budget, DxfUnits::Millimetres);
     }
-    write_dxf_file_limited_with_text_bounds(file, crate::MAX_DRAWING_BYTES, MAX_DXF_FILE_VALUES, text_bounds)
+    write_dxf_file_limited_with_text_bounds(file, crate::MAX_DRAWING_BYTES, MAX_DXF_FILE_VALUES, text_bounds, DxfUnits::Millimetres)
 }
 
 // Private tightening seam lets the resource boundary be checked with tiny original cases.
+#[cfg(test)]
 fn write_dxf_file_limited(file: &DxfFile<DxfShape>, bytes: usize, values: usize) -> Result<String> {
-    write_dxf_file_limited_with_text_bounds(file, bytes, values, |_| Err(IoError::Invalid("aligned DXF TEXT requires explicit layout bounds".into())))
+    write_dxf_file_limited_with_text_bounds(file, bytes, values, no_text_bounds, DxfUnits::Millimetres)
 }
 
-fn write_dxf_file_limited_with_text_bounds<F>(file: &DxfFile<DxfShape>, bytes: usize, values: usize, mut text_bounds: F) -> Result<String>
+/// The text bounds of a writer given none: an aligned TEXT is refused.
+fn no_text_bounds(_: &DxfShape) -> Result<DxfGeometryBounds> {
+    Err(IoError::Invalid("aligned DXF TEXT requires explicit layout bounds".into()))
+}
+
+/// Charge one entity's work against the file's budget, then check that it can be written, before
+/// any output or sampling. Both releases admit every entity this way.
+fn admit_entity(shape: &DxfShape, index: usize, layer: &str, total: &mut usize, values: usize) -> Result<usize> {
+    let count = shape_work(shape)?;
+    *total = total
+        .checked_add(count)
+        .filter(|n| *n <= values)
+        .ok_or_else(|| IoError::Invalid("DXF file geometry payload exceeds the supported limit".into()))?;
+    shape_preflight(shape)
+        .and_then(|()| shape_emission_preflight(shape))
+        .map_err(|error| IoError::Invalid(format!("DXF entity {} on layer {:?}: {error}", index + 1, layer)))?;
+    Ok(count)
+}
+
+/// Release 12, through the same `Out` and number rule as release 2000: `$INSUNITS`, then each
+/// entity with its layer. What release 12 can't hold is refused by name.
+fn write_r12(file: &DxfFile<DxfShape>, units: DxfUnits) -> Result<String> {
+    if file.is_sketch_import() {
+        return Err(IoError::Invalid("not supported yet: writing SketchImport source records requires explicit owned conversion".into()));
+    }
+    if file.layers().len() > 1_024 || file.entities().len() > 1_000_000 {
+        return Err(IoError::Invalid("DXF file metadata count exceeds the supported limit".into()));
+    }
+    let mut total = 0usize;
+    let mut o = Out::new(0, Some(crate::MAX_DRAWING_BYTES));
+    o.code(0, "SECTION");
+    o.code(2, "HEADER");
+    o.code(9, "$INSUNITS");
+    o.code(70, units.insunits());
+    o.code(0, "ENDSEC");
+    o.code(0, "SECTION");
+    o.code(2, "ENTITIES");
+    for (index, entity) in file.entities().iter().enumerate() {
+        let layer = file.layer(entity.layer())?.name();
+        let shape = entity.geometry();
+        admit_entity(shape, index, layer, &mut total, MAX_DXF_FILE_VALUES)?;
+        let refused =
+            |kind: &str| IoError::Invalid(format!("DXF entity {} on layer {layer:?}: not in DXF R12: {kind}; write it as lines", index + 1));
+        let layer = if layer.trim().is_empty() { "0" } else { layer };
+        match shape {
+            DxfShape::Point(p) => {
+                o.code(0, "POINT");
+                o.code(8, layer);
+                o.point2(10, *p);
+            }
+            DxfShape::Line(a, b) => {
+                o.code(0, "LINE");
+                o.code(8, layer);
+                o.point2(10, *a);
+                o.point2(11, *b);
+            }
+            DxfShape::Circle { c, r } => {
+                o.code(0, "CIRCLE");
+                o.code(8, layer);
+                o.point2(10, *c);
+                o.len(40, *r);
+            }
+            DxfShape::Arc { c, r, a0, a1 } => {
+                o.code(0, "ARC");
+                o.code(8, layer);
+                o.point2(10, *c);
+                o.len(40, *r);
+                o.num(50, *a0);
+                o.num(51, *a1);
+            }
+            DxfShape::Text { at, height, angle_deg, text } => {
+                let EncodedText::Text(value) = encode_text(text, crate::MAX_DRAWING_BYTES)? else {
+                    return Err(refused("MTEXT (a note longer than one 256-character line)"));
+                };
+                // Centred on its baseline at `at`, as release 2000 writes it: 72 = 1 and point 11.
+                o.code(0, "TEXT");
+                o.code(8, layer);
+                o.point2(10, *at);
+                o.len(40, *height);
+                o.code(1, value);
+                o.num(50, *angle_deg);
+                o.code(72, 1);
+                o.point2(11, *at);
+            }
+            DxfShape::Ellipse { .. } => return Err(refused("ELLIPSE")),
+            DxfShape::Spline { .. } => return Err(refused("SPLINE")),
+            DxfShape::Polyline { .. } | DxfShape::LwPolyline { .. } | DxfShape::BulgedPolyline { .. } => return Err(refused("LWPOLYLINE")),
+            DxfShape::AlignedText { .. } => return Err(refused("aligned TEXT")),
+            DxfShape::Insert { .. }
+            | DxfShape::SourceSpline { .. }
+            | DxfShape::SourceEllipse { .. }
+            | DxfShape::SourcePolyline { .. }
+            | DxfShape::SourceOmitted { .. } => {
+                return Err(IoError::Invalid("not supported yet: source DXF records require their SketchImport projection".into()));
+            }
+        }
+    }
+    o.code(0, "ENDSEC");
+    o.code(0, "EOF");
+    o.check()?;
+    Ok(o.s)
+}
+
+fn write_dxf_file_limited_with_text_bounds<F>(
+    file: &DxfFile<DxfShape>,
+    bytes: usize,
+    values: usize,
+    mut text_bounds: F,
+    units: DxfUnits,
+) -> Result<String>
 where
     F: FnMut(&DxfShape) -> Result<DxfGeometryBounds>,
 {
@@ -867,14 +1092,7 @@ where
         let layer = file.layer(entity.layer())?;
         let shape = entity.geometry();
         // Charge lengths before scanning any input-derived vector or sampling a curve.
-        let count = shape_work(shape)?;
-        total = total
-            .checked_add(count)
-            .filter(|n| *n <= values)
-            .ok_or_else(|| IoError::Invalid("DXF file geometry payload exceeds the supported limit".into()))?;
-        shape_preflight(shape)
-            .and_then(|()| shape_emission_preflight(shape))
-            .map_err(|error| IoError::Invalid(format!("DXF entity {} on layer {:?}: {error}", index + 1, layer.name())))?;
+        let count = admit_entity(shape, index, layer.name(), &mut total, values)?;
         samples.clear();
         samples.try_reserve(count).map_err(|_| IoError::Invalid("DXF extent allocation failed".into()))?;
         if matches!(shape, DxfShape::AlignedText { .. }) {
@@ -902,7 +1120,7 @@ where
             source_text: entity.source_text(),
         })
     });
-    write_drawing_views(layers, entities, Some(bytes), extents.unwrap_or((Vec2::ZERO, Vec2::ZERO)), 4)
+    write_drawing_views(layers, entities, Some(bytes), extents.unwrap_or((Vec2::ZERO, Vec2::ZERO)), units)
 }
 
 fn shape_preflight(shape: &DxfShape) -> Result<()> {
@@ -957,9 +1175,7 @@ fn shape_preflight(shape: &DxfShape) -> Result<()> {
                 && weights.as_ref().is_none_or(|w| w.iter().all(|v| v.is_finite() && *v > 0.0))
         }
         DxfShape::Text { at, height, angle_deg, text } | DxfShape::AlignedText { at, height, angle_deg, text, .. } => {
-            if text.len() > 1_000 || text.chars().count() > 250 || text.chars().any(|c| u32::from(c) > 0xffff) {
-                return Err(IoError::Invalid("DXF owned TEXT supports at most 250 BMP characters; no text was truncated".into()));
-            }
+            text_encode::writable(text)?;
             at.is_finite() && height.is_finite() && *height > 0.0 && solidcore_ops::export_geometry::finite_degrees(*angle_deg)
         }
     };
@@ -1007,7 +1223,7 @@ fn shape_work(shape: &DxfShape) -> Result<usize> {
 
 /// What a reader gets back from a length as `Out::len` writes it. Path admission uses it too, so
 /// both certify exactly what is written.
-fn written_length(value: f64) -> std::result::Result<f64, &'static str> {
+pub(crate) fn written_length(value: f64) -> std::result::Result<f64, &'static str> {
     let decimal = length_decimal(value).map_err(|error| error.message())?;
     decimal.as_str().map_err(|error| error.message())?.parse::<f64>().map_err(|_| "DXF length cannot be read back")
 }
@@ -1154,17 +1370,64 @@ fn extend_extents(extents: Option<(Vec2, Vec2)>, point: Vec2) -> (Vec2, Vec2) {
     })
 }
 
+/// TEXT's first insertion point: an imported TEXT keeps its own; anything else has one anchor.
 fn first_text_anchor(source: Option<&DxfTextSource>, at: Vec2) -> Result<Vec2> {
     match source {
-        None => Ok(at),
         Some(source) if source.kind() == DxfTextRecordKind::Text => {
             source.first_anchor_mm().ok_or_else(|| IoError::Invalid("not supported yet: source TEXT has no first insertion anchor".into()))
         }
-        Some(_) => Err(IoError::Invalid("not supported yet: MTEXT source requires its own record emission".into())),
+        _ => Ok(at),
     }
 }
 
-fn write_drawing_views<'a, L, E>(layers: L, entities: E, limit: Option<usize>, extents: (Vec2, Vec2), insunits: i32) -> Result<String>
+/// Where and how a text entity sits, as its groups say it.
+struct TextPlacement<'a> {
+    source: Option<&'a DxfTextSource>,
+    at: Vec2,
+    height: f64,
+    angle_deg: f64,
+    horizontal: DxfTextHorizontalAlignment,
+    vertical: DxfTextVerticalAlignment,
+}
+
+/// A text entity's groups after the common header: TEXT with its two anchors and alignment, or
+/// MTEXT with its insertion point, attachment point, chunks and direction vector.
+fn text_groups(o: &mut Out, encoded: Option<&EncodedText>, place: TextPlacement) -> Result<()> {
+    let TextPlacement { source, at, height, angle_deg, horizontal, vertical } = place;
+    match encoded {
+        Some(EncodedText::Text(value)) => {
+            o.code(100, "AcDbText");
+            o.point(10, first_text_anchor(source, at)?);
+            o.len(40, height);
+            o.code(1, value);
+            o.num(50, angle_deg);
+            o.code(72, horizontal.group72());
+            o.point(11, at);
+            o.code(100, "AcDbText");
+            o.code(73, vertical.group73());
+        }
+        Some(EncodedText::MText(groups)) => {
+            o.code(100, "AcDbMText");
+            o.point(10, at);
+            o.len(40, height);
+            // No wrapping width; left to right.
+            o.num(41, 0.0);
+            o.code(71, mtext_attachment(horizontal, vertical));
+            o.code(72, 1);
+            for (code, value) in groups {
+                o.code(*code, value);
+            }
+            let direction = Vec2::from_angle(angle_deg.to_radians());
+            o.num(11, direction.x);
+            o.num(21, direction.y);
+            o.num(31, 0.0);
+        }
+        None => return Err(IoError::Invalid("DXF text entity was not encoded".into())),
+    }
+    Ok(())
+}
+
+fn write_drawing_views<'a, L, E>(layers: L, entities: E, limit: Option<usize>, extents: (Vec2, Vec2), units: DxfUnits) -> Result<String>
 where
     L: Iterator<Item = LayerView<'a>> + Clone + ExactSizeIterator,
     E: Iterator<Item = Result<EntityView<'a>>> + Clone,
@@ -1230,16 +1493,17 @@ where
     }
     o.code(0, "ENDTAB");
     // The three linetypes every drawing has, and DASHED, which the dashed layers name: dash and
-    // gap lengths (a gap is negative) after the pattern's total.
+    // gap lengths (a gap is negative) after the pattern's total, in the file's unit.
     let mut linetypes: Vec<(&str, &str, &[f64])> = vec![
         ("ByBlock", "", &[]),
         ("ByLayer", "", &[]),
         ("Continuous", "Solid line", &[]),
-        ("DASHED", "Dashed __ __ __ __ __ __ __ __ __ __", &[12.7, -6.35]),
+        ("DASHED", "Dashed __ __ __ __ __ __ __ __ __ __", DxfLinetype::Dashed.pattern_mm()),
     ];
     if layers.clone().any(|l| l.linetype == DxfLinetype::Hidden) {
-        linetypes.push(("HIDDEN", "Hidden edges", &[2.0, -1.0]));
+        linetypes.push(("HIDDEN", "Hidden edges", DxfLinetype::Hidden.pattern_mm()));
     }
+    let unit = units.mm_per_unit();
     let t = o.table("LTYPE", linetypes.len());
     for (name, description, pattern) in linetypes {
         o.record("LTYPE", "AcDbLinetypeTableRecord", &t);
@@ -1248,9 +1512,9 @@ where
         o.code(3, description);
         o.code(72, 65);
         o.code(73, pattern.len());
-        o.len(40, pattern.iter().map(|d| d.abs()).sum());
+        o.len(40, pattern_length(pattern) / unit);
         for d in pattern {
-            o.len(49, *d);
+            o.len(49, d / unit);
             o.code(74, 0);
         }
     }
@@ -1327,6 +1591,13 @@ where
     o.code(2, "ENTITIES");
     for (index, e) in entities.enumerate() {
         let e = e?;
+        let encoded = match e.shape {
+            DxfShape::Text { text, .. } | DxfShape::AlignedText { text, .. } => Some(
+                encode_text(text, crate::MAX_DRAWING_BYTES)
+                    .map_err(|error| IoError::Invalid(format!("DXF TEXT entity {} on layer {:?}: {error}", index + 1, e.layer)))?,
+            ),
+            _ => None,
+        };
         let kind = match e.shape {
             DxfShape::Insert { .. }
             | DxfShape::SourceSpline { .. }
@@ -1342,7 +1613,10 @@ where
             DxfShape::Arc { .. } => "ARC",
             DxfShape::Ellipse { .. } => "ELLIPSE",
             DxfShape::Spline { .. } => "SPLINE",
-            DxfShape::Text { .. } | DxfShape::AlignedText { .. } => "TEXT",
+            DxfShape::Text { .. } | DxfShape::AlignedText { .. } => match encoded {
+                Some(EncodedText::MText(_)) => "MTEXT",
+                _ => "TEXT",
+            },
         };
         let h = o.handle();
         o.code(0, kind);
@@ -1382,21 +1656,18 @@ where
                     o.num(42, vertex.bulge);
                 }
             }
-            DxfShape::AlignedText { at, height, angle_deg, text, horizontal, vertical } => {
-                // The owned route validates payload/geometry and receives real
-                // bounds before reaching Out. The legacy route refuses this
-                // variant in sample(), before writing any final drawing.
-                o.code(100, "AcDbText");
-                o.point(10, first_text_anchor(e.source_text, *at)?);
-                o.len(40, *height);
-                let value =
-                    text_value(text).map_err(|error| IoError::Invalid(format!("DXF TEXT entity {} on layer {:?}: {error}", index + 1, e.layer)))?;
-                o.code(1, value);
-                o.num(50, *angle_deg);
-                o.code(72, horizontal.group72());
-                o.point(11, *at);
-                o.code(100, "AcDbText");
-                o.code(73, vertical.group73());
+            // The owned route validates payload/geometry and receives real bounds before reaching
+            // Out. The legacy route refuses AlignedText in sample(), before writing any drawing.
+            DxfShape::AlignedText { at, height, angle_deg, horizontal, vertical, .. } => {
+                let place = TextPlacement {
+                    source: e.source_text,
+                    at: *at,
+                    height: *height,
+                    angle_deg: *angle_deg,
+                    horizontal: *horizontal,
+                    vertical: *vertical,
+                };
+                text_groups(&mut o, encoded.as_ref(), place)?;
             }
             DxfShape::Point(point) => {
                 // POINT uses WCS10/20/30, not an OCS displacement. The planar
@@ -1467,20 +1738,18 @@ where
                     o.point(10, *p);
                 }
             }
-            DxfShape::Text { at, height, angle_deg, text } => {
-                o.code(100, "AcDbText");
-                o.point(10, first_text_anchor(e.source_text, *at)?);
-                o.len(40, *height);
-                let value =
-                    text_value(text).map_err(|error| IoError::Invalid(format!("DXF TEXT entity {} on layer {:?}: {error}", index + 1, e.layer)))?;
-                o.code(1, value);
-                o.num(50, *angle_deg);
-                // Generated centred text uses coincident anchors. Imported text
-                // keeps its real first source anchor and effective second anchor.
-                o.code(72, 1);
-                o.point(11, *at);
-                o.code(100, "AcDbText");
-                o.code(73, 0);
+            // Generated centred text uses coincident anchors. Imported text
+            // keeps its real first source anchor and effective second anchor.
+            DxfShape::Text { at, height, angle_deg, .. } => {
+                let place = TextPlacement {
+                    source: e.source_text,
+                    at: *at,
+                    height: *height,
+                    angle_deg: *angle_deg,
+                    horizontal: DxfTextHorizontalAlignment::Centre,
+                    vertical: DxfTextVerticalAlignment::Baseline,
+                };
+                text_groups(&mut o, encoded.as_ref(), place)?;
             }
         }
         o.check().map_err(|error| IoError::Invalid(format!("DXF {kind} entity {} on layer {:?}: {error}", index + 1, e.layer)))?;
@@ -1550,9 +1819,9 @@ where
     head.code(9, "$HANDSEED");
     head.code(5, format!("{:X}", o.next));
     head.code(9, "$INSUNITS");
-    head.code(70, insunits);
+    head.code(70, units.insunits());
     head.code(9, "$MEASUREMENT");
-    head.code(70, if insunits == 1 || insunits == 2 { 0 } else { 1 });
+    head.code(70, if units.imperial() { 0 } else { 1 });
     head.code(9, "$EXTMIN");
     head.point(10, lo);
     head.code(9, "$EXTMAX");
@@ -1601,7 +1870,7 @@ mod tests {
 
     use super::*;
     use crate::dxf::{test_wire_entities as entities, test_wire_pairs as pairs, test_wire_table_records as table_records};
-    use crate::{Geom2, read_dxf};
+    use crate::{Geom2, read_dxf, read_dxf_file};
 
     // Keep the existing ordinary writer regressions on the new public conversion path.
     fn seg_shape(seg: &Seg2) -> DxfShape {
@@ -1965,7 +2234,6 @@ mod tests {
             (Vec2::ZERO, f64::INFINITY, 0.0, "A".into()),
             (Vec2::ZERO, 1.0, f64::NAN, "A".into()),
             (Vec2::ZERO, 1e-20, 0.0, "A".into()),
-            (Vec2::ZERO, 1.0, 0.0, "A".repeat(251)),
             (Vec2::ZERO, 1.0, 0.0, "𠀋".into()),
         ] {
             let mut file = DxfFile::new().unwrap();
@@ -2011,13 +2279,21 @@ mod tests {
         )
         .unwrap();
         let metrics = |_: &DxfShape| DxfGeometryBounds::new(Vec2::ZERO, Vec2::new(8.0, 1.0));
-        let output = write_dxf_file_limited_with_text_bounds(&file, crate::MAX_DRAWING_BYTES, 2, metrics).unwrap();
-        assert_eq!(field(&entities(&output)[0].1, 1), "A%%d B\\U+00B0\\{}");
-        assert!(write_dxf_file_limited_with_text_bounds(&file, output.len(), 2, metrics).is_ok());
-        assert!(write_dxf_file_limited_with_text_bounds(&file, output.len() - 1, 2, metrics).is_err());
+        let output = write_dxf_file_limited_with_text_bounds(&file, crate::MAX_DRAWING_BYTES, 2, metrics, DxfUnits::Millimetres).unwrap();
+        // Two lines: MTEXT, its `%`, `\\`, braces and degree sign escaped as typed.
+        let [(kind, groups)] = &entities(&output)[..] else { panic!("{output}") };
+        assert_eq!((kind.as_str(), field(groups, 1)), ("MTEXT", "A\\U+0025\\U+0025d\\PB\\U+00B0\\\\\\{\\}"));
+        assert!(write_dxf_file_limited_with_text_bounds(&file, output.len(), 2, metrics, DxfUnits::Millimetres).is_ok());
+        assert!(write_dxf_file_limited_with_text_bounds(&file, output.len() - 1, 2, metrics, DxfUnits::Millimetres).is_err());
         assert!(
-            write_dxf_file_limited_with_text_bounds(&file, crate::MAX_DRAWING_BYTES, 1, |_| panic!("over-budget text must not request metrics"))
-                .is_err()
+            write_dxf_file_limited_with_text_bounds(
+                &file,
+                crate::MAX_DRAWING_BYTES,
+                1,
+                |_| panic!("over-budget text must not request metrics"),
+                DxfUnits::Millimetres
+            )
+            .is_err()
         );
     }
 
@@ -2315,13 +2591,13 @@ mod tests {
     #[test]
     fn text_is_centred_on_its_point_and_the_reader_gets_it_back() {
         let at = Vec2::new(30.0, 12.0);
-        let note = DxfShape::Text { at, height: 3.0, angle_deg: 90.0, text: "AB%%d\nC\u{b0}".into() };
+        let note = DxfShape::Text { at, height: 3.0, angle_deg: 90.0, text: "AB%%d\tC\u{b0}".into() };
         let dxf = write_dxf_drawing_units(&[DxfLayer::new("NOTES", 8)], &[DxfEntity { layer: "NOTES".into(), shape: note }], 4).unwrap();
         let file = entities(&dxf);
         let [text] = file.as_slice() else { panic!("{file:?}") };
         assert_eq!(text.0, "TEXT");
-        // One line (the newline is a space), the sign outside ASCII a code of its own, `%%d` AutoCAD's degree sign.
-        assert_eq!(text.1.iter().find(|(c, _)| *c == 1).map(|(_, v)| v.as_str()), Some("AB%%d C\\U+00B0"));
+        // One line (the tab is a space), each typed `%` as `%%%`, and `%%d` the degree sign.
+        assert_eq!(text.1.iter().find(|(c, _)| *c == 1).map(|(_, v)| v.as_str()), Some("AB%%%%%%d C%%d"));
         // Centred (72 = 1) on the second alignment point, which is the first as well; 3 mm high, turned 90°.
         assert!(
             near(&values(text, 11), &[30.0])
@@ -2342,6 +2618,26 @@ mod tests {
             matches!(&back[..], [Geom2::Text { at: found, height, angle, .. }] if found.dist(at) < 1e-9 && (height - 3.0).abs() < 1e-9 && (angle - FRAC_PI_2).abs() < 1e-9),
             "{back:?}"
         );
+    }
+
+    #[test]
+    fn two_lines_are_mtext_at_the_same_point_and_the_strict_reader_gets_them_back_as_typed() {
+        let at = Vec2::new(30.0, 12.0);
+        let typed = "AB%%d\n50% C\u{b0} {x}\\";
+        let note = DxfShape::Text { at, height: 3.0, angle_deg: 90.0, text: typed.into() };
+        let dxf = write_dxf_drawing_units(&[DxfLayer::new("NOTES", 8)], &[DxfEntity { layer: "NOTES".into(), shape: note.clone() }], 4).unwrap();
+        let [entity] = &entities(&dxf)[..] else { panic!("{dxf}") };
+        let groups = &entity.1;
+        assert_eq!(entity.0, "MTEXT");
+        assert_eq!(field(groups, 1), "AB\\U+0025\\U+0025d\\P50\\U+0025 C\\U+00B0 \\{x\\}\\\\");
+        // Its insertion point is the point; bottom centre (71 = 8); no wrapping; turned 90° by its direction.
+        assert!(near(&values(entity, 10), &[30.0]) && near(&values(entity, 20), &[12.0]) && near(&values(entity, 40), &[3.0]));
+        assert!(near(&values(entity, 71), &[8.0]) && near(&values(entity, 41), &[0.0]) && near(&values(entity, 72), &[1.0]));
+        assert!(near(&values(entity, 11), &[0.0]) && near(&values(entity, 21), &[1.0]) && values(entity, 50).is_empty());
+        let back = crate::read_dxf_file(&dxf).unwrap();
+        let DxfShape::Text { at: found, height, angle_deg, text } = back.entities()[0].geometry() else { panic!("{back:?}") };
+        assert!(found.dist(at) < 1e-9 && *height == 3.0 && (angle_deg - 90.0).abs() < 1e-9, "{back:?}");
+        assert_eq!(text, typed);
     }
 
     #[test]
@@ -2371,10 +2667,10 @@ mod tests {
     }
 
     #[test]
-    fn bmp_text_keeps_its_existing_encoding_through_ffff() {
+    fn bmp_text_is_written_as_typed_through_ffff() {
         for (text, expected) in [
-            ("ASCII %%d %%p %%c ° 中 \u{ffff}\n".into(), "ASCII %%d %%p %%c \\U+00B0 \\U+4E2D \\U+FFFF".into()),
-            ("\u{ffff}".repeat(250), "\\U+FFFF".repeat(250)),
+            ("ASCII %%d %%p %%c ° 中\t\u{ffff}".into(), "ASCII %%%%%%d %%%%%%p %%%%%%c %%d \\U+4E2D \\U+FFFF".into()),
+            ("\u{ffff}".repeat(256), "\\U+FFFF".repeat(256)),
         ] {
             let shape = DxfShape::Text { at: Vec2::ZERO, height: 3.0, angle_deg: 0.0, text };
             let dxf = write_dxf_drawing_units(&[], &[DxfEntity { layer: "0".into(), shape }], 4).unwrap();
@@ -2536,7 +2832,7 @@ mod tests {
     }
 
     #[test]
-    fn lwpolyline_with_bulge_and_units_round_trip() {
+    fn a_bulged_loop_is_written_in_inches_and_read_back_in_millimetres() {
         // Closed loop with a line and a 90° arc segment (bulge tan(pi / 8)).
         let sweep = FRAC_PI_2;
         let bulge = (sweep / 4.0).tan();
@@ -2554,20 +2850,18 @@ mod tests {
         // Third segment is clockwise (-90°), bulge is negative
         assert!((verts[2].1 - (-bulge)).abs() < 1e-12, "bulge was {}", verts[2].1);
 
-        // Write with inch units (insunits = 1)
-        let dxf = write_dxf_drawing_units(
-            &[DxfLayer::new("CUT", 4)],
-            &[DxfEntity { layer: "CUT".into(), shape: loop_lwpolyline_scaled(&loop2, 1.0 / 25.4) }],
-            1,
-        )
-        .unwrap();
-        // Wire checks through the shared lexer: the layered reader doesn't take an inch file with
-        // patterned linetypes yet, and $INSUNITS is a header value it converts away.
+        let mut file = DxfFile::new().unwrap();
+        let cut = file.declare_layer("CUT", 4, DxfLinetype::Continuous, None).unwrap();
+        file.push(cut, shape, None).unwrap();
+        let dxf = write_dxf_file_as(&file, DxfOutput { units: DxfUnits::Inches, version: DxfVersion::Ac1015 }).unwrap();
         let [(kind, groups)] = &entities(&dxf)[..] else { panic!("{dxf}") };
         assert_eq!((kind.as_str(), field(groups, 8)), ("LWPOLYLINE", "CUT"));
+        assert!(near(&values(&(kind.clone(), groups.clone()), 10), &[10.0 / 25.4, 0.0, 0.0]));
         let p = pairs(&dxf);
         let after = |var: &str| &p[p.iter().position(|(c, v)| (*c, v.as_str()) == (9, var)).unwrap() + 1..];
         assert_eq!(after("$INSUNITS")[0], (70, "1".to_string()));
+        // The strict reader takes the inch file back, its patterns included.
+        assert!(read_dxf_file(&dxf).is_ok());
 
         // Read back via read_dxf: should scale from inches back to mm
         let geom = read_dxf(&dxf).unwrap();
@@ -2734,21 +3028,24 @@ mod tests {
     }
 
     #[test]
-    fn owned_text_accepts_250_bmp_characters_and_refuses_truncation() {
-        for text in ["中".repeat(250), "A\tB\n%%d °".into()] {
+    fn owned_text_is_never_cut_and_only_characters_beyond_ffff_refuse() {
+        for text in ["中".repeat(250), "A\tB\n%%d °".into(), "A".repeat(257), "中".repeat(2_000)] {
             let shape = DxfShape::Text { at: Vec2::ZERO, height: 1.0, angle_deg: 0.0, text };
             let mut file = DxfFile::new().unwrap();
             file.push(file.default_layer(), shape.clone(), None).unwrap();
             assert_eq!(write_dxf_file(&file).unwrap(), write_dxf_drawing_units(&[], &[DxfEntity { layer: "0".into(), shape }], 4).unwrap());
         }
-        for text in ["A".repeat(251), "中".repeat(251), "😀".into(), format!("{}😀", "A".repeat(250))] {
+        for text in ["😀".to_string(), format!("{}😀", "A".repeat(250))] {
             let mut file = DxfFile::new().unwrap();
             file.push(file.default_layer(), DxfShape::Text { at: Vec2::ZERO, height: 1.0, angle_deg: 0.0, text }, None).unwrap();
-            assert!(write_dxf_file(&file).unwrap_err().to_string().contains("250 BMP characters"));
+            let error = write_dxf_file(&file).unwrap_err().to_string();
+            assert!(error.contains("U+1F600") && error.contains("U+FFFF"), "{error}");
         }
-        let shape = DxfShape::Text { at: Vec2::ZERO, height: 1.0, angle_deg: 0.0, text: "A".repeat(251) };
+        // 257 characters are MTEXT: one 250-byte chunk, then the tail.
+        let shape = DxfShape::Text { at: Vec2::ZERO, height: 1.0, angle_deg: 0.0, text: "A".repeat(257) };
         let legacy = write_dxf_drawing_units(&[], &[DxfEntity { layer: "0".into(), shape }], 4).unwrap();
-        assert_eq!(field(&entities(&legacy)[0].1, 1), "A".repeat(250));
+        let [(kind, groups)] = &entities(&legacy)[..] else { panic!("{legacy}") };
+        assert_eq!((kind.as_str(), field(groups, 3), field(groups, 1)), ("MTEXT", "A".repeat(250).as_str(), "AAAAAAA"));
     }
 
     #[test]
@@ -3123,7 +3420,7 @@ mod tests {
         let layers = [DxfLayer::new("NOTES", 8)];
         let note = |text| DxfEntity { layer: "NOTES".into(), shape: DxfShape::Text { at: Vec2::ZERO, height: 3.0, angle_deg: 0.0, text } };
         let output = legacy_dxf_baseline(&layers, &[note("\u{ffff}".repeat(251))]).unwrap();
-        assert_eq!(field(&entities(&output)[0].1, 1), "\\U+FFFF".repeat(250));
+        assert_eq!(field(&entities(&output)[0].1, 1), "\\U+FFFF".repeat(251), "nothing is cut");
         let error = legacy_dxf_baseline(&layers, &[note(format!("{}\u{2000b}", "中".repeat(10_000)))]).unwrap_err().to_string();
         assert!(error.contains("U+2000B"));
         assert!(error.contains("at position 10001"), "{error}");
@@ -3276,5 +3573,125 @@ mod tests {
         let mut file = DxfFile::new().unwrap();
         file.push(file.default_layer(), DxfShape::BulgedPolyline { vertices, closed: false }, None).unwrap();
         assert!(write_dxf_file(&file).unwrap_err().to_string().contains("distinct point"));
+    }
+
+    /// A millimetre model with every length a whole number of every unit's 1e-9 grid apart.
+    fn mixed_file() -> DxfFile<DxfShape> {
+        let mut file = DxfFile::new().unwrap();
+        let cut = file.declare_layer("CUT", 4, DxfLinetype::Dashed, None).unwrap();
+        file.push(file.default_layer(), DxfShape::Point(Vec2::new(304.8, 0.0)), None).unwrap();
+        file.push(cut, DxfShape::Line(Vec2::ZERO, Vec2::new(609.6, 0.0)), None).unwrap();
+        file.push(cut, DxfShape::Circle { c: Vec2::new(304.8, 609.6), r: 152.4 }, None).unwrap();
+        file.push(cut, DxfShape::Arc { c: Vec2::new(914.4, 0.0), r: 304.8, a0: 0.0, a1: 90.0 }, None).unwrap();
+        file.push(file.default_layer(), DxfShape::Text { at: Vec2::new(0.0, 304.8), height: 30.48, angle_deg: 0.0, text: "50% at 90°".into() }, None)
+            .unwrap();
+        file
+    }
+
+    #[test]
+    fn every_unit_writes_its_insunits_and_its_lengths_and_reads_back_in_millimetres() {
+        let file = mixed_file();
+        let millimetres = write_dxf_file(&file).unwrap();
+        assert_eq!(write_dxf_file_as(&file, DxfOutput::default()).unwrap(), millimetres);
+        let extmax = |text: &str| {
+            let p = pairs(text);
+            let i = p.iter().position(|(c, v)| (*c, v.as_str()) == (9, "$EXTMAX")).unwrap();
+            [p[i + 1].1.parse::<f64>().unwrap(), p[i + 2].1.parse::<f64>().unwrap()]
+        };
+        for units in DxfUnits::ALL {
+            let mm = units.mm_per_unit();
+            let text = write_dxf_file_as(&file, DxfOutput { units, version: DxfVersion::Ac1015 }).unwrap();
+            let p = pairs(&text);
+            let after = |var: &str| p[p.iter().position(|(c, v)| (*c, v.as_str()) == (9, var)).unwrap() + 1].clone();
+            assert_eq!(after("$INSUNITS"), (70, units.insunits().to_string()), "{units:?}");
+            assert_eq!(after("$MEASUREMENT"), (70, if units.imperial() { "0" } else { "1" }.to_string()), "{units:?}");
+            let e = entities(&text);
+            assert!(near(&values(&e[1], 11), &[609.6 / mm]) && near(&values(&e[2], 40), &[152.4 / mm]), "{units:?}");
+            assert!(near(&values(&e[3], 50), &[0.0]) && near(&values(&e[3], 51), &[90.0]), "angles are not lengths: {units:?}");
+            assert!(near(&values(&e[4], 40), &[30.48 / mm]), "a text height is a length: {units:?}");
+            let [x, y] = extmax(&text);
+            let [mx, my] = extmax(&millimetres);
+            assert!((x * mm - mx).abs() < 1e-6 && (y * mm - my).abs() < 1e-6, "{units:?}: extents");
+            // The strict reader scales back to the same millimetre model.
+            let back = read_dxf_file(&text).unwrap();
+            for (read, wrote) in back.entities().iter().zip(file.entities()) {
+                let mut a = Vec::new();
+                let mut b = Vec::new();
+                read.geometry().sample(&mut a).unwrap();
+                wrote.geometry().sample(&mut b).unwrap();
+                assert!(a.len() == b.len() && a.iter().zip(&b).all(|(p, q)| p.dist(*q) < 1e-6), "{units:?}: {read:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn release_12_writes_the_entities_it_holds_and_refuses_the_rest_by_name() {
+        let file = mixed_file();
+        let text = write_dxf_file_as(&file, DxfOutput { units: DxfUnits::Inches, version: DxfVersion::R12 }).unwrap();
+        let expected = [
+            (0, "SECTION"),
+            (2, "HEADER"),
+            (9, "$INSUNITS"),
+            (70, "1"),
+            (0, "ENDSEC"),
+            (0, "SECTION"),
+            (2, "ENTITIES"),
+            (0, "POINT"),
+            (8, "0"),
+            (10, "12.0"),
+            (20, "0.0"),
+            (0, "LINE"),
+            (8, "CUT"),
+            (10, "0.0"),
+            (20, "0.0"),
+            (11, "24.0"),
+            (21, "0.0"),
+            (0, "CIRCLE"),
+            (8, "CUT"),
+            (10, "12.0"),
+            (20, "24.0"),
+            (40, "6.0"),
+            (0, "ARC"),
+            (8, "CUT"),
+            (10, "36.0"),
+            (20, "0.0"),
+            (40, "12.0"),
+            (50, "0.0"),
+            (51, "90.0"),
+            (0, "TEXT"),
+            (8, "0"),
+            (10, "0.0"),
+            (20, "12.0"),
+            (40, "1.2"),
+            (1, "50%%% at 90%%d"),
+            (50, "0.0"),
+            (72, "1"),
+            (11, "0.0"),
+            (21, "12.0"),
+            (0, "ENDSEC"),
+            (0, "EOF"),
+        ];
+        let written = pairs(&text);
+        assert_eq!(written, expected.map(|(c, v)| (c, v.to_string())));
+        // Both readers take release 12 back to the millimetre model. Release 12 names layers
+        // without a LAYER table, as before, so only layer 0 passes the strict reader.
+        assert!(matches!(&read_dxf(&text).unwrap()[..], [Geom2::Point(_), Geom2::Line(_, b), ..] if b.dist(Vec2::new(609.6, 0.0)) < 1e-9));
+        let mut zero = DxfFile::new().unwrap();
+        zero.push(zero.default_layer(), DxfShape::Line(Vec2::ZERO, Vec2::new(609.6, 0.0)), None).unwrap();
+        let inches = write_dxf_file_as(&zero, DxfOutput { units: DxfUnits::Inches, version: DxfVersion::R12 }).unwrap();
+        assert!(
+            matches!(read_dxf_file(&inches).unwrap().entities()[0].geometry(), DxfShape::Line(a, b) if *a == Vec2::ZERO && b.dist(Vec2::new(609.6, 0.0)) < 1e-9)
+        );
+
+        let ellipse = DxfShape::Ellipse { c: Vec2::ZERO, major: Vec2::new(25.0, 0.0), ratio: 0.48, t0: 0.0, t1: FRAC_PI_2 };
+        let spline = bezier_spline(&[Vec2::ZERO, Vec2::new(1.0, 2.0), Vec2::X], None);
+        let polyline = DxfShape::LwPolyline { verts: vec![(Vec2::ZERO, 0.5), (Vec2::X, 0.0)], closed: false };
+        let long = DxfShape::Text { at: Vec2::ZERO, height: 2.5, angle_deg: 0.0, text: "a\nb".into() };
+        for (shape, kind) in [(ellipse, "ELLIPSE"), (spline, "SPLINE"), (polyline, "LWPOLYLINE"), (long, "MTEXT")] {
+            let mut file = mixed_file();
+            file.push(file.default_layer(), shape, None).unwrap();
+            let error = write_dxf_file_as(&file, DxfOutput { units: DxfUnits::Millimetres, version: DxfVersion::R12 }).unwrap_err().to_string();
+            assert!(error.contains("DXF entity 6") && error.contains(&format!("not in DXF R12: {kind}")), "{error}");
+        }
     }
 }
