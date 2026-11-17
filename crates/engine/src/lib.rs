@@ -1616,9 +1616,11 @@ impl Session {
             // mean the same copies read source by source. The copies of a source the pattern
             // left out keep the names stored for them, in their places.
             let left_out = r.state.pattern_left_out(f.id);
-            if f.pins_every_body_name() && (f.pattern_names_in_order || made.len() != f.body_names.len() || !left_out.is_empty()) {
+            let layout = r.state.pattern_body_layout(f.id);
+            if layout.is_some() || f.pins_every_body_name() && (f.pattern_names_in_order || made.len() != f.body_names.len() || !left_out.is_empty())
+            {
                 let made: Vec<String> = made.iter().map(|n| n.to_string()).collect();
-                let names = f.pattern_pins(&made, left_out).map_or(made, |(names, _)| names);
+                let names = f.pattern_pins(&made, left_out, layout).map_or(made, |(names, _)| names);
                 if f.pattern_names_in_order || names != f.body_names {
                     pins.push((f.id, names));
                 }

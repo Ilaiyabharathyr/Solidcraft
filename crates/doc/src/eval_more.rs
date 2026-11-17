@@ -1305,9 +1305,10 @@ pub(super) fn sheet_cut_copy(
     st: &mut ModelState,
     tools: &[Body],
     targets: &[String],
+    partial: bool,
     warning: &mut Option<String>,
 ) -> Result<Vec<String>> {
-    if !any_eligible_sheet(f, st, targets) {
+    if tools.is_empty() || !any_eligible_sheet(f, st, targets) {
         return Ok(Vec::new());
     }
     let Some(cut) = extrude_cut(st, src)? else { return Ok(Vec::new()) };
@@ -1319,6 +1320,14 @@ pub(super) fn sheet_cut_copy(
         return Ok(Vec::new());
     }
     let Some(plane) = Plane::new(apply_point(m, cut.plane.origin), x, y) else { return Ok(Vec::new()) };
+    if partial {
+        // The complete sketch also contains the skipped profiles. Only the certified
+        // footprints of the remaining tools can describe the cut in the flat pattern.
+        if !tools.iter().all(|tool| sheet_tool_span(tool, &plane).is_some_and(|(_, _, _, footprint)| footprint.is_some())) {
+            return Ok(Vec::new());
+        }
+        return sheet_prism_cut(f, st, &plane, &[], cut.operation, tools, targets, None, true, &[], warning);
+    }
     sheet_prism_cut(f, st, &plane, &cut.regions, cut.operation, tools, targets, None, cut.bound, &cut.text, warning)
 }
 

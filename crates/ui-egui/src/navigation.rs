@@ -965,14 +965,15 @@ fn handle_input(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &egui::
         };
         let openscad_orbit =
             app.preferences.nav == crate::prefs::OPENSCAD_NAV && app.tool.is_none() && app.dialog.is_none() && !mods.shift && empty_space(app);
-        let preset = if app.preferences.nav != crate::prefs::OPENSCAD_NAV || openscad_orbit {
+        let skip_picking = crate::pattern_skip::active(app);
+        let preset = if !skip_picking && (app.preferences.nav != crate::prefs::OPENSCAD_NAV || openscad_orbit) {
             crate::prefs::nav_mode(app, crate::prefs::NavButton::Left, mods)
         } else {
             None
         };
         // Ctrl+left drag from empty space orbits in every preset (Cmd on macOS). A Ctrl+click
         // still selects, and Ctrl on geometry still drags it without snapping.
-        let ctrl_orbit = (mods.ctrl || mods.command) && !mods.shift && !mods.alt && empty_space(app);
+        let ctrl_orbit = !skip_picking && (mods.ctrl || mods.command) && !mods.shift && !mods.alt && empty_space(app);
         app.viewport.primary_nav = preset.or(ctrl_orbit.then_some(NavMode::Orbit));
     } else if zoom_drag || (!primary_down && !primary_released) {
         app.viewport.primary_nav = None;

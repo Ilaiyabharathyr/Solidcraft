@@ -1499,6 +1499,66 @@ fn rectangular_pattern_groups_each_direction_in_the_same_order() {
 }
 
 #[test]
+fn rectangular_pattern_reference_keeps_its_pick_and_offset_on_edit() {
+    let mut h = Harness::new();
+    h.app.home.open = false;
+    for (command, params) in [
+        ("parameters.add", json!({"name": "margin", "expression": "10 mm"})),
+        ("solid.box", json!({"length": 200, "width": 30, "height": 10, "body_name": "Plate"})),
+        ("solid.hole", json!({"position": [10, 15, 10], "diameter": 4, "name": "Seed hole"})),
+    ] {
+        h.app.run(command, params).unwrap();
+    }
+    let seed = h.app.session.doc.find_feature("Seed hole").unwrap().id;
+    let edge = edge_sel_on(&h.app.session, Some("Plate"), Vec3::new(200.0, 15.0, 10.0)).unwrap();
+    h.app.start("solid.pattern.rectangular");
+    h.frames(4);
+    mirror_object_type(&mut h, "Features");
+    {
+        let d = h.app.dialog.as_mut().unwrap();
+        d.inputs[0].items.push(Sel::Feature { id: seed });
+        d.inputs[1].items.push(Sel::Axis { name: "X".into() });
+        if let Kind::PatternRect { count, .. } = &mut d.kind {
+            *count = "7".into();
+        }
+        d.extra.insert("reversed".into(), json!(true));
+    }
+    h.step(&json!({"click": {"handle": "dialog:ui.pattern_end_condition"}})).unwrap();
+    h.step(&json!({"click": {"handle": "dialog:ui.pattern_end_condition:ui.pattern_up_to_reference"}})).unwrap();
+    {
+        let d = h.app.dialog.as_mut().unwrap();
+        assert_eq!(Some(d.active), d.pattern_reference_input(0));
+        assert!(d.pattern_reference_input(1).is_none());
+        assert!(d.primary().is_none());
+        d.pick(&h.app.session, edge);
+    }
+    h.frames(2);
+    h.step(&json!({"click": {"handle": "dialog:ui.pattern_offset_from"}})).unwrap();
+    h.step(&json!({"key": "A", "cmd": true})).unwrap();
+    h.step(&json!({"text": "margin"})).unwrap();
+    let command = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+    let params = &command[0].1;
+    assert_eq!(params["count1"], json!("7"));
+    assert_eq!(params["reference1"]["edge"], json!([200.0, 15.0, 10.0]));
+    assert_eq!(params["offset1"], json!("margin"));
+    assert!(params.get("spacing1").is_none());
+    assert!(params.get("reversed").is_none());
+    h.step(&json!({"click": {"handle": "dialog:OK"}})).unwrap();
+    h.settle();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog.as_ref().and_then(|d| d.error.as_ref()));
+    let f = h.app.session.doc.features.last().unwrap();
+    let saved = serde_json::to_value(&f.kind).unwrap();
+    let d = for_feature(&h.app, f.id, None).unwrap();
+    let input = d.pattern_reference_input(0).unwrap();
+    assert!(matches!(d.inputs[input].items.as_slice(), [Sel::Edge { .. }]));
+    let command = apply_commands(&h.app, &d).unwrap();
+    let params = &command[0].1["params"];
+    assert_eq!(params["reference1"], saved["pattern"]["reference1"]["target"]);
+    assert_eq!(params["offset1"], json!("margin"));
+    assert!(params.get("spacing1").is_none());
+}
+
+#[test]
 fn coil_from_a_profile_hides_the_primitive_section() {
     let h = fixture();
     let mut d = Dialog::for_command(&h.app, "solid.coil").unwrap();

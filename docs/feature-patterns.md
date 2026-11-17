@@ -1,6 +1,6 @@
 # Feature mirrors and patterns
 
-Choose **Mirror**, **Rectangular Pattern** or **Circular Pattern** from the Solid
+Choose **Mirror**, **Rectangular Pattern**, **Circular Pattern** or **Pattern on Path** from the Solid
 Create panel and set **Object Type** to **Features**. Select the source features
 in the timeline or pick their faces in the viewport. Selecting features before
 starting the command fills the Features input automatically.
@@ -18,6 +18,30 @@ Rectangular feature patterns have two direction columns, each with Quantity,
 Spacing, Flip and Center controls. Directions can meet at any angle. A missing
 second direction produces a single row. Direction vectors are saved with the
 feature; editing a picked guide later does not change these saved vectors.
+
+For each direction, choose **Up to reference** to space the instances evenly
+towards a selected straight edge, planar face or construction plane. For an edge,
+pick one perpendicular to the pattern direction. **Offset from** is the distance
+to leave before the reference, measured along that direction. The seed stays in
+place. For a single hole, the offset is measured from the last hole's centre.
+For bodies and other supported features it is measured from the centre of the
+seed geometry's bounds. The saved reference and offset are used again on rebuild.
+
+For example, start with a hole centred 10 mm from the near end of a 200 mm plate.
+Select the far edge, set **Offset from** to 10 mm and **Quantity** to 7. The hole
+centres land at 10, 40, 70, 100, 130, 160 and 190 mm.
+
+In a rectangular, circular or path pattern, turn on **Instances to skip** to
+pick individual copies in the viewport. An extrude cut with separate hole
+profiles has a numbered marker at each copied opening. Each hole can be skipped
+independently. Green markers stay in the pattern and red markers are skipped. Click a marker to
+toggle it, or choose **Lasso** or **Box** and enclose several markers. Hold
+**Shift** to skip the selected copies or **Alt** to restore them. **Skipped**
+lists the copy numbers. Use its **Restore** buttons for individual copies or
+**Clear skipped instances** for all copies. The original is instance 1.
+A rectangular exclusion follows its grid position and source member as the
+quantities change. If the position falls outside the grid, the exclusion takes
+effect again when the position returns.
 
 Circular feature patterns have Quantity, Total angle, Flip and Center controls.
 Six instances over 90 degrees use 18-degree steps, including both ends of the
@@ -45,5 +69,5 @@ The command forms share sketch patterns' alignment names:
 ```
 
 Omitted alignments default to `right`, and omitted reversals to `false`, preserving
-older designs. `left` is also accepted by the command API. New placement values
-are stored through the pending document-format migration.
+older designs. In spacing mode the command API also accepts `left`. With a
+reference, the pattern automatically runs towards the selected geometry.

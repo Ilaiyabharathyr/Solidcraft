@@ -365,6 +365,34 @@ fn edge_pick<'a>(st: &'a ModelState, at: Vec3, name: &Option<String>) -> Result<
     }
 }
 
+/// A rectangular pattern end needs the exact line of a straight model edge.
+pub(crate) fn pattern_end_edge(st: &ModelState, at: Vec3, name: Option<&str>) -> Result<(Vec3, Vec3)> {
+    let straight = |body: &ModelBody, index| match kernel::edge_path(&body.body, index).ok()?.as_slice() {
+        [kernel::PathSeg::Line { a, b }] => Some((*a, *b)),
+        _ => None,
+    };
+    let edge = if let Some(name) = name {
+        let (body, hit) = bodies(st)
+            .filter_map(|b| crate::naming::locate_edge(b, name, at).ok().map(|hit| (b, hit)))
+            .min_by(|(_, a), (_, b)| a.point.dist(at).total_cmp(&b.point.dist(at)))
+            .ok_or_else(|| DocError::reselect(name))?;
+        straight(body, hit.edge)
+    } else {
+        bodies(st)
+            .flat_map(|b| {
+                let tol = (b.body.size() * 1e-6).max(1e-6);
+                (0..b.body.edge_count()).filter_map(move |i| {
+                    let (a, b) = straight(b, i)?;
+                    let d = at.dist_to_segment(a, b);
+                    (d <= tol).then_some((d, a, b))
+                })
+            })
+            .min_by(|(a, ..), (b, ..)| a.total_cmp(b))
+            .map(|(_, a, b)| (a, b))
+    };
+    edge.and_then(|(a, b)| (b - a).normalized().map(|d| (a, d))).ok_or_else(|| bad("the pattern reference must be a straight edge"))
+}
+
 /// The closest point on a polyline to `target`, projecting onto each segment rather than
 /// choosing only its vertices. This keeps an edge pick on the edge between tessellation points.
 fn closest_point_on_polyline(pts: &[Vec3], target: Vec3) -> Option<Vec3> {

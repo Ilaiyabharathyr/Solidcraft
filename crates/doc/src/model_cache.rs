@@ -381,6 +381,7 @@ impl Writer {
             "blend_edges": serde_json::to_value(&st.blend_edges).ok()?, "fitted": serde_json::to_value(&st.fitted).ok()?,
             "tapered": serde_json::to_value(&st.tapered).ok()?,
             "pattern_left_out": serde_json::to_value(&st.pattern_left_out).ok()?,
+            "pattern_body_layouts": serde_json::to_value(&st.pattern_body_layouts).ok()?,
         });
         self.states.push(r);
         self.state_index.insert(id, self.states.len() - 1);
@@ -702,6 +703,10 @@ impl SavedModel {
                 tapered: serde_json::from_value(field("tapered")?).map_err(invalid)?,
                 // Older saved models have none: their patterns left no body out.
                 pattern_left_out: match s.get("pattern_left_out") {
+                    Some(v) => serde_json::from_value(v.clone()).map_err(invalid)?,
+                    None => BTreeMap::new(),
+                },
+                pattern_body_layouts: match s.get("pattern_body_layouts") {
                     Some(v) => serde_json::from_value(v.clone()).map_err(invalid)?,
                     None => BTreeMap::new(),
                 },

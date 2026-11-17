@@ -13,7 +13,9 @@ use solidcore_record::Vec3;
 use solidcraft_engine::Sel;
 use solidcraft_engine::Session;
 use solidcraft_engine::doc::expr::Kind as ValueKind;
-use solidcraft_engine::doc::{AxisRef, Direction, FeatureKind, FilletStyle, HoleKind, Operation, PatternKind, PlaneRef, ProfileSel, ThinSide};
+use solidcraft_engine::doc::{
+    AxisRef, Direction, FeatureKind, FilletStyle, HoleKind, Operation, PatternKind, PatternMember, PlaneRef, ProfileSel, ThinSide,
+};
 use solidcraft_engine::geom::Aabb3;
 
 use crate::SolveApp;
@@ -605,6 +607,13 @@ pub struct Dialog {
     pub(crate) chain_applied: bool,
     /// A pattern's objects of the Object Type not shown now, restored when it is chosen again.
     pub(crate) other_objects: Vec<Sel>,
+    /// Whole rectangular pattern placements skipped by designs saved before member selection.
+    skipped_pattern_slots: Vec<usize>,
+    /// Individual members left out of their pattern copies.
+    skipped_pattern_members: Vec<PatternMember>,
+    /// The pattern's temporary viewport selection mode.
+    pattern_skip_selecting: bool,
+    pattern_skip_lasso_mode: bool,
     /// The multi-pick input whose picked items are listed under it, each removable (#3683).
     pub(crate) listed: Option<usize>,
     /// The listed item (and its input) whose row is under the pointer: the view lights it as a
@@ -892,6 +901,10 @@ impl Dialog {
             picked_edges: Vec::new(),
             chain_applied,
             other_objects: Vec::new(),
+            skipped_pattern_slots: Vec::new(),
+            skipped_pattern_members: Vec::new(),
+            pattern_skip_selecting: false,
+            pattern_skip_lasso_mode: true,
             listed: None,
             list_hover: None,
             shell_chain: Default::default(),
@@ -1530,6 +1543,7 @@ impl Dialog {
     pub fn primary(&mut self) -> Option<(&'static str, ValueKind, &mut String)> {
         let move_field = crate::dialogs_move::value_field(self);
         let through_point = offset_through_point(self).is_some();
+        let pattern_to_reference = self.pattern_reference_input(0).is_some();
         Some(match &mut self.kind {
             Kind::Extrude { to_offset, .. } if to_object_on(&self.inputs) => ("To Offset", ValueKind::Length, to_offset),
             Kind::Extrude { distance, .. } => ("Distance", ValueKind::Length, distance),
@@ -1568,6 +1582,7 @@ impl Dialog {
                     _ => ("X", ValueKind::Length, x),
                 },
             },
+            Kind::PatternRect { .. } if pattern_to_reference => return None,
             Kind::PatternRect { spacing, .. } => ("Spacing", ValueKind::Length, spacing),
             Kind::PatternCirc { angle, .. } => ("Angle", ValueKind::Angle, angle),
             Kind::Section { offset, .. } => ("Distance", ValueKind::Length, offset),
@@ -1599,6 +1614,47 @@ impl Dialog {
 
     pub fn active_input(&self) -> Option<&SelInput> {
         self.inputs.get(self.active)
+    }
+
+    pub(crate) fn pattern_reference_input(&self, direction: usize) -> Option<usize> {
+        let label = *PATTERN_REFERENCE_LABELS.get(direction)?;
+        self.inputs.iter().position(|input| input.label == label)
+    }
+
+    fn pattern_skip_command(&self) -> Option<&'static str> {
+        match self.kind {
+            Kind::PatternRect { .. } | Kind::PatternCirc { .. } | Kind::PathPattern { .. } => dense::command(&self.kind),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn pattern_skip_active(&self) -> bool {
+        self.pattern_skip_command().is_some() && self.pattern_skip_selecting && !self.collapsed && !self.awaiting_pick
+    }
+
+    pub(crate) fn pattern_skip_lasso(&self) -> bool {
+        self.pattern_skip_lasso_mode
+    }
+
+    pub(crate) fn pattern_skipped(&self) -> (&[usize], &[PatternMember]) {
+        (&self.skipped_pattern_slots, &self.skipped_pattern_members)
+    }
+
+    pub(crate) fn has_pattern_skips(&self) -> bool {
+        !self.skipped_pattern_slots.is_empty() || !self.skipped_pattern_members.is_empty()
+    }
+
+    pub(crate) fn set_pattern_skipped(&mut self, mut slots: Vec<usize>, mut members: Vec<PatternMember>) {
+        slots.retain(|&number| number > 1);
+        slots.sort_unstable();
+        slots.dedup();
+        members.sort_unstable();
+        members.dedup();
+        self.skipped_pattern_slots = slots;
+        self.skipped_pattern_members = members;
+        if !self.has_pattern_skips() {
+            self.extra.remove("skip_width");
+        }
     }
 
     /// The chat's picker takes a step or a body clicked in the History or the Browser into the
@@ -3197,6 +3253,8 @@ fn placement_row(d: &mut Dialog, ui: &mut egui::Ui, app: &SolveApp) {
             d.kind = kind;
             d.inputs = inputs;
             d.extra.clear();
+            d.set_pattern_skipped(Vec::new(), Vec::new());
+            d.pattern_skip_selecting = false;
             d.advance();
         }
         object_type_row(d, ui);
@@ -3411,12 +3469,17 @@ fn stored_input_reference_key(d: &Dialog, index: usize) -> Option<&'static str> 
     if matches!(d.kind, Kind::Section { .. }) && index == 0 {
         return Some("plane");
     }
+    if matches!(d.kind, Kind::PatternRect { .. }) {
+        return match index {
+            1 => Some("dir1"),
+            2 => Some("dir2"),
+            _ => (0..2).find(|&direction| d.pattern_reference_input(direction) == Some(index)).map(|direction| PATTERN_REFERENCES[direction]),
+        };
+    }
     if !d.inputs.first().is_some_and(|i| i.accept == selection::FEATURES) {
         return None;
     }
     match (&d.kind, index) {
-        (Kind::PatternRect { .. }, 1) => Some("dir1"),
-        (Kind::PatternRect { .. }, 2) => Some("dir2"),
         (Kind::PatternCirc { .. }, 1) => Some("axis"),
         _ => None,
     }
@@ -3467,7 +3530,7 @@ pub(crate) fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, n
         let stored_reference = stored_input_reference_key(d, i).and_then(|key| d.extra.get(key)).filter(|_| inp.items.is_empty());
         form_row(ui, inp.label, |ui| {
             ui.horizontal(|ui| {
-                let active = i == d.active && !text_focus;
+                let active = i == d.active && !text_focus && !d.pattern_skip_active();
                 // A chip: "↖ Select" (outlined) while empty, "N selected" (filled) once picked.
                 let custom_axis = i == 1 && inp.items.is_empty() && stored_revolve_axis(&d.kind).is_some();
                 let filled = !inp.items.is_empty() || custom_axis || stored_reference.is_some();
@@ -3476,6 +3539,8 @@ pub(crate) fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, n
                         solidcraft_ui_text::tr("ui.viewport_status_section_plane").into()
                     } else if stored_reference.is_some() && matches!(d.kind, Kind::OffsetPlane { .. }) {
                         solidcraft_ui_text::tr("sketch_panel.plane_fixed").into()
+                    } else if stored_reference.is_some() && PATTERN_REFERENCE_LABELS.contains(&inp.label) {
+                        solidcraft_ui_text::tr("ui.pattern_saved_reference").into()
                     } else if custom_axis || stored_reference.is_some() {
                         solidcraft_ui_text::tr("dialog.custom_axis").into()
                     } else if !inp.multi {
@@ -3583,6 +3648,7 @@ pub(crate) fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, n
     }
     if let Some(i) = activate {
         d.active = i;
+        d.pattern_skip_selecting = false;
         // A click into the Profiles box is a choice to add profiles by pick (Extrude's automatic To Object).
         if let Kind::Extrude { smart, .. } = &mut d.kind {
             smart.profiles_chosen = i == 0;
@@ -3591,6 +3657,7 @@ pub(crate) fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, n
         d.pick_refused = None;
     }
     if let Some(i) = clear {
+        d.pattern_skip_selecting = false;
         if let Some(key) = stored_input_reference_key(d, i) {
             d.extra.remove(key);
         }
@@ -5030,6 +5097,33 @@ fn set_to_object(inputs: &mut Vec<SelInput>, active: &mut usize, on: bool) {
     set_object(inputs, active, TO_OBJECT, on);
 }
 
+const PATTERN_REFERENCE_LABELS: [&str; 2] = ["ui.pattern_reference_1", "ui.pattern_reference_2"];
+const PATTERN_REFERENCES: [&str; 2] = ["reference1", "reference2"];
+const PATTERN_OFFSETS: [&str; 2] = ["offset1", "offset2"];
+const PATTERN_REFERENCE_TIP: &str = "ui.pattern_reference_tip";
+
+fn set_pattern_reference(d: &mut Dialog, direction: usize, on: bool) {
+    let previous = d.pattern_reference_input(direction);
+    set_object_accepting(&mut d.inputs, &mut d.active, PATTERN_REFERENCE_LABELS[direction], EDGES | PLANAR_FACES | PLANES, on);
+    if on {
+        if let Some(input) = d.pattern_reference_input(direction).and_then(|index| d.inputs.get_mut(index)) {
+            input.tip = Some(PATTERN_REFERENCE_TIP);
+        }
+        if previous.is_none() {
+            d.pattern_skip_selecting = false;
+            d.awaiting_pick = true;
+            d.pick_refused = None;
+        }
+    } else {
+        d.extra.remove(PATTERN_REFERENCES[direction]);
+        d.extra.remove(PATTERN_OFFSETS[direction]);
+        if previous.is_some() {
+            d.awaiting_pick = false;
+            d.pick_refused = None;
+        }
+    }
+}
+
 /// A personal preset remembers the extent mode, never its destination geometry.
 pub(crate) fn preset_to_object(d: &mut Dialog, on: bool) {
     set_to_object(&mut d.inputs, &mut d.active, on);
@@ -5924,6 +6018,21 @@ pub fn preview_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value
     Ok(cmds)
 }
 
+/// The unwrapped pattern command, with every member enabled for viewport picking.
+pub(crate) fn pattern_skip_params(app: &SolveApp, d: &Dialog) -> Option<(&'static str, Value)> {
+    let pattern = d.pattern_skip_command()?;
+    let (cmd, mut params) = apply_commands(app, d).ok()?.into_iter().next()?;
+    if cmd == "timeline.redefine" && params.get("command")?.as_str() == Some(pattern) {
+        params = params.get_mut("params")?.take();
+    } else if cmd != pattern {
+        return None;
+    }
+    let fields = params.as_object_mut()?;
+    fields.remove("skip");
+    fields.remove("skip_members");
+    Some((pattern, params))
+}
+
 /// A wrapped Emboss edit keeps its profile guide in the saved author occurrence.
 /// An invalid saved context must not draw the guide at a different occurrence.
 pub(crate) fn emboss_profile_plane(app: &SolveApp, sketch: u64) -> Result<Option<solidcore_record::Plane>, String> {
@@ -6264,8 +6373,9 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                 (None, Some(k)) => k,
                 (None, None) => return Err("select a direction (an axis, a sketch line or a straight edge) first".into()),
             };
-            let mut p = json!({"dir1": pt(d1), "count1": count, "spacing1": spacing});
+            let mut p = json!({"dir1": pt(d1), "count1": count});
             pattern_objects(s, sels(d, 0), &mut p);
+            pattern_spacing_params(app, d, &mut p, 0, spacing)?;
             let kept2 = d.extra.get("dir2").and_then(|v| serde_json::from_value::<[f64; 3]>(v.clone()).ok()).map(|a| Vec3::new(a[0], a[1], a[2]));
             let d2 = match sels(d, 2).first() {
                 Some(x) => Some(axis_of(app, x).ok_or("the second direction must be an axis, a sketch line or a straight edge")?.1),
@@ -6274,7 +6384,12 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
             if let Some(d2) = d2 {
                 p["dir2"] = pt(d2);
                 p["count2"] = json!(count2);
-                p["spacing2"] = json!(spacing2);
+                pattern_spacing_params(app, d, &mut p, 1, spacing2)?;
+            } else if d.pattern_reference_input(1).is_some() {
+                return Err(solidcraft_ui_text::tr("ui.pattern_reference_direction_2").into());
+            }
+            if !d.skipped_pattern_slots.is_empty() {
+                p["skip"] = json!(d.skipped_pattern_slots);
             }
             ("solid.pattern.rectangular", p)
         }
@@ -6974,6 +7089,9 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
     let mut params = params;
     d.kind.fill_simple_params(&mut params);
     if let Value::Object(m) = &mut params {
+        if d.pattern_skip_command().is_some() && !d.skipped_pattern_members.is_empty() {
+            m.insert("skip_members".into(), json!(d.skipped_pattern_members));
+        }
         // A fillet option that doesn't apply with the others is never sent.
         let fillet = matches!(d.kind, Kind::Fillet { chamfer: false, .. });
         for (k, v) in &d.extra {
@@ -6982,6 +7100,12 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                 continue;
             }
             if fillet && !dense::fillet_option_applies(&d.extra, k) {
+                continue;
+            }
+            if matches!(d.kind, Kind::PatternRect { .. })
+                && ((d.pattern_reference_input(0).is_some() && matches!(k.as_str(), "alignment" | "reversed"))
+                    || (d.pattern_reference_input(1).is_some() && matches!(k.as_str(), "alignment2" | "reversed2")))
+            {
                 continue;
             }
             m.entry(k.clone()).or_insert_with(|| v.clone());
@@ -7069,6 +7193,24 @@ fn pattern_objects(s: &Session, objects: &[Sel], p: &mut Value) {
     } else {
         p["bodies"] = json!(objects.body_names());
     }
+}
+
+/// A reference determines the step in place of an explicit spacing. Prefer the saved reference
+/// until the user makes a new pick, even when the old reference can no longer be displayed.
+fn pattern_spacing_params(app: &SolveApp, d: &Dialog, params: &mut Value, direction: usize, spacing: &str) -> Result<(), String> {
+    let Some(index) = d.pattern_reference_input(direction) else {
+        params[if direction == 0 { "spacing1" } else { "spacing2" }] = json!(spacing);
+        return Ok(());
+    };
+    let key = PATTERN_REFERENCES[direction];
+    params[key] = match (d.extra.get(key), sels(d, index).first()) {
+        (Some(saved), _) => saved.clone(),
+        (None, Some(pick)) => construct_ref(app, pick)?,
+        (None, None) => return Err(solidcraft_ui_text::tr(PATTERN_REFERENCE_TIP).into()),
+    };
+    let offset = PATTERN_OFFSETS[direction];
+    params[offset] = d.extra.get(offset).cloned().unwrap_or_else(|| json!("0"));
+    Ok(())
 }
 
 fn pattern_features(s: &Session, objects: &[Sel]) -> Vec<String> {
@@ -7359,18 +7501,22 @@ thread_local! {
 }
 
 /// While filling a dialog from a feature (dropped at the end).
-struct Refill;
+struct Refill(bool);
 
 impl Refill {
-    fn start() -> Refill {
-        REFILL.with(|r| r.set(true));
-        Refill
+    fn start() -> Self {
+        Self(REFILL.with(|r| r.replace(true)))
+    }
+
+    /// Temporarily resolve a pick that is already in world coordinates.
+    fn world() -> Self {
+        Self(REFILL.with(|r| r.replace(false)))
     }
 }
 
 impl Drop for Refill {
     fn drop(&mut self) {
-        REFILL.with(|r| r.set(false));
+        REFILL.with(|r| r.set(self.0));
     }
 }
 
@@ -7727,6 +7873,22 @@ fn saved_pick(s: &Session, reference: &solidcraft_engine::doc::construct::GeoRef
     })
 }
 
+fn pattern_reference_sel(s: &Session, reference: &solidcraft_engine::doc::construct::GeoRef) -> Option<Sel> {
+    use solidcraft_engine::doc::construct::GeoRef;
+    match reference {
+        GeoRef::Datum { datum } | GeoRef::Plane { plane: PlaneRef::Datum { datum } } => {
+            s.origin_plane(&datum.key())?;
+            Some(Sel::Plane { name: datum.key() })
+        }
+        GeoRef::Plane { plane: plane @ (PlaneRef::Origin { .. } | PlaneRef::Construction { .. }) } => plane_sel(s, plane),
+        GeoRef::Edge { .. } | GeoRef::Face { .. } => {
+            let _world = Refill::world();
+            model_axis_sel(s, reference)
+        }
+        _ => None,
+    }
+}
+
 /// A stored construction reference back into a dialog pick.
 fn geo_sel(s: &Session, g: &solidcraft_engine::doc::construct::GeoRef) -> Option<Sel> {
     match g {
@@ -7823,7 +7985,11 @@ fn pt_expr(p: &solidcraft_engine::doc::PointExpr) -> Value {
 pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dialog> {
     let _refill = Refill::start();
     let s = &app.session;
-    let f = s.doc.feature(id)?.clone();
+    let mut f = s.doc.feature(id)?.clone();
+    if f.component != 0 && matches!(f.kind, FeatureKind::Pattern { pattern: PatternKind::Rectangular { .. } | PatternKind::Circular { .. }, .. }) {
+        // The dialog and command receive world geometry, while the saved pattern is local.
+        f.kind.transform_geometry(&feature_frame(s, f.component));
+    }
     let st = crate::open_meshing::session_world(s);
     let start = |cmd: &str| Dialog::for_command(app, cmd);
     let mut d = match &f.kind {
@@ -8441,15 +8607,35 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                 copied.iter().enumerate().map(|(k, name)| Sel::Body { name: world(k, name) }).collect()
             };
             let mut d = match pattern {
-                PatternKind::Rectangular { dir1, count1, spacing1, dir2, count2, spacing2, alignment, alignment2, reversed, reversed2 } => {
+                PatternKind::Rectangular {
+                    dir1,
+                    count1,
+                    spacing1,
+                    dir2,
+                    count2,
+                    spacing2,
+                    alignment,
+                    alignment2,
+                    reversed,
+                    reversed2,
+                    reference1,
+                    reference2,
+                    skip,
+                    skip_width,
+                    skip_members,
+                } => {
                     let mut d = start("solid.pattern.rectangular")?;
                     d.extra.insert("alignment".into(), json!(alignment));
                     d.extra.insert("alignment2".into(), json!(alignment2));
                     d.extra.insert("reversed".into(), json!(reversed));
                     d.extra.insert("reversed2".into(), json!(reversed2));
+                    d.set_pattern_skipped(skip.clone(), skip_members.clone());
+                    if let Some(width) = skip_width {
+                        d.extra.insert("skip_width".into(), json!(width));
+                    }
                     d.kind = Kind::PatternRect {
                         count: count1.to_string(),
-                        spacing: spacing1.to_string(),
+                        spacing: if reference1.is_some() { length_default(s, "20") } else { spacing1.to_string() },
                         count2: count2.as_deref().map(str::to_string).unwrap_or_else(|| "1".into()),
                         spacing2: spacing2.as_deref().map(str::to_string).unwrap_or_else(|| length_default(s, "20")),
                     };
@@ -8467,12 +8653,23 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                             }
                         }
                     }
+                    for (direction, reference) in [reference1, reference2].into_iter().enumerate() {
+                        let Some(reference) = reference else { continue };
+                        set_pattern_reference(&mut d, direction, true);
+                        d.extra.insert(PATTERN_REFERENCES[direction].into(), serde_json::to_value(&reference.target).ok()?);
+                        d.extra.insert(PATTERN_OFFSETS[direction].into(), json!(reference.offset.to_string()));
+                        if let Some(input) = d.pattern_reference_input(direction).and_then(|index| d.inputs.get_mut(index)) {
+                            input.items = pattern_reference_sel(s, &reference.target).into_iter().collect();
+                        }
+                    }
+                    d.awaiting_pick = false;
                     d
                 }
-                PatternKind::Circular { origin, axis, count, angle, alignment, reversed, axis_ref, axis_feature } => {
+                PatternKind::Circular { origin, axis, count, angle, alignment, reversed, axis_ref, axis_feature, skip_members } => {
                     let mut d = start("solid.pattern.circular")?;
                     d.extra.insert("alignment".into(), json!(alignment));
                     d.extra.insert("reversed".into(), json!(reversed));
+                    d.set_pattern_skipped(Vec::new(), skip_members.clone());
                     d.kind = Kind::PatternCirc { count: count.to_string(), angle: angle.to_string() };
                     // The edge or face it turns about, else its construction axis, else an origin
                     // axis or its line. The line's origin goes back as stored: numbers, or the
@@ -8501,8 +8698,9 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                     }
                     d
                 }
-                PatternKind::Path { path_sketch, path, count, spacing, extent, flip, orient } => {
+                PatternKind::Path { path_sketch, path, count, spacing, extent, flip, orient, skip_members } => {
                     let mut d = start("solid.pattern.path")?;
+                    d.set_pattern_skipped(Vec::new(), skip_members.clone());
                     d.kind = Kind::PathPattern { count: count.to_string(), spacing: spacing.to_string() };
                     if let Some(inp) = d.inputs.get_mut(1) {
                         inp.items = path.iter().map(|id| crate::selection::curve_pick(id, path_sketch.0, s.active_sketch)).collect();

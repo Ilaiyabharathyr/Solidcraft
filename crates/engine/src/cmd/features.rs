@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 use solidcore_record::Vec3;
-use solidcraft_doc::construct::DatumItem;
+use solidcraft_doc::construct::{DatumItem, GeoRef};
 use solidcraft_doc::{
     AxisRef, Direction, Expr, Extent, FeatureKind, Operation, PointExpr, ProfileSel, RailFit, SweepOrientation, SweepRail, ThinSide, ThinWall,
     Touching, expr::Kind, point_expr,
@@ -12,7 +12,7 @@ use solidcraft_doc::{Dir, FacePick, Position};
 use solidcraft_geom::prelude::*;
 
 use super::{CommandSpec, not_in_sketch};
-use crate::params::{UNKNOWN_COMMAND, bad, bool_, expr, expr_problem, req_expr, str_, string_list, string_list_or_default, vec2, vec3};
+use crate::params::{UNKNOWN_COMMAND, bad, bool_, expr, expr_problem, pattern_skip, req_expr, str_, string_list, string_list_or_default, vec2, vec3};
 use crate::schema::features::SweepParams;
 use crate::schema::features::{
     AppliedRadius, BoundingSolidParams, BoxParams, ChamferParams, CombineParams, CombineResult, ConeParams, CylinderParams, ExtrudeParams,
@@ -124,19 +124,19 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("pattern_rect")
         .contract(&PATTERN_RECTANGULAR_CONTRACT)
         .output(output_schema_for::<PatternResult>)
-        .params("features: [names] | bodies: [names] | components: [names]; dir1: [x,y,z]; count1; spacing1; dir2?, count2?, spacing2?; alignment?, alignment2?: left|center|right (default right; counts include the original); reversed?, reversed2?: bool (Flip)"),
+        .params("features: [names] | bodies: [names] | components: [names]; dir1: [x,y,z]; count1; spacing1 or reference1; dir2?, count2?, spacing2? or reference2?; reference1/2: {edge|face: [x,y,z]} or {plane: name} (straight edge, planar face or plane, followed as it moves; features and bodies only); offset1/2?: nonnegative length expression (default 0, measured back from the reference along the direction); alignment?, alignment2?: left|center|right (default right; counts include the original); reversed?, reversed2?: bool (Flip); alignment and Flip apply to spacing mode; skip?: [instance numbers] (features and bodies only; 1 is the original and always stays, 2 is the first copy; numbers advance along direction 2 before direction 1)"),
     CommandSpec::new("solid.pattern.circular", "Circular Pattern", crate::checked!("solid.pattern.circular", pattern_circ))
         .at("SOLID", "CREATE")
         .icon("pattern_circ")
         .contract(&PATTERN_CIRCULAR_CONTRACT)
         .output(output_schema_for::<PatternResult>)
-        .params("features: [names] | bodies: [names] | components: [names]; axis: X|Y|Z | construction axis name (followed when edited) | {origin, dir} (origin coordinates may be length expressions; the pattern follows them) | {edge|face: [x,y,z]} (a straight or circular edge, or a cylinder, cone or torus face: about its axis, followed as the model changes); count; angle? (default 360 deg; partial arcs include both ends); alignment?: left|center|right (default right; original stays fixed); reversed?: bool (Flip; selects the extra side for even centered counts)"),
+        .params("features: [names] | bodies: [names] | components: [names]; axis: X|Y|Z | construction axis name (followed when edited) | {origin, dir} (origin coordinates may be length expressions; the pattern follows them) | {edge|face: [x,y,z]} (a straight or circular edge, or a cylinder, cone or torus face: about its axis, followed as the model changes); count; angle? (default 360 deg; partial arcs include both ends); alignment?: left|center|right (default right; original stays fixed); reversed?: bool (Flip; selects the extra side for even centered counts); skip_members?: [[copy, feature ID, member]] (features and bodies only; copies start at 1 and members at 0)"),
     CommandSpec::new("solid.pattern.path", "Pattern on Path", crate::checked!("solid.pattern.path", pattern_path))
         .at("SOLID", "CREATE")
         .icon("pattern_path")
         .contract(&PATTERN_PATH_CONTRACT)
         .output(output_schema_for::<PatternResult>)
-        .params("features: [names] | bodies: [names]; path_sketch: sketch; path: [curve ids in order]; count; spacing (between instances) | distance (first to last); orientation?: identical|path; flip?: bool"),
+        .params("features: [names] | bodies: [names]; path_sketch: sketch; path: [curve ids in order]; count; spacing (between instances) | distance (first to last); orientation?: identical|path; flip?: bool; skip_members?: [[placement, feature ID, member]] (features and bodies only)"),
     CommandSpec::new("solid.mirror", "Mirror", crate::checked!("solid.mirror", mirror))
         .at("SOLID", "CREATE")
         .icon("mirror")
@@ -2651,25 +2651,35 @@ fn move_body_feature(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(reply)
 }
 
-/// A copy keeps the look and the material of the body it came from (#6423): the copy is the same
-/// part in another place, so it looks the same. A feature makes the same number of copies of each
-/// source (a Move copy one, a Pattern its count less one), the sources' copies together and in
-/// the sources' order.
+/// A copy keeps the look and material of its source body (#6423). The copies are grouped by
+/// source, and a pattern with omitted members records which source made each remaining copy.
 fn copy_keeps_appearance(s: &mut Session, reply: &Value, sources: &[String], cmd: &str) -> Result<()> {
     let id = reply.get("feature").and_then(Value::as_u64).ok_or_else(|| bad(cmd, "the copy has no feature id"))?;
-    let copies: Vec<String> = s.model.state().bodies.iter().filter(|b| b.feature == id).map(|b| b.name.clone()).collect();
+    let state = s.model.state();
+    let copies: Vec<&str> = state.bodies.iter().filter(|b| b.feature == id).map(|b| b.name.as_str()).collect();
+    let mut keep_appearance = |copy: &str, source: &str| {
+        if let Some(look) = s.doc.appearances.bodies.get(source).cloned() {
+            s.doc_mut().appearances.bodies.insert(copy.to_owned(), look);
+        }
+        if let Some(material) = s.doc.materials.get(source).cloned() {
+            s.doc_mut().materials.insert(copy.to_owned(), material);
+        }
+    };
+    if let Some(layout) = state.pattern_body_layout(id) {
+        for (copy, source) in copies.into_iter().zip(layout.sources()) {
+            if let Some(source) = sources.get(source) {
+                keep_appearance(copy, source);
+            }
+        }
+        return Ok(());
+    }
     let each = copies.len().checked_div(sources.len()).filter(|each| *each > 0 && each * sources.len() == copies.len());
     let Some(each) = each else {
         return Err(bad(cmd, "the copy did not make the same number of bodies for each body it copied"));
     };
     for (source, copies) in sources.iter().zip(copies.chunks(each)) {
         for copy in copies {
-            if let Some(look) = s.doc.appearances.bodies.get(source).cloned() {
-                s.doc_mut().appearances.bodies.insert(copy.clone(), look);
-            }
-            if let Some(material) = s.doc.materials.get(source).cloned() {
-                s.doc_mut().materials.insert(copy.clone(), material);
-            }
+            keep_appearance(copy, source);
         }
     }
     Ok(())
@@ -2743,15 +2753,13 @@ fn finish_pattern(
     p: &Value,
     features: Vec<solidcraft_doc::FeatureId>,
     pattern: solidcraft_doc::PatternKind,
-    (bodies, placements): (Vec<String>, Vec<Vec<u64>>),
+    (bodies, placements): PatternBodies,
 ) -> Result<Value> {
     let comps = string_list(UNKNOWN_COMMAND, p, "components")?;
     if comps.is_empty() {
         let copied = bodies.clone();
         let reply = add_feature(s, p, FeatureKind::Pattern { features, pattern, bodies: bodies.into_iter().map(BodyName).collect(), placements })?;
-        // The pattern is added either way: when it made no copies (the feature failed to
-        // evaluate) or an uneven number of them, there is nothing to tell the copies apart by
-        // and they keep no look, as before.
+        // Preserve the pattern even when its evaluation produced no copies to give an appearance.
         if !copied.is_empty() {
             let _ = copy_keeps_appearance(s, &reply, &copied, "pattern");
         }
@@ -2799,34 +2807,178 @@ fn pattern_sources(s: &Session, p: &Value, cmd: &str) -> Result<(Vec<solidcraft_
 }
 
 fn pattern_rect(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "solid.pattern.rectangular";
+    let (features, pattern, bodies) = rectangular_pattern_input(s, p)?;
+    // Timeline edits call the constructor directly. Its directions and picks are still in
+    // world coordinates because this command has no frame mapping table entry.
+    let _world = crate::frames::world_geometry();
+    finish_pattern(s, p, features, pattern, bodies)
+}
+
+const RECTANGULAR_PATTERN: &str = "solid.pattern.rectangular";
+const CIRCULAR_PATTERN: &str = "solid.pattern.circular";
+const PATH_PATTERN: &str = "solid.pattern.path";
+
+type PatternInput = (Vec<solidcraft_doc::FeatureId>, solidcraft_doc::PatternKind, PatternBodies);
+
+fn pattern_member_exclusions(p: &Value, cmd: &str) -> Result<Vec<solidcraft_doc::PatternMember>> {
+    p.get("skip_members").map(crate::params::pattern_skip_members).transpose().map(|value| value.unwrap_or_default()).map_err(|why| bad(cmd, why))
+}
+
+fn rectangular_pattern_input(s: &Session, p: &Value) -> Result<PatternInput> {
+    let cmd = RECTANGULAR_PATTERN;
     let (features, bodies) = pattern_sources(s, p, cmd)?;
     let dir1 = p.get("dir1").and_then(vec3).ok_or_else(|| bad(cmd, "`dir1` must be [x, y, z]"))?;
     let count1 = req_expr(cmd, p, "count1")?;
-    let spacing1 = req_expr(cmd, p, "spacing1")?;
     check_count(s, &count1, cmd, "count1")?;
-    check_expr(s, &spacing1, Kind::Length, cmd, "spacing1")?;
+    let reference1 = pattern_end(s, p, cmd, 1)?;
+    let spacing1 = if reference1.is_some() {
+        "0 mm".into()
+    } else {
+        let spacing = req_expr(cmd, p, "spacing1")?;
+        check_expr(s, &spacing, Kind::Length, cmd, "spacing1")?;
+        spacing
+    };
     let dir2 = p.get("dir2").and_then(vec3);
     let (count2, spacing2) = (expr(p, "count2"), expr(p, "spacing2"));
+    let reference2 = pattern_end(s, p, cmd, 2)?;
+    if reference2.is_some() && (dir2.is_none() || count2.is_none()) {
+        return Err(bad(cmd, "`reference2` requires `dir2` and `count2`"));
+    }
+    let up_to_reference = reference1.is_some() || reference2.is_some();
+    if up_to_reference && features.is_empty() && bodies.0.is_empty() {
+        return Err(bad(cmd, "Up to reference is available for features and bodies"));
+    }
     if let Some(c) = &count2 {
         check_count(s, c, cmd, "count2")?;
     }
     if let Some(c) = &spacing2 {
         check_expr(s, c, Kind::Length, cmd, "spacing2")?;
     }
-    let pattern = solidcraft_doc::PatternKind::Rectangular {
+    let skip = p.get("skip").map(pattern_skip).transpose().map_err(|why| bad(cmd, why))?.unwrap_or_default();
+    let skip_width = p.get("skip_width").map(crate::params::pattern_skip_width).transpose().map_err(|why| bad(cmd, why))?;
+    let skip_members = pattern_member_exclusions(p, cmd)?;
+    if (!skip.is_empty() || !skip_members.is_empty()) && features.is_empty() && bodies.0.is_empty() {
+        return Err(bad(cmd, "skipping instances is available for features and bodies"));
+    }
+    let mut pattern = solidcraft_doc::PatternKind::Rectangular {
         dir1: Dir(dir1),
         count1,
         spacing1,
+        reference1,
         dir2: dir2.map(Dir),
         count2,
         spacing2,
+        reference2,
         alignment: super::alignment_param(p, "alignment", cmd)?,
         alignment2: super::alignment_param(p, "alignment2", cmd)?,
         reversed: super::reversed_param(p, "reversed", cmd)?,
         reversed2: super::reversed_param(p, "reversed2", cmd)?,
+        skip,
+        skip_width,
+        skip_members,
     };
-    finish_pattern(s, p, features, pattern, bodies)
+    if let solidcraft_doc::PatternKind::Rectangular { skip, skip_members, .. } = &pattern
+        && (!skip.is_empty() || !skip_members.is_empty())
+    {
+        let (values, _) = s.doc.param_values();
+        validate_rectangular_skip(&pattern, &values)?;
+        pattern.pin_rectangular_skips(&values)?;
+    }
+    Ok((features, pattern, bodies))
+}
+
+/// Unpinned numbers in a new command must name existing copies. A previously pinned number
+/// can refer to a cell that is temporarily outside the current layout.
+fn validate_rectangular_skip(
+    pattern: &solidcraft_doc::PatternKind,
+    values: &std::collections::BTreeMap<String, solidcraft_doc::expr::Value>,
+) -> Result<()> {
+    let solidcraft_doc::PatternKind::Rectangular { count1, skip, skip_width: None, .. } = pattern else { return Ok(()) };
+    let Some(last_skipped) = skip.last() else { return Ok(()) };
+    let total = solidcraft_doc::expr::eval_count(count1, values)? * pattern.rectangular_columns(values)? as f64;
+    if *last_skipped as f64 > total {
+        return Err(bad(RECTANGULAR_PATTERN, format!("`skip` names instance {last_skipped}, but this pattern has {total} instances")));
+    }
+    Ok(())
+}
+
+impl Session {
+    /// Copy centers for the rectangular, circular and path pattern forms, in world coordinates.
+    /// Include skipped copies so a second click can restore them. The original has no marker.
+    pub fn pattern_markers(&self, command: &str, p: &Value) -> Result<Vec<solidcraft_doc::PatternMarker>> {
+        let (features, pattern, (bodies, placements)) = match command {
+            RECTANGULAR_PATTERN => rectangular_pattern_input(self, p)?,
+            CIRCULAR_PATTERN => circular_pattern_input(self, p)?,
+            PATH_PATTERN => path_pattern_input(self, p)?,
+            _ => return Err(bad(command, "this command has no selectable pattern copies")),
+        };
+        if features.is_empty() && bodies.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut kind = FeatureKind::Pattern { features, pattern, bodies: bodies.into_iter().map(BodyName).collect(), placements };
+        let frame = self.active_component_frame();
+        if !solidcraft_doc::is_identity(&frame) {
+            let inv = solidcraft_doc::mat_inverse(&frame).ok_or_else(|| bad(command, "the component placement has no inverse"))?;
+            kind.transform_geometry(&inv);
+        }
+        if self.doc.units.trim() != "mm" {
+            for (_, expr, unit) in kind.inputs_mut() {
+                *expr = self.doc.with_design_unit(expr, unit).into();
+            }
+        }
+        let FeatureKind::Pattern { features, pattern, bodies, placements } = &kind else { return Ok(Vec::new()) };
+        let mut markers =
+            solidcraft_doc::pattern_instance_markers(&self.doc, &self.model.state(), self.active_component, pattern, features, bodies, placements)?;
+        for marker in &mut markers {
+            marker.positions = marker.positions.map(|point| solidcraft_doc::apply_point(&frame, point));
+        }
+        Ok(markers)
+    }
+}
+
+/// An optional geometry endpoint. When it is set, the picked geometry sets the direction's
+/// sense and the offset shortens the reach from the seed to the reference.
+fn pattern_end(s: &Session, p: &Value, cmd: &str, direction: usize) -> Result<Option<Box<solidcraft_doc::PatternEnd>>> {
+    use super::construct::GeoForm;
+    let (reference, offset, spacing, alignment, reversed) = if direction == 1 {
+        ("reference1", "offset1", "spacing1", "alignment", "reversed")
+    } else {
+        ("reference2", "offset2", "spacing2", "alignment2", "reversed2")
+    };
+    let Some(value) = p.get(reference) else {
+        if p.get(offset).is_some() {
+            return Err(bad(cmd, format!("`{offset}` requires `{reference}`")));
+        }
+        return Ok(None);
+    };
+    if p.get(spacing).is_some_and(|v| !v.is_null()) {
+        return Err(bad(cmd, format!("give `{spacing}` or `{reference}`, not both")));
+    }
+    if super::alignment_param(p, alignment, cmd)? != solidcraft_sketch::PatternAlignment::Right || super::reversed_param(p, reversed, cmd)? {
+        return Err(bad(cmd, format!("`{reference}` sets where copies go; choose spacing to use Center or Flip")));
+    }
+    let mut target = match super::construct::geo_form(value) {
+        Ok(GeoForm::Face(at)) => GeoRef::Face { at, name: None },
+        Ok(GeoForm::Edge(at)) => GeoRef::Edge { at, name: None },
+        Ok(GeoForm::Saved(target @ (GeoRef::Face { .. } | GeoRef::Edge { .. }))) => target,
+        _ => super::construct::geo(s, Some(value), cmd, reference)?,
+    };
+    match &target {
+        GeoRef::Edge { .. } | GeoRef::Face { .. } | GeoRef::Plane { .. } => {}
+        GeoRef::Datum { datum } if matches!(datum.item, DatumItem::XY | DatumItem::XZ | DatumItem::YZ) => {}
+        _ => return Err(bad(cmd, format!("`{reference}` must pick a straight edge, planar face or plane"))),
+    }
+    // Pick coordinates are in the displayed model. Name the actual placed edge or face before
+    // add_feature takes it into the authoring component's frame.
+    if matches!(target, GeoRef::Face { name: None, .. } | GeoRef::Edge { name: None, .. }) {
+        target.name_picks(&*s.world_state()?);
+    }
+    let distance = if p.get(offset).is_some() { req_expr(cmd, p, offset)? } else { "0 mm".into() };
+    let value = s.doc.eval(&distance, Kind::Length).map_err(|err| bad(cmd, format!("{offset}: {err}")))?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(bad(cmd, format!("`{offset}` must be a finite distance of zero or more")));
+    }
+    Ok(Some(Box::new(solidcraft_doc::PatternEnd { target, offset: distance })))
 }
 
 /// The line a circular pattern or a plane at an angle turns about, as [`axis_line`] reads it,
@@ -2847,13 +2999,24 @@ fn axis_line_exprs(s: &Session, p: &Value, cmd: &str) -> Result<(PointExpr, Vec3
 }
 
 fn pattern_circ(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "solid.pattern.circular";
+    let (features, pattern, bodies) = circular_pattern_input(s, p)?;
+    // Direct commands and edits both supply a world axis, and the pattern owns its mapping.
+    let _world = crate::frames::world_geometry();
+    finish_pattern(s, p, features, pattern, bodies)
+}
+
+fn circular_pattern_input(s: &Session, p: &Value) -> Result<PatternInput> {
+    let cmd = CIRCULAR_PATTERN;
     let (features, bodies) = pattern_sources(s, p, cmd)?;
     let (origin, axis, axis_ref, axis_feature) = axis_line_exprs(s, p, cmd)?;
     let count = req_expr(cmd, p, "count")?;
     check_count(s, &count, cmd, "count")?;
     let angle = expr(p, "angle").unwrap_or_else(|| "360 deg".into());
     check_expr(s, &angle, Kind::Angle, cmd, "angle")?;
+    let skip_members = pattern_member_exclusions(p, cmd)?;
+    if !skip_members.is_empty() && features.is_empty() && bodies.0.is_empty() {
+        return Err(bad(cmd, "skipping instances is available for features and bodies"));
+    }
     let pattern = solidcraft_doc::PatternKind::Circular {
         origin,
         axis: Dir(axis),
@@ -2863,12 +3026,18 @@ fn pattern_circ(s: &mut Session, p: &Value) -> Result<Value> {
         reversed: super::reversed_param(p, "reversed", cmd)?,
         axis_ref,
         axis_feature,
+        skip_members,
     };
-    finish_pattern(s, p, features, pattern, bodies)
+    Ok((features, pattern, bodies))
 }
 
 fn pattern_path(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "solid.pattern.path";
+    let (features, pattern, bodies) = path_pattern_input(s, p)?;
+    finish_pattern(s, p, features, pattern, bodies)
+}
+
+fn path_pattern_input(s: &Session, p: &Value) -> Result<PatternInput> {
+    let cmd = PATH_PATTERN;
     let (features, bodies) = pattern_sources(s, p, cmd)?;
     let path_sketch = sketch_id(s, p.get("path_sketch").or_else(|| p.get("sketch")), cmd, "path_sketch")?;
     let path = string_list(cmd, p, "path")?;
@@ -2889,8 +3058,12 @@ fn pattern_path(s: &mut Session, p: &Value) -> Result<Value> {
         Some(o) => return Err(bad(cmd, format!("unknown orientation `{o}` (identical or path)"))),
     };
     let flip = bool_(p, "flip").unwrap_or(false);
-    let pattern = solidcraft_doc::PatternKind::Path { path_sketch: SketchId(path_sketch), path, count, spacing, extent, flip, orient };
-    finish_pattern(s, p, features, pattern, bodies)
+    let skip_members = pattern_member_exclusions(p, cmd)?;
+    if !skip_members.is_empty() && features.is_empty() && bodies.0.is_empty() {
+        return Err(bad(cmd, "skipping instances is available for features and bodies"));
+    }
+    let pattern = solidcraft_doc::PatternKind::Path { path_sketch: SketchId(path_sketch), path, count, spacing, extent, flip, orient, skip_members };
+    Ok((features, pattern, bodies))
 }
 
 fn mirror(s: &mut Session, p: &Value) -> Result<Value> {

@@ -358,6 +358,39 @@ fn feature_pattern_rejects_malformed_alignment_and_flip_atomically() {
 }
 
 #[test]
+fn circular_pattern_leaves_out_one_cut_profile_at_one_angle() {
+    let mut s = Session::default();
+    run(&mut s, "solid.cylinder", json!({"radius":56, "height":8, "axis":"Z", "body_name":"Plate"}));
+    run(&mut s, "sketch.create", json!({"plane":"XY", "name":"Hole centres"}));
+    for x in [26, 44] {
+        run(&mut s, "sketch.circle.center", json!({"center":[x, 0], "radius":4}));
+    }
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance":8, "operation":"cut", "name":"Hole pair"}));
+    let mut params = json!({"features":["Hole pair"], "axis":"Z", "count":3, "angle":"180 deg"});
+    let markers = s.pattern_markers("solid.pattern.circular", &params).unwrap();
+    assert_eq!(markers.len(), 4);
+    let to_omit = markers.iter().find(|m| m.positions.iter().any(|p| p.x.abs() < 1e-8 && (p.y - 44.0).abs() < 1e-8)).unwrap();
+    params["skip_members"] = json!([to_omit.member]);
+    run(&mut s, "solid.pattern.circular", params);
+
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let state = reopened.model.state();
+    let plate = &state.body("Plate").unwrap().body;
+    let mut centres: Vec<_> = (0..plate.face_count())
+        .filter_map(|face| match solidcraft_kernel::face_surface(plate, face) {
+            Some(solidcraft_kernel::FaceSurface::Cylinder { origin, radius, .. }) if (radius - 4.0).abs() < 1e-8 => {
+                Some((origin.x.round() as i64, origin.y.round() as i64))
+            }
+            _ => None,
+        })
+        .collect();
+    centres.sort_unstable();
+    centres.dedup();
+    assert_eq!(centres, [(-44, 0), (-26, 0), (0, 26), (26, 0), (44, 0)]);
+}
+
+#[test]
 fn circular_axis_origin_rejects_invalid_values_atomically() {
     let mut s = plate_with_hole();
     run(&mut s, "parameters.add", json!({"name":"cx","expression":"50 mm"}));
@@ -642,6 +675,204 @@ fn patterns_of_a_blind_hole_drill_every_copy() {
         json!({"features": ["Hole1"], "axis": {"origin": [25, 12, 0], "dir": [0, 0, 1]}, "count": 2, "angle": 360}),
     ));
     assert!((c - 2.0 * one).abs() < 1e-3 * one, "{c} vs 2 × {one}");
+}
+
+#[test]
+fn rectangular_pattern_reference_distributes_seven_holes_and_follows_the_edge() {
+    fn check(s: &Session, length: f64, offset: f64) {
+        let st = s.model.state();
+        let body = &st.body("Plate").unwrap().body;
+        let mut x: Vec<f64> = (0..body.face_count())
+            .filter_map(|i| match solidcraft_kernel::face_surface(body, i) {
+                Some(solidcraft_kernel::FaceSurface::Cylinder { origin, .. }) => Some(origin.x),
+                _ => None,
+            })
+            .collect();
+        x.sort_by(f64::total_cmp);
+        x.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        assert_eq!(x.len(), 7, "hole centres: {x:?}");
+        for (i, x) in x.into_iter().enumerate() {
+            let expected = 10.0 + i as f64 * (length - offset - 10.0) / 6.0;
+            assert!((x - expected).abs() < 1e-6, "hole {i}: {x} vs {expected}");
+        }
+    }
+
+    let mut s = Session::default();
+    run(&mut s, "parameters.add", json!({"name": "plateLength", "expression": "200 mm"}));
+    run(&mut s, "parameters.add", json!({"name": "endInset", "expression": "10 mm"}));
+    run(&mut s, "solid.box", json!({"length": "plateLength", "width": 40, "height": 10, "body_name": "Plate"}));
+    run(&mut s, "solid.hole", json!({"position": [10, 20, 10], "diameter": 5, "depth": 10, "name": "Seed hole"}));
+    run(
+        &mut s,
+        "solid.pattern.rectangular",
+        json!({"features": ["Seed hole"], "dir1": [1, 0, 0], "count1": 7,
+               "reference1": {"edge": [200, 20, 10]}, "offset1": "endInset"}),
+    );
+    check(&s, 200.0, 10.0);
+
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    check(&reopened, 200.0, 10.0);
+    run(&mut reopened, "parameters.change", json!({"name": "plateLength", "expression": "230 mm"}));
+    check(&reopened, 230.0, 10.0);
+    run(&mut reopened, "parameters.change", json!({"name": "endInset", "expression": "16 mm"}));
+    check(&reopened, 230.0, 16.0);
+}
+
+#[test]
+fn rectangular_pattern_skips_slots_without_moving_remaining_holes() {
+    fn centres(s: &Session) -> Vec<i64> {
+        let st = s.model.state();
+        let plate = &st.body("Plate").unwrap().body;
+        let mut xs: Vec<i64> = (0..plate.face_count())
+            .filter_map(|i| match solidcraft_kernel::face_surface(plate, i) {
+                Some(solidcraft_kernel::FaceSurface::Cylinder { origin, .. }) => Some(origin.x.round() as i64),
+                _ => None,
+            })
+            .collect();
+        xs.sort_unstable();
+        xs.dedup();
+        xs
+    }
+
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 200, "width": 40, "height": 10, "body_name": "Plate"}));
+    run(&mut s, "solid.hole", json!({"position": [10, 20, 10], "diameter": 5, "depth": 10, "name": "Seed hole"}));
+    let params = json!({"features": ["Seed hole"], "dir1": [1, 0, 0], "count1": 7, "skip": [6, 3, 6],
+                       "reference1": {"edge": [200, 20, 10]}, "offset1": 10, "name": "Row"});
+    let markers = s.pattern_markers("solid.pattern.rectangular", &params).unwrap();
+    assert_eq!(
+        markers.iter().map(|m| (m.slot, m.positions[0].x.round() as i64)).collect::<Vec<_>>(),
+        [(2, 40), (3, 70), (4, 100), (5, 130), (6, 160), (7, 190)]
+    );
+    let mut invalid = params.clone();
+    invalid["skip"] = json!([1]);
+    assert!(s.execute("solid.pattern.rectangular", &invalid).is_err());
+    run(&mut s, "solid.pattern.rectangular", params);
+    assert_eq!(centres(&s), [10, 40, 100, 130, 190]);
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    assert_eq!(centres(&reopened), [10, 40, 100, 130, 190]);
+}
+
+#[test]
+fn rectangular_pattern_skips_one_profile_of_a_two_hole_extrude() {
+    let mut s = Session::default();
+    for command in crate::sample::script()["commands"].as_array().unwrap() {
+        run(&mut s, command["command"].as_str().unwrap(), command["params"].clone());
+    }
+    let mut params = json!({"features": ["Holes"], "dir1": [0, 1, 0], "count1": 3,
+                            "reference1": {"edge": [40, 50, 8]}, "offset1": 5});
+    let markers = s.pattern_markers("solid.pattern.rectangular", &params).unwrap();
+    let opening = |m: &solidcraft_doc::PatternMarker| {
+        let p = m.positions.iter().max_by(|a, b| a.z.total_cmp(&b.z)).unwrap();
+        assert!((p.z - 8.0).abs() < 1e-7);
+        (p.x.round() as i64, p.y.round() as i64)
+    };
+    let mut centres: Vec<_> = markers.iter().map(opening).collect();
+    centres.sort_unstable();
+    assert_eq!(centres, [(12, 35), (12, 45), (68, 35), (68, 45)]);
+    let skipped = markers.iter().find(|m| opening(m) == (12, 35)).unwrap();
+    params["skip_members"] = json!([skipped.member]);
+    run(&mut s, "solid.pattern.rectangular", params);
+
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    let state = reopened.model.state();
+    let plate = &state.body("Plate").unwrap().body;
+    let mut remaining = Vec::new();
+    for face in 0..plate.face_count() {
+        if let Some(solidcraft_kernel::FaceSurface::Cylinder { origin, radius, .. }) = solidcraft_kernel::face_surface(plate, face)
+            && (radius - 4.0).abs() < 1e-7
+        {
+            remaining.push((origin.x.round() as i64, origin.y.round() as i64));
+        }
+    }
+    remaining.sort_unstable();
+    remaining.dedup();
+    assert_eq!(remaining, [(12, 25), (12, 45), (68, 25), (68, 35), (68, 45)]);
+}
+
+#[test]
+fn rectangular_pattern_reference_in_direction_two_works_with_spacing_in_direction_one() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 200, "width": 80, "height": 10, "body_name": "Plate"}));
+    run(&mut s, "solid.box", json!({"length": 4, "width": 4, "height": 4, "center": [10, 10, 20], "body_name": "Seed"}));
+    let params = json!({"bodies": ["Seed"], "dir1": [1, 0, 0], "count1": 2, "spacing1": 20,
+                        "dir2": [0, -1, 0], "count2": 3, "reference2": {"face": [100, 80, 5]}, "offset2": 10});
+    for offset in [json!(-1), json!(70), json!(71)] {
+        let mut invalid = params.clone();
+        invalid["offset2"] = offset;
+        let before = s.doc.to_json();
+        assert!(s.execute("solid.pattern.rectangular", &invalid).is_err());
+        assert_eq!(s.doc.to_json(), before);
+    }
+    run(&mut s, "solid.pattern.rectangular", params);
+    let st = s.model.state();
+    let centres: Vec<_> = st.bodies.iter().filter(|b| b.name != "Plate").map(|b| b.body.exact_bounds().unwrap().center()).collect();
+    assert_eq!(centres.len(), 6);
+    for x in [10.0, 30.0] {
+        for y in [10.0, 40.0, 70.0] {
+            assert!(centres.iter().any(|p| (p.x - x).abs() < 1e-6 && (p.y - y).abs() < 1e-6), "missing ({x}, {y}): {centres:?}");
+        }
+    }
+}
+
+fn pattern_hole_centres(s: &Session) -> std::collections::BTreeSet<(i64, i64)> {
+    let state = s.model.state();
+    let plate = &state.body("Plate").unwrap().body;
+    (0..plate.face_count())
+        .filter_map(|face| match solidcraft_kernel::face_surface(plate, face) {
+            Some(solidcraft_kernel::FaceSurface::Cylinder { origin, radius, .. }) if (radius - 4.0).abs() < 1e-7 => {
+                Some((origin.x.round() as i64, origin.y.round() as i64))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn rectangular_skip_stays_on_the_same_hole_when_the_second_direction_shrinks() {
+    for skip_group in [false, true] {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length":90,"width":60,"height":8,"body_name":"Plate"}));
+        let source = run(&mut s, "solid.hole", json!({"position":[10,10,8],"diameter":8,"depth":8,"name":"Seed"}))["feature"].clone();
+        run(&mut s, "parameters.add", json!({"name":"rows","expression":"2","unit":""}));
+        let mut pattern = json!({"features":["Seed"],"dir1":[1,0,0],"count1":3,"spacing1":20,"dir2":[0,1,0],"count2":"rows","spacing2":20});
+        if skip_group {
+            pattern["skip"] = json!([3]);
+        } else {
+            pattern["skip_members"] = json!([[2, source, 0]]);
+        }
+        run(&mut s, "solid.pattern.rectangular", pattern);
+        let full = [(10, 10), (10, 30), (30, 30), (50, 10), (50, 30)].into_iter().collect();
+        assert_eq!(pattern_hole_centres(&s), full);
+        run(&mut s, "parameters.change", json!({"name":"rows","expression":"1"}));
+        let mut reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+        assert_eq!(pattern_hole_centres(&reopened), [(10, 10), (50, 10)].into_iter().collect());
+        run(&mut reopened, "parameters.change", json!({"name":"rows","expression":"2"}));
+        assert_eq!(pattern_hole_centres(&reopened), full);
+    }
+}
+
+#[test]
+fn path_pattern_skips_one_of_two_holes_at_one_placement() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length":100,"width":86,"height":8,"body_name":"Plate"}));
+    run(&mut s, "sketch.create", json!({"plane":"XY","name":"Profiles"}));
+    for x in [30, 70] {
+        run(&mut s, "sketch.circle.center", json!({"center":[x,20],"radius":4}));
+    }
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"name":"Pair","operation":"cut","distance":8}));
+    run(&mut s, "sketch.create", json!({"plane":"XY","name":"Path"}));
+    run(&mut s, "sketch.line", json!({"points":[[12,8],[12,73]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let mut params = json!({"features":["Pair"],"path_sketch":"Path","path":["l1"],"count":3,"spacing":20});
+    let markers = s.pattern_markers("solid.pattern.path", &params).unwrap();
+    assert_eq!(markers.len(), 4);
+    let skipped = markers.iter().find(|m| m.positions.iter().any(|p| (p.x - 70.0).abs() < 1e-7 && (p.y - 40.0).abs() < 1e-7)).unwrap();
+    params["skip_members"] = json!([skipped.member]);
+    run(&mut s, "solid.pattern.path", params);
+    let reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    assert_eq!(pattern_hole_centres(&reopened), [(30, 20), (30, 40), (30, 60), (70, 20), (70, 60)].into_iter().collect());
 }
 
 /// #14050: a through hole at a sketch point on a plane below the box drills up into it, and so
@@ -1570,6 +1801,36 @@ fn a_body_pattern_keeps_each_sources_appearance_and_material() {
         assert_eq!(s.doc.appearances.bodies.get(copy), Some(&red), "{copy}");
         assert!(!s.doc.materials.contains_key(copy), "{copy} has no material of its own");
     }
+}
+
+#[test]
+fn a_body_pattern_keeps_appearance_when_a_source_has_fewer_copies() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length":10,"width":10,"height":10,"center":[0,0,5],"operation":"new","body_name":"Base"}));
+    run(&mut s, "solid.cylinder", json!({"diameter":6,"height":20,"base":[0,0,10],"operation":"new","body_name":"Post"}));
+    run(&mut s, "appearance.assign", json!({"bodies":["Post"],"color":[200,30,30]}));
+    run(&mut s, "material.assign", json!({"bodies":["Base"],"material":"Steel"}));
+    let result = run(
+        &mut s,
+        "solid.pattern.rectangular",
+        json!({"bodies":["Base","Post"],"dir1":[1,0,0],"count1":4,"spacing1":30,"skip_members":[[1,0,0],[2,0,0]]}),
+    );
+    let feature = result["feature"].as_u64().unwrap();
+    let state = s.model.state();
+    let red = s.doc.appearances.bodies.get("Post").unwrap();
+    let (mut bases, mut posts) = (0, 0);
+    for copy in state.bodies.iter().filter(|b| b.feature == feature) {
+        if copy.mesh().bounds().max.z < 20.0 {
+            bases += 1;
+            assert_eq!(s.doc.materials.get(&copy.name).map(String::as_str), Some("Steel"));
+            assert!(!s.doc.appearances.bodies.contains_key(&copy.name));
+        } else {
+            posts += 1;
+            assert_eq!(s.doc.appearances.bodies.get(&copy.name), Some(red));
+            assert!(!s.doc.materials.contains_key(&copy.name));
+        }
+    }
+    assert_eq!((bases, posts), (1, 3));
 }
 
 /// A pattern of bodies that makes no copy (a count of 1) is still added: the copies' look is

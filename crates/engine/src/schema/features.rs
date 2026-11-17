@@ -1048,6 +1048,11 @@ pub struct PatternCircularParams {
     #[serde(default, deserialize_with = "pattern_reversed", skip_serializing_if = "Option::is_none")]
     #[schemars(with = "bool")]
     pub reversed: Option<bool>,
+    /// Individually skipped copies as [placement, source feature ID, zero-based member].
+    /// For body patterns the feature ID is 0 and the member is the selected body index.
+    #[serde(default, deserialize_with = "skipped_pattern_members")]
+    #[schemars(schema_with = "skipped_pattern_members_schema")]
+    pub skip_members: Option<Vec<solidcraft_doc::PatternMember>>,
     #[serde(flatten, deserialize_with = "feature_common")]
     pub common: FeatureCommon,
 }
@@ -1172,7 +1177,7 @@ impl JsonSchema for PatternDir {
         // The bounds are `params::finite`'s.
         let c = json!({"type": "number", "exclusiveMinimum": -1e9, "exclusiveMaximum": 1e9});
         json_schema!({
-            "description": "A direction: [x, y, z] or {\"x\", \"y\", \"z\"}. Only its direction counts; the spacing sets the step.",
+            "description": "A direction: [x, y, z] or {\"x\", \"y\", \"z\"}. The vector's length does not change the step.",
             "anyOf": [
                 {"type": "array", "items": c, "minItems": 3, "maxItems": 3},
                 {"type": "object", "properties": {"x": c, "y": c, "z": c}, "required": ["x", "y", "z"]}
@@ -1182,9 +1187,50 @@ impl JsonSchema for PatternDir {
 }
 
 fn rectangular_required(schema: &mut Schema) {
-    for key in ["dir1", "count1", "spacing1"] {
+    for key in ["dir1", "count1"] {
         require(schema, key);
     }
+    schema.insert("oneOf".into(), json!([{"required": ["spacing1"]}, {"required": ["reference1"]}]));
+}
+
+fn skipped_pattern_instances<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<usize>>, D::Error> {
+    crate::params::pattern_skip(&Value::deserialize(d)?).map(Some).map_err(D::Error::custom)
+}
+
+fn skipped_pattern_instances_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"type":"array", "maxItems":crate::params::MAX_PATTERN_SKIP,
+        "items":{"type":"integer","minimum":2,"maximum":crate::params::MAX_PATTERN_SKIP}})
+}
+
+fn skipped_pattern_width<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    crate::params::pattern_skip_width(&Value::deserialize(d)?).map(Some).map_err(D::Error::custom)
+}
+
+fn skipped_pattern_width_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"type":"integer", "minimum":1, "maximum":crate::params::MAX_PATTERN_SKIP})
+}
+
+fn skipped_pattern_members<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<solidcraft_doc::PatternMember>>, D::Error> {
+    crate::params::pattern_skip_members(&Value::deserialize(d)?).map(Some).map_err(D::Error::custom)
+}
+
+fn skipped_pattern_members_schema(_: &mut SchemaGenerator) -> Schema {
+    let coordinate = json!({"type":"integer", "minimum":0, "maximum":crate::params::MAX_PATTERN_SKIP - 1});
+    let step = |source| {
+        json!({
+            "type": "array", "minItems": 3, "maxItems": 3,
+            "prefixItems": [source, coordinate, coordinate],
+            "not": {"prefixItems": [{}, {"enum":[0]}, {"enum":[0]}]}
+        })
+    };
+    let placement = json!({"anyOf":[
+        {"type":"integer", "minimum":1, "maximum":crate::params::MAX_PATTERN_REPLAY_ORDINAL},
+        {"type":"array", "minItems":1, "maxItems":crate::params::MAX_PATTERN_STEPS,
+         "prefixItems":[step(json!({"enum":[0]}))], "items":step(json!({"type":"integer","minimum":1}))}
+    ]});
+    json_schema!({"type":"array", "maxItems":crate::params::MAX_PATTERN_MEMBERS,
+        "items":{"type":"array","minItems":3,"maxItems":3,"prefixItems":[
+            placement, {"type":"integer","minimum":0}, {"type":"integer","minimum":0,"maximum":usize::MAX}]}})
 }
 
 /// Copy features, bodies or components in a row, or a grid with a second direction. Give one of
@@ -1201,9 +1247,8 @@ pub struct PatternRectangularParams {
     /// The components to place more of, by id or name. The reply then lists the new occurrences.
     #[serde(default)]
     pub components: Option<NameList>,
-    // `dir1`, `count1` and `spacing1` are optional in the type and required in the schema: left
-    // out, the handler refuses the call with its own message ("`dir1` must be [x, y, z]"), which
-    // the check would otherwise replace with "`dir1` is required".
+    // Required parameters are optional in the type so missing values get the handler's own
+    // message. The schema requires `dir1`, `count1` and either `spacing1` or `reference1`.
     /// The first direction.
     #[serde(default, deserialize_with = "present")]
     #[schemars(with = "PatternDir")]
@@ -1213,10 +1258,19 @@ pub struct PatternRectangularParams {
     #[serde(default, deserialize_with = "present")]
     #[schemars(with = "NumberExpr")]
     pub count1: Option<NumberExpr>,
-    /// The step between neighbours along the first direction.
+    /// The step between neighbours along the first direction. Give this or `reference1`.
     #[serde(default, deserialize_with = "present")]
     #[schemars(with = "LengthExpr")]
     pub spacing1: Option<LengthExpr>,
+    /// With features or bodies, a straight edge, planar face or plane that sets the last
+    /// instance's position along the first direction. Give this or `spacing1`.
+    #[serde(default, deserialize_with = "present")]
+    #[schemars(with = "GeoRefParam")]
+    pub reference1: Option<GeoRefParam>,
+    /// Distance to leave before `reference1`, measured along the first direction. Default: 0.
+    #[serde(default, deserialize_with = "present")]
+    #[schemars(with = "LengthExpr")]
+    pub offset1: Option<LengthExpr>,
     // The handler reads `dir2`, `count2` and `spacing2` leniently: one it can't read is left
     // out, as `null` is. The contract refuses a value of the wrong form and lets `null` through.
     /// A second direction, for a grid. Default: none, a single row.
@@ -1225,26 +1279,51 @@ pub struct PatternRectangularParams {
     /// How many along the second direction, the original included.
     #[serde(default)]
     pub count2: Option<NumberExpr>,
-    /// The step between neighbours along the second direction.
+    /// The step between neighbours along the second direction. Use `reference2` to set the
+    /// last position from geometry instead.
     #[serde(default)]
     pub spacing2: Option<LengthExpr>,
-    /// Where the original sits along the first direction. Default: right, the original at the
-    /// start.
+    /// With features or bodies, a straight edge, planar face or plane that sets the last
+    /// instance's position along the second direction. Requires `dir2` and `count2`.
+    #[serde(default, deserialize_with = "present")]
+    #[schemars(with = "GeoRefParam")]
+    pub reference2: Option<GeoRefParam>,
+    /// Distance to leave before `reference2`, measured along the second direction. Default: 0.
+    #[serde(default, deserialize_with = "present")]
+    #[schemars(with = "LengthExpr")]
+    pub offset2: Option<LengthExpr>,
+    /// Where the original sits in spacing mode along the first direction. Default: right,
+    /// the original at the start.
     #[serde(default, deserialize_with = "pattern_alignment", skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "super::sketch_modify::alignment_schema")]
     pub alignment: Option<solidcraft_sketch::PatternAlignment>,
-    /// Where the original sits along the second direction. Default: right.
+    /// Where the original sits in spacing mode along the second direction. Default: right.
     #[serde(default, deserialize_with = "pattern_alignment2", skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "super::sketch_modify::alignment_schema")]
     pub alignment2: Option<solidcraft_sketch::PatternAlignment>,
-    /// Flip the first direction; for an even count centred, selects the extra side.
+    /// Flip the first direction in spacing mode; for an even count centred, selects the extra side.
     #[serde(default, deserialize_with = "pattern_reversed", skip_serializing_if = "Option::is_none")]
     #[schemars(with = "bool")]
     pub reversed: Option<bool>,
-    /// Flip the second direction.
+    /// Flip the second direction in spacing mode.
     #[serde(default, deserialize_with = "pattern_reversed2", skip_serializing_if = "Option::is_none")]
     #[schemars(with = "bool")]
     pub reversed2: Option<bool>,
+    /// One-based copy numbers to leave out. The original (1) always remains.
+    #[serde(default, deserialize_with = "skipped_pattern_instances")]
+    #[schemars(schema_with = "skipped_pattern_instances_schema")]
+    pub skip: Option<Vec<usize>>,
+    /// Saved column count for interpreting the legacy whole-placement numbers in `skip`.
+    #[serde(default, deserialize_with = "skipped_pattern_width")]
+    #[schemars(schema_with = "skipped_pattern_width_schema")]
+    pub skip_width: Option<usize>,
+    /// Individually skipped copies as [placement, source feature ID, zero-based member].
+    /// A placement can be a replay ordinal or a sequence of [pattern ID, row, column] steps
+    /// starting at pattern ID 0. Rows and columns are zero-based.
+    /// For body patterns the feature ID is 0 and the member is the selected body index.
+    #[serde(default, deserialize_with = "skipped_pattern_members")]
+    #[schemars(schema_with = "skipped_pattern_members_schema")]
+    pub skip_members: Option<Vec<solidcraft_doc::PatternMember>>,
     #[serde(flatten, deserialize_with = "feature_common")]
     pub common: FeatureCommon,
 }
@@ -1357,6 +1436,11 @@ pub struct PatternPathParams {
     /// Run along the path from its other end. Default: false.
     #[serde(default)]
     pub flip: Option<bool>,
+    /// Individually skipped copies as [placement, source feature ID, zero-based member].
+    /// For body patterns the feature ID is 0 and the member is the selected body index.
+    #[serde(default, deserialize_with = "skipped_pattern_members")]
+    #[schemars(schema_with = "skipped_pattern_members_schema")]
+    pub skip_members: Option<Vec<solidcraft_doc::PatternMember>>,
     #[serde(flatten, deserialize_with = "feature_common")]
     pub common: FeatureCommon,
 }

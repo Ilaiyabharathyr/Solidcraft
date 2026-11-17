@@ -1,0 +1,12 @@
+{
+  "en": {
+    "ui.pattern_skip": "Instances to skip",
+    "ui.pattern_skip_box": "Box",
+    "ui.pattern_skip_clear": "Clear skipped instances",
+    "ui.pattern_skip_hint": "Click or drag around markers to toggle. Shift skips. Alt restores.",
+    "ui.pattern_skip_lasso": "Lasso",
+    "ui.pattern_skip_list": "Skipped",
+    "ui.pattern_skip_restore": "Restore {number}",
+    "ui.pattern_skip_selection": "Selection"
+  }
+}

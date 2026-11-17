@@ -171,6 +171,7 @@ pub fn anchor(app: &SolveApp, d: &Dialog) -> Option<(Vec3, Option<Vec3>)> {
 /// is square to the first unless one is picked.
 fn pattern_dir2(app: &SolveApp, d: &Dialog) -> Option<Vec3> {
     match &d.kind {
+        Kind::PatternRect { .. } if d.pattern_reference_input(1).is_some() => None,
         Kind::PatternRect { .. } => match d.inputs.get(2).and_then(|i| i.items.first()) {
             Some(x) => crate::dialogs::axis_of(app, x).map(|a| a.1),
             None => d.extra.get("dir2").and_then(|v| serde_json::from_value::<[f64; 3]>(v.clone()).ok()).map(|a| Vec3::new(a[0], a[1], a[2])),

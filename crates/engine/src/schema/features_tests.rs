@@ -1241,7 +1241,21 @@ fn ring_with(key: &str, value: Value) -> Value {
 fn circular_pattern_schema_and_the_key_check_agree() {
     assert_keys(
         input_schema_for::<PatternCircularParams>(),
-        &["alignment", "angle", "axis", "bodies", "body_name", "body_names", "components", "count", "features", "name", "participants", "reversed"],
+        &[
+            "alignment",
+            "angle",
+            "axis",
+            "bodies",
+            "body_name",
+            "body_names",
+            "components",
+            "count",
+            "features",
+            "name",
+            "participants",
+            "reversed",
+            "skip_members",
+        ],
     );
 }
 
@@ -1267,6 +1281,7 @@ fn circular_pattern_contract_keeps_the_handlers_errors() {
         ring_with("alignment", json!(null)),
         ring_with("reversed", json!("yes")),
         ring_with("reversed", json!(null)),
+        ring_with("skip_members", json!([[0, 1, 0]])),
     ];
     for p in &cases {
         let error = |level| ring_rig(level).execute("solid.pattern.circular", p).err().map(|e| e.to_string());
@@ -1292,6 +1307,7 @@ fn circular_pattern_replies_match_the_output_schema() {
         ring_with("angle", json!("180 deg")),
         ring_with("alignment", json!("center")),
         ring_with("reversed", json!(true)),
+        ring_with("skip_members", json!([[1, 0, 0]])),
         json!({"components": ["Part"], "axis": "Z", "count": 3}),
     ];
     for p in &calls {
@@ -1373,9 +1389,15 @@ fn pattern_schemas_and_the_key_check_agree() {
             "dir2",
             "features",
             "name",
+            "offset1",
+            "offset2",
             "participants",
+            "reference1",
+            "reference2",
             "reversed",
             "reversed2",
+            "skip",
+            "skip_members",
             "spacing1",
             "spacing2",
         ],
@@ -1427,6 +1449,10 @@ fn rectangular_pattern_contract_keeps_the_handlers_errors() {
             without(row(), "spacing1"),
             with(row(), json!({"spacing1": true})),
             with(row(), json!({"spacing1": "5 deg"})),
+            with(row(), json!({"reference1": {"plane": "YZ"}})),
+            with(row(), json!({"offset1": "1 mm"})),
+            with(without(row(), "spacing1"), json!({"reference1": {"plane": "YZ"}, "offset1": -1})),
+            with(row(), json!({"reference2": {"plane": "XZ"}})),
             with(row(), json!({"dir2": [0, 1, 0], "count2": "nope", "spacing2": 10})),
             with(row(), json!({"dir2": [0, 1, 0], "count2": 2, "spacing2": "5 deg"})),
             with(row(), json!({"alignment": "up"})),
@@ -1502,6 +1528,8 @@ fn the_pattern_checks_take_what_the_schemas_allow() {
         (row(), true),
         (with(row(), json!({"dir1": {"x": 1, "y": 0, "z": 0}, "count1": "n + 1", "spacing1": "10 mm"})), true),
         (with(row(), json!({"dir2": [0, 1, 0], "count2": 2, "spacing2": 8, "alignment2": "center", "reversed2": true})), true),
+        (with(without(row(), "spacing1"), json!({"reference1": {"face": [5, 2.5, 2.5]}, "offset1": "1 mm"})), true),
+        (with(row(), json!({"dir2": [0, 1, 0], "count2": 2, "reference2": {"plane": "XZ"}, "offset2": 1})), true),
         (with(row(), json!({"dir2": null, "count2": null, "spacing2": null})), true),
         (with(row(), json!({"bodies": "B", "components": [], "alignment": "left", "reversed": false, "name": "Grid"})), true),
         (with(row(), json!({"dir1": [1, 0]})), false),
@@ -1510,6 +1538,8 @@ fn the_pattern_checks_take_what_the_schemas_allow() {
         (with(row(), json!({"count1": true})), false),
         (with(row(), json!({"count1": ""})), false),
         (with(row(), json!({"spacing1": null})), false),
+        (with(without(row(), "spacing1"), json!({"reference1": null})), false),
+        (with(row(), json!({"dir2": [0, 1, 0], "count2": 2, "reference2": {"plane": "XZ"}, "offset2": false})), false),
         (with(row(), json!({"dir2": "Y"})), false),
         (with(row(), json!({"count2": false})), false),
         (with(row(), json!({"alignment2": "middle"})), false),
