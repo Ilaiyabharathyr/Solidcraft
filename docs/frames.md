@@ -2,7 +2,8 @@
 
 Frames and weldments (#4003) are structural members (tube, angle, channel, beam, an aluminium
 extrusion of your own) laid along the lines of a frame sketch. This page covers what has landed:
-members and their profiles, corner cuts and end caps. Trims, gussets, welds and the cut list follow.
+members and their profiles, corner cuts, the weld gap and end caps. Trims, gussets, welds and the cut
+list follow.
 
 ## The workflow
 
@@ -37,7 +38,8 @@ the selected body (or the last body of the active component).
   circles makes a tube). With nothing picked, **Profile** chooses a built-in profile and its
   dimensions follow; optional ones left empty take their defaults.
 - **Corner Type**, **Flip** and **Corner Overrides** cut the members where two of them meet, as
-  under Corners below. A new Frame Member starts on Auto (see Auto below); the command's own default stays None.
+  under Corners below, and **Gap** leaves a weld gap at each welded end (see Multi-trim and the weld
+  gap). A new Frame Member starts on Auto (see Auto below); the command's own default stays None.
 - **Anchor**, **Angle** and **Mirror** place the section on each line, as below. **Name** names
   the members (default: after the profile).
 - The preview shows the members as you change the values. **Edit Feature** reopens the dialog with
@@ -101,13 +103,15 @@ A corner sharper than 5 degrees inside is refused: "Corner at (x, y, z) is too s
   largest piece on its own side of the through member, and a member that lies wholly inside the
   through member is refused.
 
-**Corner Overrides** (`corners`) give single corners their own type and flip. Each is saved by the
-ids of the two members that meet there (a line's id, or a pair's `pair1`, `pair2`…; a point where
-three or more end takes an override only under Auto), not by the
-point, so it survives a dimension change while the members still meet. If they no longer do, the
+**Corner Overrides** (`corners`) give single corners their own type, member order and weld gap.
+Each is saved by the ids of the members that meet there, in order (a line's id, or a pair's
+`pair1`, `pair2`…; a point where three or more end takes an override only under Auto), not by the
+point, so it survives a dimension change while the members still meet. The first member runs
+through a butt (see Member order under Multi-trim and the weld gap). If they no longer meet, the
 feature fails with "A corner override is not at a corner of the frame", and Edit Feature still opens
-with that override listed so it can be removed. Changing the
-feature's Corner Type leaves existing overrides alone; a new override starts as the feature's type.
+with that override listed so it can be removed (or `frame.multi_trim` with `remove` takes it away).
+Changing the feature's Corner Type leaves existing overrides alone; a new override starts as the
+feature's type.
 
 A member cut away completely fails with "the member on line `id` was cut away completely", and one
 its corners cut into pieces with "the member on line `id` is cut into pieces by its corners".
@@ -120,13 +124,13 @@ where three or more end.
 In the dialog, a box drag in the view picks the frame sketch's straight lines (not construction,
 projected lines or arcs), and the corner points when Corner Overrides is active (Shift adds). Each
 override is one row, **Corner 1**, **Corner 2**… in pick order: its type, its **Flip** (greyed for
-None and Mitre) and a bin that removes it. The arrow on the Corner Overrides line folds the rows
-away; picking another corner opens them again. Pointing at an overridden corner in the view lights
+None and Mitre) and a bin that removes it, with a **Gap** row under it. The arrow on the Corner
+Overrides line folds the rows away; picking another corner opens them again. Pointing at an overridden corner in the view lights
 its row (or the Corner Overrides line while the rows are folded).
 
 ```json
 {"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "round_tube", "diameter": 40, "wall": 3}, "corner": "butt", "coped": true}}
-{"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "rect_tube", "width": 40, "height": 40, "wall": 3}, "corner": "mitre", "corners": [{"members": ["l1", "l2"], "corner": "butt", "flip": true}]}}
+{"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "rect_tube", "width": 40, "height": 40, "wall": 3}, "corner": "mitre", "corners": [{"members": ["l1", "l2"], "kind": "butt", "flip": true}]}}
 ```
 
 **Known limits.** Each section is placed from world Z and the line's own drawn direction. Where two
@@ -134,9 +138,10 @@ members' sections come in turned or offset differently (lines in a vertical plan
 to head, or 3D sketches), a rectangular, off-centre, angle or channel section will not meet wall to
 wall at a mitre or butt: the cut planes are right, but no section is turned to match. Square and
 round tubes centred on their lines always meet. Corners of 3D-sketch lines cut (the tie falls to
-drawing order) but cannot be picked in the dialog; set them through `corners` in the command. Nor
-can a corner where a point-to-point member ends: Corner Overrides takes the frame sketch's points and
-finds corners among its lines alone. Set those through `corners` with the pair's id; Edit Feature
+drawing order) but cannot be picked in the dialog; set them through `corners` in the command or
+with `frame.multi_trim`. Nor can a corner where a point-to-point member ends: Corner Overrides takes
+the frame sketch's points and finds corners among its lines alone. Set those the same way with the
+pair's id; Edit Feature
 keeps them, each listed by its type with a bin to remove it, and Remove Tube drops the overrides that
 name the tube it takes out. A box drag in the dialog doesn't pick 3D-sketch lines: click them one by
 one, or list them in `lines`.
@@ -165,8 +170,9 @@ rounded to 0.01 degrees:
 | over 120° | mitre |
 
 Between two different sections a mitre is replaced by a butt. A corner sharper than 5 degrees inside
-is refused as before. Under Auto the frame's own **Flip** is hidden: an override's Flip swaps which
-tube is long and which is short at its corner.
+is refused as before. Under Auto the frame's own **Flip** is hidden: an override's first member is
+the long tube at its corner, and its Flip swaps which tube is long and which is short from Auto's
+own choice.
 
 **Fits.** A tube that ends against the side of another (a T-junction), or one of three or more tubes
 ending at a point, is cut to fit the tube it meets, only near its end: flat on a box tube, with the
@@ -193,9 +199,10 @@ Mitre and Butt (None leaves them overlapping). The earliest in laying order
 stays whole; each other tube is cut into pieces, each fitted to the tube that stays whole, so nothing
 overlaps. Where more than two tubes pass through a point, or tubes also end there, the earliest stays
 whole and the rest are cut and fitted in laying order. A crossing override (**Crossing** row, picked
-at a sketch point lying at the crossing, also where another tube ends there) has **Flip** only: with
-it the other tube of the pair stays whole. Its type is ignored. Edit Feature lists an override of a
-crossing with no sketch point as a Crossing row with a bin; it still applies.
+at a sketch point lying at the crossing, also where another tube ends there) has **Flip** and
+**Gap** only: its first member stays whole (with Flip, the other tube of the pair does). Its type is
+ignored; its gap stands the pieces' ends off the tube that stays whole. Edit Feature lists an
+override of a crossing with no sketch point as a Crossing row with a bin; it still applies.
 
 Each piece is a tube of its own. The first piece keeps its line's name; a later piece is named
 `<line's name> · <crossing tube's name>`. Piece names are pinned like line names, so renaming a piece
@@ -218,9 +225,10 @@ name of a Move, Mirror or Pattern copy; the piece's name uses the tube's body na
 None leaves overlaps as they are. Split pieces behave like crossing pieces: their names are pinned
 once renamed (`names` accepts `L>X`), **Remove Tube** on one removes its whole line or pair, and End
 Cap goes on a piece's line end but refuses the end where it was cut ("not an open end"). To make the
-other tube give way, add a `corners` entry naming the two tubes' line or pair ids with Flip; its type
-is ignored, and an entry for two tubes that no longer overlap fails the frame with "A corner override
-is not at a corner of the frame".
+other tube give way, add a `corners` entry (or `frame.multi_trim`) naming the two tubes' line or pair
+ids, the one to stay whole first, or with Flip; its type is ignored, it takes no gap (an overlap is
+notched, not welded), and an entry for two tubes that no longer overlap fails the frame with "A
+corner override is not at a corner of the frame".
 
 **Fit Ends to Earlier Frames** (`fit_ends`, ticked by default in the dialog, false when absent)
 fits the tubes' free ends to the tubes of Frame Members made earlier in the timeline, to the Move,
@@ -235,17 +243,17 @@ so deep that its middle lies inside the earlier tube keeps what comes out of it;
 **Overrides.** Under Auto a `corners` entry may name any points where two or more tubes meet:
 `members` holds 2 to 1000 distinct ids, the point-to-point tubes ending there included. Auto is in the
 override type list only on an Auto frame; an Auto override on another frame builds as that frame's
-type, with the override's own Flip. While Corner Type is Auto the frame's Flip row is hidden, and Flip
-lives on each override row.
+type, with the override's own member order. While Corner Type is Auto the frame's Flip row is hidden,
+and Flip lives on each override row.
 
 ```json
 {"command": "frame.member", "params": {"sketch": "Frame", "profile": {"kind": "rect_tube", "width": 25, "height": 25, "wall": 2}, "corner": "auto", "fit_ends": true}}
 ```
 
 **Known limits of Auto** (and of crossings and overlaps under Mitre and Butt). Which tube
-gives way at an overlap can be set only through the command's `corners`: these overlaps usually have
-no sketch point to pick, so the dialog has no row for them. A tube passing through another at a very
-shallow angle is cut along the whole of their overlap, so it may lose a long sliver, as cut to fit
+gives way at an overlap can be set only through the command's `corners` or `frame.multi_trim`:
+these overlaps usually have no sketch point to pick, so the dialog has no row for them. A tube
+passing through another at a very shallow angle is cut along the whole of their overlap, so it may lose a long sliver, as cut to fit
 does elsewhere. A piece cut by a copy of an earlier tube has that copy's body name in its id, so
 renaming the copy unpins the piece's name. One tube cut into three or more pieces by a single other
 (a tube through both flanges of a channel or an I section), or by two pieces of one crossing line, gives
@@ -264,8 +272,8 @@ stay on the line's first piece, which no longer has that end, and fail with an e
 crossing keeps only what lies past the tube that stays whole: a stub wholly inside that tube is
 dropped (it has no body, and its pinned name is simply unused), and a stub that comes out past it is
 kept, fitted to that tube's face. Typical X braces have no sketch point where the diagonals cross, so
-their Flip can only be set through the command's `corners`. A fitted face is named after the cutting
-tube's piece id, so its name changes if that piece's id changes. With an off-centre anchor a piece's
+their Flip can only be set through the command's `corners` or `frame.multi_trim`. A fitted face is
+named after the cutting tube's piece id, so its name changes if that piece's id changes. With an off-centre anchor a piece's
 crossing end can reach past the whole tube, and a later frame's end landing in that sliver is fitted
 to air. A copy of a piece shorter than about twice the crossing tube's width may not be recognised as
 a tool, and a later frame's end meeting it is left overlapping. A frame has at most 1000 members,
@@ -273,6 +281,98 @@ counting pieces. A flat end meeting a round tube's seam in some layouts is refus
 an error. A member's face numbers can change when its line moves, because the kernel's face order
 follows placement; faces fitted against a reversed tube can be renamed if its direction flips. A
 brace landing at a very shallow angle can leave a small step.
+
+## Multi-trim and the weld gap
+
+**Multi-trim** is how a Frame Member cuts a tube by the shapes of other tubes: the cuts at corners,
+copes, ends fitted to a tube's middle or where three or more end, the pieces at crossings, the
+notches and splits where tubes overlap, and the ends fitted to earlier frames. It is SolidCraft's own
+code (`solidcraft_doc::frame_multi_trim`). A frame stays one timeline entry: only the corners you
+change are saved (Corner Overrides), and the frame works out every other corner each time it
+rebuilds, so sketch edits keep working. `frame.multi_trim` (below) changes one corner of a frame.
+
+**Gap** (`gap`, the row under Fit Ends to Earlier Frames and Coped; a length or an expression,
+default 0) leaves room for a weld at every welded end. It must be 0 to 1000 mm: "`gap` must be
+0…1000 mm, not 1200 mm". Members that run through keep their length; only the ends that meet another
+member move back:
+
+| Joint | With gap g |
+|---|---|
+| Mitre | each cut plane moves g/2 back along its member, measured square to the mitre plane |
+| Butt | the butting member's cut moves g away from the member that runs through |
+| Auto's angled butt | the long tube keeps its square cut; the short tube's cut moves g back |
+| Butt with Coped | the butting tube is cut by the other tube's real outline grown outward by g |
+| An end on another tube's middle, the fitted tubes where three or more end, Fit Ends to Earlier Frames | the end is fitted to the other tube's outline grown outward by g |
+| Pieces where tubes cross | their ends are fitted to the outline of the tube that stays whole, grown outward by g |
+| Overlap notches and splits | no gap |
+
+A grown tube's own cut ends move out by g as well, so the clearance is g all round, also next to
+that tube's cut face. On a 600 × 400 Mitre rectangle of 45 mm square bar, gap 3 makes every bar
+3√2 ≈ 4.24 mm shorter (1.5√2 at each end); on a Butt rectangle, gap 2 leaves the two 600 mm bars as
+they are and makes the 400 mm bars 4 mm shorter. With Fit Ends to Earlier Frames, a frame's ends stand
+off the earlier frames' tubes by its own gap. The row is greyed under None, which cuts nothing. A gap
+that leaves a member no length fails as any over-cut member does ("the member on line `id` was cut
+away completely"), and an outline that can't grow by the gap (an inside corner rounded less than the
+gap, or an arc meeting a side at a sharp corner) fails with "not supported yet: a weld gap of 20 mm
+round this member profile…". At gap 0 every frame builds exactly as before.
+
+A corner override's own **Gap** (`gap` on a `corners` entry; empty: the frame's) takes precedence at
+its corner: at a crossing it stands that crossing's pieces off, and where three or more end it also
+stands the fitted tubes off. An override of tubes that overlap takes none: "A corner override of
+tubes that overlap takes no `gap`: an overlap is notched, not welded".
+
+**Member order.** An override is saved as `{"members": [{"line": "l1"}, {"line": "l2"}], "kind":
+"butt", "gap": "2 mm"}`: its members in order (a line's id or a pair's `pair1`…), its `kind` (`auto`,
+`none`, `mitre` or `butt`) and its `gap` only when it has one. The order is fixed and decides the
+build, whatever later sketch edits do to the members' lengths:
+
+- Two members: the first runs through a Butt (coped or not) and is Auto's long tube at a butt or
+  angled butt. A Mitre ignores the order.
+- Three or more: the first two make the corner, in that order; the rest are fitted in laying order,
+  whatever order they are listed in.
+- A crossing: the first stays whole and the others are cut into pieces.
+- An overlap: the first stays whole and the other gives way.
+
+`kind: auto` is the frame's own type at that corner (Auto's table on an Auto frame) with this order.
+A crossing's or an overlap's kind is ignored: only its order counts. Corners nobody overrode keep the
+frame's own rules, the frame-wide **Flip** included.
+
+**Flip** on an override is given, never saved. `frame.member`'s `corners`, `frame.multi_trim` and
+`timeline.edit` take `flip` on an entry: the members are put in the order the frame's rules give
+them now (the member that runs through or stays whole first) and, with `flip: true`, the first two
+swapped. An entry without `flip` is saved in the order given. A member may also be written
+`{"feature": …, "line": …}` (in `frame.multi_trim` and `timeline.edit`; a new frame has no name
+yet): the frame's own name is dropped as the override is saved, and another frame's is refused ("not
+supported yet: a corner with a member of another frame"). A design saved by a test build of this
+change still opens: a member given as a bare id reads as `{line}`, `corner` as `kind`, `coped_butt`
+as Butt with Coped ticked, and a saved `flip` is dropped, the members keeping their written order
+(flip such a corner again where it needs it).
+
+**`frame.multi_trim`** (Multi-Trim Corner; no ribbon button, as the dialog's Corner Overrides rows
+are its UI) sets, changes or removes one override of a Frame Member in place, as one undo step:
+
+```json
+{"command": "frame.multi_trim", "params": {"feature": "Frame Member1", "members": ["l3", "l7"], "kind": "butt", "flip": true, "gap": "3 mm"}}
+{"command": "frame.multi_trim", "params": {"feature": "Frame Member1", "members": ["l3", "l7"], "remove": true}}
+```
+
+- `feature`: the Frame Member, by id or name.
+- `members`: 2 to 1000 line or pair ids (or `{feature?, line}`), in order, which must meet at a
+  corner, crossing or overlap of the frame ("a corner override is not at a corner of the frame"). A
+  piece of a crossing (`L>X`) is refused, as in `frame.member`: name its line.
+- `kind`: `auto` (the default), `none`, `mitre` or `butt`. `flip` and `gap` as above.
+- `remove: true` takes away the override of these members (in any order), and the corner goes back
+  to the frame's own rules; `kind`, `flip` or `gap` with it is refused. It also removes an override
+  whose members no longer meet after a sketch edit.
+
+It replaces the override of the same members (in any order) or adds one, and returns the edited
+feature as `frame.member` does.
+
+In the dialog, the frame's **Gap** sits under Fit Ends to Earlier Frames and Coped, and each Corner
+Overrides row has a **Gap** of its own, empty for the frame's (shown as its hint). A row's **Flip**
+shows ticked when its saved order differs from the order the frame would choose now: after a sketch
+edit that changes which member is longer a row can show ticked, and its saved order still holds. A
+row whose Flip is left alone goes back in its saved order on OK.
 
 ## frame.member
 
