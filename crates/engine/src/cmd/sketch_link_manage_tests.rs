@@ -6,7 +6,7 @@ use crate::Session;
 use serde_json::{Value, json};
 use solidcore_record::Vec2;
 use solidcraft_geom::prelude::*;
-use solidcraft_sketch::CurveKind;
+use solidcraft_sketch::{CurveKind, LinkGeom};
 
 fn run(s: &mut Session, cmd: &str, params: Value) -> Value {
     s.execute(cmd, &params).unwrap_or_else(|e| panic!("{cmd} {params}: {e}"))
@@ -581,43 +581,90 @@ fn rounds(s: &Session, sketch: u64, link: &str) -> Vec<(String, Vec2)> {
         .collect()
 }
 
-#[test]
-fn half_a_hole_breaks_the_rest_off_and_the_whole_hole_stays_deleted_through_a_resize() {
-    let (mut s, _, sketch, face) = parametric_plate(true);
-    let hole: Vec<String> = rounds(&s, sketch, &face).into_iter().map(|(id, _)| id).collect();
-    assert!(!hole.is_empty(), "premise: the hole is projected");
-    // A fresh projection gives a hole as one circle (#17175); a design saved before keeps its two
-    // halves (#18250). Where it comes in halves, one half: no source edge gives just that half (a
-    // one-edge wall gives both, a split wall's pieces are told apart only by number), so the rest
-    // is broken off.
-    if let [half, _, ..] = hole.as_slice() {
-        let r = run(&mut s, "sketch.delete", json!({"entities":[half]}));
-        let why = broken_because(&r, &face);
-        assert!(why.contains("more curves than the ones deleted") || why.contains("told apart only by number"), "{r}");
-        assert!(s.doc.sketch(sketch).unwrap().link(&face).is_none());
-        run(&mut s, "edit.undo", json!({}));
-    }
-    // The whole hole: kept out by its wall's family, however far the plate grows.
-    let outer: Vec<String> = link_lines(&s, sketch, &face, true).into_iter().map(|(id, ..)| id).collect();
+/// [`parametric_plate`] with its hole, as a design saved by a build that projected a closed
+/// circular edge as its two halves (before #17175) and opened again: the stored link holds the
+/// hole's rim as two arcs, which it keeps when the edge is read again as one circle (#18250).
+/// The sketch is open. Returns (session, sketch, face link).
+fn plate_saved_with_a_halved_hole() -> (Session, u64, String) {
+    let (s, _, sketch, face) = parametric_plate(true);
+    let mut doc = (*s.doc).clone();
+    let sk = doc.sketch_mut(sketch).unwrap();
+    let halved: Vec<LinkGeom> = sk
+        .link_curves(&face)
+        .into_iter()
+        .filter_map(|c| sk.curve_link_geom(c))
+        .flat_map(|g| match g {
+            LinkGeom::Circle(c, r) => {
+                let (east, west) = (Vec2::new(c.x + r, c.y), Vec2::new(c.x - r, c.y));
+                vec![LinkGeom::Arc { c, a: east, b: west }, LinkGeom::Arc { c, a: west, b: east }]
+            }
+            g => vec![g],
+        })
+        .collect();
+    assert_eq!(halved.iter().filter(|g| matches!(g, LinkGeom::Arc { .. })).count(), 2, "premise: the fresh hole was one circle");
+    assert!(sk.update_link(&face, &halved).unwrap(), "premise: the stored rim is rebuilt as two halves");
+    let mut s = Session { doc: solidcraft_doc::format::read(&doc.to_json()).unwrap().into(), ..Default::default() };
+    s.refresh();
+    run(&mut s, "sketch.edit", json!({"sketch":sketch}));
+    (s, sketch, face)
+}
+
+/// Deletes all of `hole` (the link's round curves): kept out by its wall's family, however far
+/// the plate grows, in the session and in the design saved and opened again.
+fn the_whole_hole_stays_deleted_through_a_resize(mut s: Session, sketch: u64, face: &str, hole: Vec<String>) {
+    let outer: Vec<String> = link_lines(&s, sketch, face, true).into_iter().map(|(id, ..)| id).collect();
     run(&mut s, "sketch.delete", json!({"entities":hole}));
-    assert_eq!(s.doc.sketch(sketch).unwrap().link(&face).unwrap().omit_edges.len(), 1, "one family");
+    assert_eq!(s.doc.sketch(sketch).unwrap().link(face).unwrap().omit_edges.len(), 1, "one family");
     run(&mut s, "sketch.finish", json!({}));
     run(&mut s, "parameters.change", json!({"name":"w","expression":"400 mm"}));
     let r = run(&mut s, "sketch.update_references", json!({}));
     assert_eq!(r["ok"], true, "{r}");
     let check = |s: &Session| {
-        assert!(rounds(s, sketch, &face).is_empty(), "the hole stays deleted");
-        let mut ids: Vec<String> = link_lines(s, sketch, &face, false).into_iter().map(|(id, ..)| id).collect();
+        assert!(rounds(s, sketch, face).is_empty(), "the hole stays deleted");
+        let mut ids: Vec<String> = link_lines(s, sketch, face, false).into_iter().map(|(id, ..)| id).collect();
         ids.sort();
         let mut want = outer.clone();
         want.sort();
         assert_eq!(ids, want, "the four outer edges stay, with their ids");
-        assert!(on_x(&link_lines(s, sketch, &face, false), 500.0).is_some(), "the right edge moved with the width");
+        assert!(on_x(&link_lines(s, sketch, face, false), 500.0).is_some(), "the right edge moved with the width");
     };
     check(&s);
     let mut reopened = Session { doc: solidcraft_doc::format::read(&s.doc.to_json()).unwrap().into(), ..Default::default() };
     reopened.refresh();
     check(&reopened);
+}
+
+/// A design saved with the hole in two halves (#18250). One half: no source edge gives just
+/// that half (a one-edge wall gives both, a split wall's pieces are told apart only by number),
+/// so the rest is broken off. The whole hole stays deleted through a resize.
+#[test]
+fn half_a_hole_breaks_the_rest_off_and_the_whole_hole_stays_deleted_through_a_resize() {
+    let (mut s, sketch, face) = plate_saved_with_a_halved_hole();
+    let hole: Vec<String> = rounds(&s, sketch, &face).into_iter().map(|(id, _)| id).collect();
+    assert_eq!(hole.len(), 2, "the hole comes as two halves");
+    let half = &hole[0];
+    let r = run(&mut s, "sketch.delete", json!({"entities":[half]}));
+    let why = broken_because(&r, &face);
+    assert!(why.contains("more curves than the ones deleted") || why.contains("told apart only by number"), "{r}");
+    assert!(s.doc.sketch(sketch).unwrap().link(&face).is_none());
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(rounds(&s, sketch, &face).len(), 2, "undo brings the link and both halves back");
+    the_whole_hole_stays_deleted_through_a_resize(s, sketch, &face, hole);
+}
+
+/// A fresh projection gives the hole as one circle (#17175): deleting it leaves the whole hole
+/// out, through a resize and a reopen.
+#[test]
+fn a_freshly_projected_hole_is_one_circle_and_stays_deleted_through_a_resize() {
+    let (s, _, sketch, face) = parametric_plate(true);
+    let hole: Vec<String> = rounds(&s, sketch, &face).into_iter().map(|(id, _)| id).collect();
+    assert_eq!(hole.len(), 1, "the hole comes as one circle");
+    {
+        let st = s.model.state();
+        let sk = &st.sketch(sketch).unwrap().sketch;
+        assert!(matches!(sk.curves[sk.curve_index(&hole[0]).unwrap()].kind, CurveKind::Circle { .. }), "a circle, not an arc");
+    }
+    the_whole_hole_stays_deleted_through_a_resize(s, sketch, &face, hole);
 }
 
 #[test]
