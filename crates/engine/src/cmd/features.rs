@@ -896,7 +896,9 @@ pub(super) fn add_feature_in(s: &mut Session, p: &Value, kind: FeatureKind, worl
     // `body_name`) has the rest numbered after the first by the evaluator: `Ribs`, `Ribs (2)`,
     // `Ribs (3)`… (#266, #373). They are stored on the feature, so recomputes and saved designs
     // keep them even when the profiles are later picked in another order.
-    if names.first().is_some_and(|n| !n.trim().is_empty()) {
+    // Pattern layouts pin each made name in its own slot after this command. Compacting
+    // them here would give a skipped copy the next copy's name on a fresh evaluation.
+    if names.first().is_some_and(|n| !n.trim().is_empty()) && s.model.state().pattern_body_layout(id).is_none() {
         let made: Vec<String> = s.model.state().bodies.iter().filter(|b| b.feature == id).map(|b| b.name.clone()).collect();
         if made.len() > names.len()
             && let Some(f) = s.doc_mut().feature_mut(id)

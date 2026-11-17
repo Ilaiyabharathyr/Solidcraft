@@ -22,7 +22,7 @@ pub struct SavedModel {
 
 /// Records refer to these at most.
 const MAX_ITEMS: usize = 1_000_000;
-/// Bodies, sketches, sheet bodies, sketch keys and named face points all the states hold
+/// Bodies, sketches, sheet bodies, sketch keys, named face points and pattern slots all states hold
 /// together, at most (a state is a list of clones).
 const MAX_HELD: usize = 50_000_000;
 /// Longest text a record holds (bytes). A feature's warning can quote every generated name of
@@ -646,6 +646,13 @@ impl SavedModel {
             }
             held = held.saturating_add(s.get("sheets").and_then(Json::as_array).map_or(0, Vec::len));
             held = held.saturating_add(key_sets.get(index(s.get("sketch_key_set"), key_sets.len())?).map_or(0, BTreeMap::len));
+            if let Some(layouts) = s.get("pattern_body_layouts") {
+                let invalid = || bad("saved model: pattern layouts");
+                for layout in layouts.as_object().ok_or_else(invalid)?.values() {
+                    let slots = layout.get("made_slots").and_then(Json::as_array).ok_or_else(invalid)?;
+                    held = held.saturating_add(1).saturating_add(slots.len());
+                }
+            }
             if held > MAX_HELD {
                 return Err(bad("saved model: states"));
             }
@@ -707,7 +714,7 @@ impl SavedModel {
                     None => BTreeMap::new(),
                 },
                 pattern_body_layouts: match s.get("pattern_body_layouts") {
-                    Some(v) => serde_json::from_value(v.clone()).map_err(invalid)?,
+                    Some(v) => serde::Deserialize::deserialize(v).map_err(invalid)?,
                     None => BTreeMap::new(),
                 },
                 named_faces,

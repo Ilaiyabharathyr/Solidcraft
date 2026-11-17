@@ -8,5 +8,75 @@
     "ui.pattern_skip_list": "Skipped",
     "ui.pattern_skip_restore": "Restore {number}",
     "ui.pattern_skip_selection": "Selection"
+  },
+  "ar": {
+    "ui.pattern_skip": "النسخ المراد تخطيها",
+    "ui.pattern_skip_box": "تحديد بمستطيل",
+    "ui.pattern_skip_clear": "مسح قائمة النسخ المتخطاة",
+    "ui.pattern_skip_hint": "انقر على العلامات أو اسحب حولها لتبديل حالة التخطي. اضغط Shift للتخطي أو Alt للاستعادة.",
+    "ui.pattern_skip_lasso": "تحديد حر",
+    "ui.pattern_skip_list": "النسخ المتخطاة",
+    "ui.pattern_skip_restore": "استعادة {number}",
+    "ui.pattern_skip_selection": "التحديد"
+  },
+  "de": {
+    "ui.pattern_skip": "Zu überspringende Instanzen",
+    "ui.pattern_skip_box": "Rechteckauswahl",
+    "ui.pattern_skip_clear": "Alle übersprungenen Instanzen wiederherstellen",
+    "ui.pattern_skip_hint": "Klicken Sie auf Markierungen oder ziehen Sie einen Rahmen darum, um den Status zu wechseln. Umschalt überspringt, Alt stellt wieder her.",
+    "ui.pattern_skip_lasso": "Lasso",
+    "ui.pattern_skip_list": "Übersprungen",
+    "ui.pattern_skip_restore": "{number} wiederherstellen",
+    "ui.pattern_skip_selection": "Auswahl"
+  },
+  "he": {
+    "ui.pattern_skip": "עותקים לדילוג",
+    "ui.pattern_skip_box": "בחירה במלבן",
+    "ui.pattern_skip_clear": "שחזור כל העותקים שדולגו",
+    "ui.pattern_skip_hint": "לחצו על סמנים או גררו מסביבם כדי לשנות את מצב הדילוג. Shift לדילוג, Alt לשחזור.",
+    "ui.pattern_skip_lasso": "בחירה חופשית",
+    "ui.pattern_skip_list": "עותקים שדולגו",
+    "ui.pattern_skip_restore": "שחזור {number}",
+    "ui.pattern_skip_selection": "בחירה"
+  },
+  "ja": {
+    "ui.pattern_skip": "スキップするインスタンス",
+    "ui.pattern_skip_box": "矩形選択",
+    "ui.pattern_skip_clear": "スキップしたインスタンスをすべて復元",
+    "ui.pattern_skip_hint": "マーカーをクリックするか、ドラッグで囲んでスキップ状態を切り替えます。Shift でスキップ、Alt で復元します。",
+    "ui.pattern_skip_lasso": "投げ縄選択",
+    "ui.pattern_skip_list": "スキップ済み",
+    "ui.pattern_skip_restore": "{number} を復元",
+    "ui.pattern_skip_selection": "選択"
+  },
+  "ko": {
+    "ui.pattern_skip": "건너뛸 인스턴스",
+    "ui.pattern_skip_box": "상자 선택",
+    "ui.pattern_skip_clear": "건너뛴 인스턴스 모두 복원",
+    "ui.pattern_skip_hint": "마커를 클릭하거나 드래그하여 둘러싸면 건너뛰기 상태가 전환됩니다. Shift로 건너뛰고 Alt로 복원합니다.",
+    "ui.pattern_skip_lasso": "자유형 선택",
+    "ui.pattern_skip_list": "건너뛴 인스턴스",
+    "ui.pattern_skip_restore": "{number} 복원",
+    "ui.pattern_skip_selection": "선택"
+  },
+  "vi": {
+    "ui.pattern_skip": "Các bản sao cần bỏ qua",
+    "ui.pattern_skip_box": "Chọn theo khung chữ nhật",
+    "ui.pattern_skip_clear": "Khôi phục tất cả bản sao đã bỏ qua",
+    "ui.pattern_skip_hint": "Nhấp vào dấu hoặc kéo khoanh quanh các dấu để chuyển trạng thái. Giữ Shift để bỏ qua hoặc Alt để khôi phục.",
+    "ui.pattern_skip_lasso": "Chọn theo vùng tự do",
+    "ui.pattern_skip_list": "Đã bỏ qua",
+    "ui.pattern_skip_restore": "Khôi phục {number}",
+    "ui.pattern_skip_selection": "Cách chọn"
+  },
+  "zh": {
+    "ui.pattern_skip": "要跳过的实例",
+    "ui.pattern_skip_box": "框选",
+    "ui.pattern_skip_clear": "恢复所有已跳过的实例",
+    "ui.pattern_skip_hint": "单击标记或拖动框住标记以切换跳过状态。按住 Shift 跳过，按住 Alt 恢复。",
+    "ui.pattern_skip_lasso": "套索选择",
+    "ui.pattern_skip_list": "已跳过",
+    "ui.pattern_skip_restore": "恢复 {number}",
+    "ui.pattern_skip_selection": "选择方式"
   }
 }

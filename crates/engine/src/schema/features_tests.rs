@@ -1419,6 +1419,7 @@ fn pattern_schemas_and_the_key_check_agree() {
             "path",
             "path_sketch",
             "sketch",
+            "skip_members",
             "spacing",
         ],
     );

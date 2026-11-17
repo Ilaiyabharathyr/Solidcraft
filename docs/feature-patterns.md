@@ -21,11 +21,13 @@ feature; editing a picked guide later does not change these saved vectors.
 
 For each direction, choose **Up to reference** to space the instances evenly
 towards a selected straight edge, planar face or construction plane. For an edge,
-pick one perpendicular to the pattern direction. **Offset from** is the distance
-to leave before the reference, measured along that direction. The seed stays in
-place. For a single hole, the offset is measured from the last hole's centre.
-For bodies and other supported features it is measured from the centre of the
-seed geometry's bounds. The saved reference and offset are used again on rebuild.
+pick one perpendicular to the pattern direction. **Offset from** sets how far
+the last copy in the row through the seed stops before the reference, measured
+along that direction. The seed stays in place. For a single hole, the distance
+is measured from the hole's centre. For bodies and other supported features, it
+is measured from the centre of the copied geometry's bounds. In an angled grid,
+the other rows can end at different distances from the reference. The pattern
+uses the saved reference and offset again on rebuild.
 
 For example, start with a hole centred 10 mm from the near end of a 200 mm plate.
 Select the far edge, set **Offset from** to 10 mm and **Quantity** to 7. The hole

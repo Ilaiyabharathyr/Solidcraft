@@ -13,12 +13,17 @@ use crate::{SolveApp, dialogs::Dialog, selection::BoxSel, viewport::Proj};
 const MARKER_RADIUS: f32 = 7.0;
 
 pub(crate) struct Cache {
+    session: u64,
     revision: u64,
     component: u64,
     frame: [[f64; 4]; 4],
     command: &'static str,
     params: Value,
     markers: Vec<PatternMarker>,
+}
+
+fn cache_for_session(cache: &Option<Cache>, session: u64) -> Option<&Cache> {
+    cache.as_ref().filter(|c| c.session == session)
 }
 
 pub(crate) fn active(app: &SolveApp) -> bool {
@@ -37,10 +42,7 @@ pub(crate) fn project(app: &mut SolveApp, proj: &Proj) -> Vec<(usize, Pos2)> {
     let component =
         app.dialog.as_ref().and_then(|d| d.editing).and_then(|(id, _)| session.doc.feature(id)).map_or(session.active_component, |f| f.component);
     let frame = crate::dialogs::feature_frame(session, component);
-    if app
-        .viewport
-        .pattern_skip_cache
-        .as_ref()
+    if cache_for_session(&app.viewport.pattern_skip_cache, session.uid)
         .is_none_or(|c| c.revision != revision || c.component != component || c.command != command || c.params != params || c.frame != frame)
     {
         let markers = if component == session.active_component {
@@ -52,7 +54,7 @@ pub(crate) fn project(app: &mut SolveApp, proj: &Proj) -> Vec<(usize, Pos2)> {
             author.pattern_markers(command, &params)
         }
         .unwrap_or_default();
-        app.viewport.pattern_skip_cache = Some(Cache { revision, component, frame, command, params, markers });
+        app.viewport.pattern_skip_cache = Some(Cache { session: session.uid, revision, component, frame, command, params, markers });
     }
     if !active(app) {
         return Vec::new();
@@ -76,7 +78,7 @@ pub(crate) fn project(app: &mut SolveApp, proj: &Proj) -> Vec<(usize, Pos2)> {
 
 pub(crate) fn skipped_numbers(app: &SolveApp, dialog: &Dialog) -> Vec<usize> {
     let (slots, members) = dialog.pattern_skipped();
-    let Some(cache) = app.viewport.pattern_skip_cache.as_ref() else { return Vec::new() };
+    let Some(cache) = cache_for_session(&app.viewport.pattern_skip_cache, app.session.uid) else { return Vec::new() };
     cache.markers.iter().enumerate().filter_map(|(i, marker)| is_skipped(marker, slots, members).then_some(i + 2)).collect()
 }
 
@@ -131,13 +133,17 @@ pub(crate) fn window(app: &mut SolveApp, markers: &[(usize, Pos2)], mut region: 
 }
 
 fn select(app: &mut SolveApp, numbers: impl Iterator<Item = usize>, modifiers: Modifiers) {
-    let Some(cache) = app.viewport.pattern_skip_cache.as_ref() else { return };
+    // OK has already captured the commands while its result is computing.
+    if app.applying.is_some() {
+        return;
+    }
+    let Some(cache) = cache_for_session(&app.viewport.pattern_skip_cache, app.session.uid) else { return };
     let Some(dialog) = app.dialog.as_mut() else { return };
     apply_selection(cache, dialog, numbers, modifiers);
 }
 
 pub(crate) fn restore(app: &SolveApp, dialog: &mut Dialog, number: usize) {
-    if let Some(cache) = app.viewport.pattern_skip_cache.as_ref() {
+    if let Some(cache) = cache_for_session(&app.viewport.pattern_skip_cache, app.session.uid) {
         apply_selection(cache, dialog, std::iter::once(number), Modifiers::ALT);
     }
 }

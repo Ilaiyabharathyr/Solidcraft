@@ -2315,6 +2315,39 @@ impl PlacementReads {
         }
     }
 
+    /// A named pattern end reads its target wherever the pattern can see that body.
+    /// A point pick or an ambiguous name can instead read any placement near the pick.
+    fn pattern_end(&mut self, doc: &Document, st: Option<&ModelState>, component: u64, end: &crate::PatternEnd) {
+        use crate::construct::GeoRef;
+        let body = match &end.target {
+            GeoRef::Face { name, .. } => st.zip(name.as_deref()).and_then(|(st, name)| crate::name_lookup::face_body(st, name)),
+            GeoRef::Edge { at, name } => st.zip(name.as_deref()).and_then(|(st, name)| {
+                let mut bodies = st.bodies.iter().filter(|b| crate::naming::locate_edge(b, name, *at).is_ok());
+                match (bodies.next(), bodies.next()) {
+                    (Some(body), None) => Some(body),
+                    _ => None,
+                }
+            }),
+            GeoRef::Plane { plane: PlaneRef::Construction { feature, .. } } => {
+                if let Some(source) = doc.feature(feature.0) {
+                    self.components.insert(source.component);
+                }
+                return;
+            }
+            _ => return,
+        };
+        if let Some(body) = body.filter(|body| st.and_then(|st| st.body(&body.name)).is_some_and(|first| std::ptr::eq(first, *body))) {
+            self.placed_body(st, &body.name);
+            let owner = doc.model_body_component(body);
+            if component == 0 && owner != 0 && !doc.occurrences.is_empty() {
+                self.paths.extend(doc.placements().into_iter().filter_map(|(component, path, _)| (component == owner).then_some(path)));
+            }
+        } else {
+            self.all = true;
+            self.unlisted = true;
+        }
+    }
+
     /// The same target selection as `apply_traced`, expanded only over the timeline input.
     fn drawn_targets(&mut self, st: Option<&ModelState>, f: &Feature) {
         let Some(st) = st else {
@@ -3102,6 +3135,11 @@ fn placement_digest(doc: &Document, f: &Feature, st: Option<&ModelState>) -> u64
         crate::feature_geometry::Geo::Construct(g) => geo_datum_paths(g, &mut datums),
         _ => {}
     });
+    if let FeatureKind::Pattern { pattern: PatternKind::Rectangular { reference1, reference2, .. }, .. } = &f.kind {
+        for end in reference1.iter().chain(reference2) {
+            reads.pattern_end(doc, st, f.component, end);
+        }
+    }
     match &f.kind {
         // To / From Object finds its target where the target's body is placed (#928): only that
         // body's placement, not every part's (#6325). Its tools meet their targets as other
@@ -5087,11 +5125,13 @@ fn empty_boolean_targets(doc: &Document, state: &ModelState, f: &Feature, tools:
 
 /// [`apply_op`] with tools whose lineage is known: the bodies it makes or changes keep theirs.
 fn apply_traced(doc: &Document, state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Operation, targets: &[String]) -> Result<()> {
-    apply_traced_with(doc, state, f, tools, op, targets, &[])
+    apply_traced_with(doc, state, f, tools, op, targets, &[], &[])
 }
 
 /// [`apply_traced`] with bodies that take part in the boolean besides the feature's targets:
-/// the body a Join extrude runs to (#6424), which joins with the tool.
+/// the body a Join extrude runs to (#6424), which joins with the tool. A pattern can also
+/// provide the name slots of the copies that make new bodies, including gaps for skips.
+#[allow(clippy::too_many_arguments)]
 fn apply_traced_with(
     doc: &Document,
     state: &mut ModelState,
@@ -5100,6 +5140,7 @@ fn apply_traced_with(
     op: Operation,
     targets: &[String],
     extra: &[String],
+    name_slots: &[usize],
 ) -> Result<()> {
     // Participants: the feature's own targets, else its explicit participants, else the bodies
     // of its component (and what it made itself): other components are left alone.
@@ -5146,7 +5187,7 @@ fn apply_traced_with(
             return Err(empty_boolean_targets(doc, state, f, &tools, targets.is_empty()));
         }
         for (k, t) in tools.into_iter().enumerate() {
-            let name = new_name(state, f, k);
+            let name = new_name(state, f, name_slots.get(k).copied().unwrap_or(k));
             state.bodies.push(ModelBody::traced_new(name, t, f.id));
         }
         return Ok(());
@@ -9215,7 +9256,7 @@ pub fn pattern_instance_markers(
         return Ok(markers);
     }
     let features = ordered_pattern_sources(doc, features);
-    for (src, placements) in copy_plan(doc, &vals, st, &features, &transforms, Some(pattern), true)? {
+    for (src, placements, _) in copy_plan(doc, &vals, st, &features, &transforms, Some(pattern), true)? {
         if placements.is_empty() {
             continue;
         }
@@ -9303,7 +9344,8 @@ fn pattern_seed_center(
                 // A blend can accompany one of the seeds; it has no independent placement.
                 continue;
             } else {
-                let tools = feature_tools_with_constructor(doc, vals, src, st, &mut None, &mut None, &mut None, true)?;
+                let moved = pattern_source_at_faces(doc, vals, st, st, src)?;
+                let tools = feature_tools_with_constructor(doc, vals, moved.as_ref().unwrap_or(src), st, &mut None, &mut None, &mut None, true)?;
                 for tool in tools {
                     bounds = bounds.union(&tool.body.exact_bounds()?);
                 }
@@ -9978,6 +10020,7 @@ struct PatternPlacement {
     transform: Mat,
     slot: PatternSlot,
     skipped: Vec<usize>,
+    index: usize,
 }
 
 impl PatternPlacement {
@@ -10020,7 +10063,8 @@ impl PatternScope {
     }
 }
 
-type FeatureCopies<'a> = (&'a Feature, Vec<PatternPlacement>);
+/// The active placements of a source, and the total including whole skipped placements.
+type FeatureCopies<'a> = (&'a Feature, Vec<PatternPlacement>, usize);
 
 fn ordered_pattern_sources(doc: &Document, features: &[FeatureId]) -> Vec<FeatureId> {
     let mut ids = features.to_vec();
@@ -10062,9 +10106,9 @@ fn copy_plan<'a>(
                     for (depth, scope) in scopes.iter().enumerate() {
                         scope.collect_exclusions(slot, k, depth, *id, &mut skipped);
                     }
-                    Some(PatternPlacement { instance, transform, slot: slot.clone(), skipped })
+                    Some(PatternPlacement { instance, transform, slot: slot.clone(), skipped, index: k })
                 });
-                out.push((src, copies.collect()));
+                out.push((src, copies.collect(), mats.len()));
                 continue;
             };
             if depth >= MAX_NESTING {
@@ -10119,12 +10163,12 @@ fn copy_plan<'a>(
 /// `features` ([`copy_plan`]). Naming finds a copy's faces through them.
 fn copy_instances(doc: &Document, vals: &BTreeMap<String, Value>, st: &ModelState, features: &[FeatureId], mats: &[Mat]) -> Result<Vec<Mat>> {
     let plan = copy_plan(doc, vals, st, features, mats, None, true)?;
-    let len = plan.iter().flat_map(|(_, copies)| copies.iter().map(|p| p.instance)).max().unwrap_or(0).max(mats.len());
+    let len = plan.iter().flat_map(|(_, copies, _)| copies.iter().map(|p| p.instance)).max().unwrap_or(0).max(mats.len());
     let mut all = vec![crate::IDENTITY; len];
     for (slot, m) in all.iter_mut().zip(mats) {
         *slot = *m;
     }
-    for (_, copies) in &plan {
+    for (_, copies, _) in &plan {
         for p in copies {
             if let Some(slot) = p.instance.checked_sub(1).and_then(|i| all.get_mut(i)) {
                 *slot = p.transform;
@@ -10250,14 +10294,19 @@ fn replay(
     let kept = ordered_pattern_sources(doc, features);
     let (mut missed, mut total) = (0usize, 0usize);
     let plan = copy_plan(doc, vals, st, &kept, mats, pattern, false)?;
+    let keep_output_slots = pattern.is_some()
+        && plan.iter().all(|(src, _, _)| feature_op(src).0 == Operation::NewBody)
+        && plan.iter().any(|(_, active, all)| active.len() < *all || active.iter().any(|copy| !copy.skipped.is_empty()));
+    let mut next_output = 0usize;
+    let mut made_slots = Vec::new();
     // A source's named faces are looked up in the model as it was before any copy was made: the
     // copy of an earlier source (a boss joined to the body) changes the faces a later source (a cut
     // starting on the boss) names, though the later source means the original's (#11792).
     // A hole placed from edges names those edges too (#16799): the second hole's edge names
     // mean the original's edges, which the first hole's copy has already cut into.
-    let named_from = plan.iter().any(|(src, _)| src.face_names.iter().chain(&src.edge_names).any(|n| !n.is_empty())).then(|| st.clone());
-    for (src, mats) in &plan {
-        if mats.is_empty() {
+    let named_from = plan.iter().any(|(src, _, _)| src.face_names.iter().chain(&src.edge_names).any(|n| !n.is_empty())).then(|| st.clone());
+    for (src, mats, placement_count) in &plan {
+        if mats.is_empty() && !keep_output_slots {
             continue;
         }
         // A fillet or chamfer repeats at the copied edges.
@@ -10386,6 +10435,7 @@ fn replay(
         let present: Vec<String> = targets.iter().filter(|t| st.bodies.iter().any(|b| &b.name == *t)).cloned().collect();
         let targets = if present.is_empty() { targets } else { present };
         let mut copies = Vec::new();
+        let mut output_slots = Vec::new();
         let mut instances = Vec::with_capacity(mats.len());
         // Each hole copy's axes (spot and direction), where the check for copies that miss looks
         // for material first.
@@ -10468,11 +10518,17 @@ fn replay(
             for placement in mats {
                 let PatternPlacement { instance: n, transform: m, .. } = placement;
                 let start = copies.len();
-                for (_, t) in tools.iter().enumerate().filter(|(k, _)| placement.keeps(*k)) {
+                for (k, t) in tools.iter().enumerate().filter(|(k, _)| placement.keeps(*k)) {
                     let recipe = t.recipe.map(|r| moved_recipe(r, m, src.id, *n));
                     copies.push(t.copied(kernel::transform_matrix(&t.body, *m)?, src.id, *n).with_recipe(recipe));
+                    if keep_output_slots {
+                        output_slots.push(next_output.saturating_add(placement.index.saturating_mul(tools.len())).saturating_add(k));
+                    }
                 }
                 instances.push(start..copies.len());
+            }
+            if keep_output_slots {
+                next_output = next_output.saturating_add(placement_count.saturating_mul(tools.len()));
             }
         }
         if copies.is_empty() {
@@ -10525,7 +10581,12 @@ fn replay(
             }
         }
         // New bodies from a pattern join their source when they touch it (as one feature would).
-        if f.body_names.is_empty() {
+        if keep_output_slots {
+            made_slots.extend_from_slice(&output_slots);
+        }
+        if keep_output_slots && !f.legacy_feature_pattern_names() {
+            apply_traced_with(doc, st, f, copies, op, &targets, &[], &output_slots)?;
+        } else if f.body_names.is_empty() {
             apply_traced(doc, st, f, copies, op, &targets)?;
         } else {
             let start = st.bodies.iter().filter(|b| b.feature == f.id).count();
@@ -10533,6 +10594,9 @@ fn replay(
             named.body_names = f.body_names.iter().skip(start).cloned().collect();
             apply_traced(doc, st, &named, copies, op, &targets)?;
         }
+    }
+    if keep_output_slots {
+        st.pattern_body_layouts.insert(f.id, PatternBodyLayout { copies_per_source: next_output, made_slots });
     }
     if missed > 0 {
         append_warning(warning, format!("{missed} of {total} cut copies remove no material"));
@@ -11483,7 +11547,7 @@ fn eval_feature_kind(
             // A Join extrude to an object joins that object too (#6424): the tool and the body
             // it runs to are one body, not only the body the profile was sketched on.
             let extra: Vec<String> = if *operation == Operation::Join { to_body.into_iter().collect() } else { Vec::new() };
-            apply_traced_with(doc, st, f, tools, *operation, &crate::plain(targets), &extra)?;
+            apply_traced_with(doc, st, f, tools, *operation, &crate::plain(targets), &extra, &[])?;
             unchanged(st, warning);
             Ok(())
         }

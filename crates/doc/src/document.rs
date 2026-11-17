@@ -3480,6 +3480,9 @@ impl Feature {
     pub fn pin_body_names(&mut self, made: &[String], left_out: &[usize], layout: Option<&crate::PatternBodyLayout>) {
         if let Some((names, _)) = self.pattern_pins(made, left_out, layout) {
             self.body_names = names;
+            if self.legacy_feature_pattern_names() {
+                self.pattern_names_in_order = false;
+            }
             return;
         }
         let slots = self.body_name_slots(made.len());
@@ -3500,7 +3503,12 @@ impl Feature {
         matches!(&self.kind, FeatureKind::Pattern { bodies, .. } if bodies.len() > 1)
     }
 
-    /// The names a body Pattern of several bodies stores when it made the copies `made` (in the
+    /// Whether saved names still follow the order of the feature copies that were made.
+    pub fn legacy_feature_pattern_names(&self) -> bool {
+        self.pattern_names_in_order && matches!(&self.kind, FeatureKind::Pattern { bodies, .. } if bodies.is_empty())
+    }
+
+    /// The names a Pattern stores when it made the copies `made` (in the
     /// order it made them) and could not copy the sources `left_out` (indices into its bodies),
     /// with the slot each of `made` takes among them. The names are stored source by source,
     /// one for every copy of every source (`eval::pattern_name_slot`): a left-out source's copies
@@ -3511,21 +3519,37 @@ impl Feature {
     pub fn pattern_pins(&self, made: &[String], left_out: &[usize], layout: Option<&crate::PatternBodyLayout>) -> Option<(Vec<String>, Vec<usize>)> {
         let FeatureKind::Pattern { bodies, .. } = &self.kind else { return None };
         let sources = bodies.len();
-        if let Some(layout) = layout.filter(|layout| layout.made_slots.len() == made.len() && layout.copies_per_source < crate::MAX_PATTERN_INSTANCES)
-        {
+        if let Some(layout) = layout.filter(|layout| {
+            layout.made_slots.len() == made.len()
+                && layout.copies_per_source <= made.len().saturating_add(self.body_names.len()).saturating_add(crate::MAX_PATTERN_INSTANCES)
+        }) {
+            // Feature patterns that make separate bodies have one ordered sequence of output slots.
+            let sources = sources.max(1);
             let copies = layout.copies_per_source;
-            let mut names: Vec<_> = (0..sources)
-                .flat_map(|s| {
-                    (0..copies).map(move |k| {
-                        crate::eval::pattern_name_slot(self.body_names.len(), sources, copies, s, k, self.pattern_names_in_order)
-                            .and_then(|i| self.body_names.get(i))
-                            .cloned()
-                            .unwrap_or_default()
+            let legacy = self.legacy_feature_pattern_names();
+            let mut names: Vec<_> = if legacy {
+                vec![String::new(); copies]
+            } else {
+                (0..sources)
+                    .flat_map(|s| {
+                        (0..copies).map(move |k| {
+                            crate::eval::pattern_name_slot(self.body_names.len(), sources, copies, s, k, self.pattern_names_in_order)
+                                .and_then(|i| self.body_names.get(i))
+                                .cloned()
+                                .unwrap_or_default()
+                        })
                     })
-                })
-                .collect();
+                    .collect()
+            };
             for (name, &slot) in made.iter().zip(&layout.made_slots) {
                 names.get_mut(slot)?.clone_from(name);
+            }
+            if legacy {
+                let made: std::collections::BTreeSet<_> = made.iter().collect();
+                let unused = self.body_names.iter().filter(|name| !name.is_empty() && !made.contains(name));
+                for (slot, name) in names.iter_mut().filter(|name| name.is_empty()).zip(unused) {
+                    slot.clone_from(name);
+                }
             }
             return Some((names, layout.made_slots.clone()));
         }

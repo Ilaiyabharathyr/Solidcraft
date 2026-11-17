@@ -815,6 +815,127 @@ fn rectangular_pattern_reference_in_direction_two_works_with_spacing_in_directio
     }
 }
 
+#[test]
+fn rectangular_body_pattern_follows_a_reference_in_a_moved_component() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 4, "width": 4, "height": 4, "center": [10, 0, 0], "body_name": "Seed"}));
+    let part = run(&mut s, "component.create", json!({"name": "Guide", "grounded": false}));
+    run(&mut s, "solid.box", json!({"length": 4, "width": 8, "height": 8, "corner": [100, -4, -4], "body_name": "Stop"}));
+    run(&mut s, "component.activate", json!({"component": "root"}));
+    for (kind, point, end) in [("face", [100, 0, 0], 100.0), ("edge", [100, 0, 4], 100.0)] {
+        let mut params = json!({"bodies": ["Seed"], "dir1": [1, 0, 0], "count1": 2, "body_name": kind, "offset1": 10});
+        params["reference1"][kind] = json!(point);
+        run(&mut s, "solid.pattern.rectangular", params);
+        let x = s.model.state().body(kind).unwrap().body.exact_bounds().unwrap().center().x;
+        assert!((x - (end - 10.0)).abs() < 1e-6, "{kind}: {x}");
+    }
+    run(&mut s, "occurrence.move", json!({"occurrence": part["occurrence"], "translate": [30, 0, 0]}));
+    for name in ["face", "edge"] {
+        let x = s.model.state().body(name).unwrap().body.exact_bounds().unwrap().center().x;
+        assert!((x - 120.0).abs() < 1e-6, "{name} should follow the moved stop: {x}");
+    }
+}
+
+#[test]
+fn rectangular_pattern_measures_the_seed_at_its_resolved_from_face() {
+    let mut s = Session::default();
+    run(&mut s, "parameters.add", json!({"name": "startHeight", "expression": "10 mm"}));
+    run(&mut s, "solid.box", json!({"length": 8, "width": 8, "height": "startHeight", "corner": [0, 0, 0], "body_name": "Start"}));
+    run(&mut s, "solid.box", json!({"length": 8, "width": 8, "height": 1, "corner": [30, 0, 99], "body_name": "Stop"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Square"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [1, 1], "p1": [3, 3]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(
+        &mut s,
+        "solid.extrude",
+        json!({"sketch": "Square", "from": [2, 2, 10], "distance": 10, "operation": "new", "name": "Seed feature", "body_name": "Seed"}),
+    );
+    run(
+        &mut s,
+        "solid.pattern.rectangular",
+        json!({"features": ["Seed feature"], "dir1": [0, 0, 1], "count1": 2, "reference1": {"face": [32, 2, 100]}, "body_name": "Copy"}),
+    );
+    let center = |s: &Session, name| s.model.state().body(name).unwrap().body.exact_bounds().unwrap().center().z;
+    assert!((center(&s, "Seed") - 15.0).abs() < 1e-6);
+    assert!((center(&s, "Copy") - 100.0).abs() < 1e-6);
+    run(&mut s, "parameters.change", json!({"name": "startHeight", "expression": "20 mm"}));
+    assert!((center(&s, "Seed") - 25.0).abs() < 1e-6);
+    assert!((center(&s, "Copy") - 100.0).abs() < 1e-6);
+}
+
+#[test]
+fn feature_and_body_pattern_copy_names_keep_their_slots_when_skipped() {
+    fn copies(s: &Session, pattern: u64) -> Vec<(String, i64)> {
+        s.model
+            .state()
+            .bodies
+            .iter()
+            .filter(|b| b.feature == pattern)
+            .map(|b| (b.name.clone(), b.body.exact_bounds().unwrap().min.x.round() as i64))
+            .collect()
+    }
+
+    let command = "solid.pattern.rectangular";
+    for (key, seed) in [("features", "Seed feature"), ("bodies", "Seed body")] {
+        for initially_skipped in [false, true] {
+            let mut s = Session::default();
+            run(
+                &mut s,
+                "solid.box",
+                json!({"length": 4, "width": 4, "height": 4, "corner": [0, 0, 0], "name": "Seed feature", "body_name": "Seed body"}),
+            );
+            let mut params = json!({"dir1": [1, 0, 0], "count1": 4, "spacing1": 10, "body_name": "Copy"});
+            params[key] = json!([seed]);
+            params["skip"] = if initially_skipped { json!([3]) } else { json!([]) };
+            let reply = run(&mut s, command, params.clone());
+            let id = reply["feature"].as_u64().unwrap();
+            let before = copies(&s, id);
+            assert_eq!(reply["created_bodies"], json!(before.iter().map(|(name, _)| name).collect::<Vec<_>>()));
+            if !initially_skipped {
+                assert_eq!(before.iter().map(|(_, x)| *x).collect::<Vec<_>>(), [10, 20, 30]);
+                params["skip"] = json!([3]);
+                run(&mut s, "timeline.redefine", json!({"feature": id, "command": command, "params": params}));
+            }
+            let kept: Vec<_> = before.into_iter().filter(|(_, x)| *x != 20).collect();
+            assert_eq!(copies(&s, id), kept, "{key}: the remaining copies keep their names");
+            let mut reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+            assert_eq!(copies(&reopened, id), kept, "{key}: names agree with the command after reopening");
+            params["skip"] = json!([]);
+            run(&mut reopened, "timeline.redefine", json!({"feature": id, "command": command, "params": params}));
+            let restored = copies(&reopened, id);
+            assert_eq!(restored.iter().map(|(_, x)| *x).collect::<Vec<_>>(), [10, 20, 30]);
+            assert_eq!(restored.into_iter().filter(|(_, x)| *x != 20).collect::<Vec<_>>(), kept, "{key}: names after restore");
+        }
+    }
+}
+
+#[test]
+fn a_legacy_feature_pattern_keeps_saved_copy_names_when_opened_and_restored() {
+    let mut session = Session::default();
+    run(&mut session, "solid.box", json!({"length": 4, "width": 4, "height": 4, "corner": [0, 0, 0], "name": "Seed feature"}));
+    let command = "solid.pattern.rectangular";
+    let mut params = json!({"features": ["Seed feature"], "dir1": [1, 0, 0], "count1": 4, "spacing1": 10, "skip": [2]});
+    let id = run(&mut session, command, params.clone())["feature"].as_u64().unwrap();
+    // The prior build saved the names of the second and third copies in a compact list.
+    let mut saved: Value = serde_json::from_str(&session.doc.to_json()).unwrap();
+    saved["format_pending"].as_array_mut().unwrap().retain(|step| step != "feature-pattern-output-names");
+    let feature = saved["features"].as_array_mut().unwrap().iter_mut().find(|feature| feature["id"] == id).unwrap();
+    feature["body_names"] = json!(["Copy", "Copy (2)"]);
+    let doc = solidcraft_doc::Document::from_json(&saved.to_string()).unwrap();
+    assert!(doc.feature(id).unwrap().legacy_feature_pattern_names());
+
+    let mut reopened = Session::new(doc);
+    assert!(!reopened.doc.feature(id).unwrap().legacy_feature_pattern_names());
+    assert_eq!(reopened.doc.feature(id).unwrap().body_names, ["", "Copy", "Copy (2)"]);
+    let location = |s: &Session, name| s.model.state().body(name).unwrap().body.exact_bounds().unwrap().min.x.round() as i64;
+    assert_eq!((location(&reopened, "Copy"), location(&reopened, "Copy (2)")), (20, 30));
+
+    params["skip"] = json!([]);
+    run(&mut reopened, "timeline.redefine", json!({"feature": id, "command": command, "params": params}));
+    assert_eq!(reopened.model.state().bodies.iter().filter(|b| b.feature == id).count(), 3);
+    assert_eq!((location(&reopened, "Copy"), location(&reopened, "Copy (2)")), (20, 30));
+}
+
 fn pattern_hole_centres(s: &Session) -> std::collections::BTreeSet<(i64, i64)> {
     let state = s.model.state();
     let plate = &state.body("Plate").unwrap().body;
