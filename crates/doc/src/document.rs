@@ -1770,7 +1770,6 @@ pub enum FeatureKind {
     /// them.
     SheetConvert {
         body: BodyName,
-        #[walk(pick_if = !bends.is_empty())]
         face: FacePick,
         /// The faces picked after the first.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
