@@ -1288,15 +1288,13 @@ pub fn commands(app: &SolveApp, m: &Member, inputs: &[SelInput], extra: &Map<Str
             let flips = crossed || override_flips(corner);
             let mut entry = json!({"kind": corner_name(corner)});
             // A row whose Flip was not touched goes back in its saved order, as long as it names the same members;
-            // any other row as `corner_at_point` lists them with its Flip, which the command applies to today's
-            // order. A pair's order means nothing where Flip is greyed (Mitre, None), but three or more's does.
+            // any other row as `corner_at_point` lists them with its Flip (unset where greyed), which the command
+            // applies to today's order: so a Mitre or None row is saved in today's order too, and reopens unflipped.
             let same = |order: &Vec<String>| order.len() == ends.len() && ends.iter().all(|e| order.contains(e));
             match o.and_then(|o| o.saved.as_ref()).filter(|(order, was)| *was == flip && same(order)) {
                 Some((order, _)) => entry["members"] = json!(order),
                 None => {
-                    if flips || ends.len() > 2 {
-                        entry["flip"] = json!(flip && flips);
-                    }
+                    entry["flip"] = json!(flip && flips);
                     entry["members"] = json!(ends);
                 }
             }
