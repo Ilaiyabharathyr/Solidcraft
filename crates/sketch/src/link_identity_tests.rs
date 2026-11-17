@@ -1,6 +1,5 @@
 use super::*;
 use crate::{ConstraintKind, solve};
-use solidcraft_geom::prelude::*;
 
 fn square(size: f64) -> Vec<LinkGeom> {
     let pts = [Vec2::new(-size, -size), Vec2::new(size, -size), Vec2::new(size, size), Vec2::new(-size, size)];
