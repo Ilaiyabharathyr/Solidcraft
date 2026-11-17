@@ -6,12 +6,12 @@
 use serde_json::json;
 use solidcraft_engine::Sel;
 use solidcraft_engine::sketch::{Link, LinkKind, LinkSource};
+use solidcraft_theme::Tokens;
 
 use crate::{
     SolveApp,
     browser::{Row, Spec, node_row},
     context_menu::Target,
-    theme::Tokens,
     ui_kit::browser::Rows,
 };
 
