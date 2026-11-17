@@ -851,8 +851,8 @@ pub fn rows(app: &SolveApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
     if flips(m.corner) {
         form_row(ui, "Flip", |ui| check(ui, &mut m.flip));
     }
-    // Fit Ends to Earlier Frames, Coped to the right of its box and the weld Gap after it. None fits, copes and welds
-    // nothing: no Fit Ends, and Coped and Gap greyed.
+    // Fit Ends to Earlier Frames, and Coped to the right of its box; the weld Gap under them (a row of its own: beside
+    // Coped the card has no room for it). None fits, copes and welds nothing: no Fit Ends, and Coped and Gap greyed.
     let none = m.corner == NONE;
     form_row(ui, if none { "" } else { "Fit Ends to Earlier Frames" }, |ui| {
         if !none {
@@ -864,10 +864,9 @@ pub fn rows(app: &SolveApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
             if !none {
                 m.coped = on;
             }
-            ui.label(tr("Gap"));
-            enter |= crate::ui_kit::named_control(ui, "Gap", |ui| crate::ui_kit::hint_field(ui, &mut m.gap, "0 mm"));
         });
     });
+    enter |= ui.add_enabled_ui(!none, |ui| hint_row(ui, "Gap", &mut m.gap, "0 mm")).inner;
     // The overridden corner under the pointer in the view lights its row, or the Corner Overrides
     // line while the rows are folded.
     let hovered = match &app.viewport.hover {
@@ -943,9 +942,9 @@ fn corner_label(n: usize) -> String {
 
 /// Under Corner Overrides, one row for each picked corner, "Corner n" in pick order: its type (as it
 /// builds on this frame, [`override_type`]) or for a crossing "Crossing" (its Flip keeps the other
-/// tube whole), its Flip (greyed for None and Mitre, so the rows line up), its Gap (empty: the frame's, shown as
-/// the hint) and a bin; then one for each saved override whose lines no longer meet, kept until it is removed (as it
-/// was saved: no Gap). Folded, none show. `lit`: the picked corner under the pointer in the view, whose row is lit.
+/// tube whole), its Flip (greyed for None and Mitre, so the rows line up) and a bin, with a Gap row under it (empty:
+/// the frame's, shown as the hint); then one for each saved override whose lines no longer meet, kept until it is
+/// removed (as it was saved: no Gap). Folded, none show. `lit`: the picked corner under the pointer in the view, whose row is lit.
 /// `crossings`: which picks are crossings ([`crossing`]), then which kept overrides are ([`kept_crossings`]). True
 /// when Enter was pressed in a Gap.
 fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>, crossings: &[bool]) -> bool {
@@ -979,10 +978,10 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>, crossings:
         ui.scope_builder(egui::UiBuilder::new().id_salt(("frame_corner", n)), |ui| {
             lit_rows(ui, &label, lit == Some(n), |ui| {
                 form_row(ui, &label, |ui| {
-                    // What is left beside Flip (box, gap, label), the Gap (two control heights wide at the least) and the bin.
+                    // What is left beside Flip (box, gap, label) and the bin.
                     let t = solidcraft_theme::Tokens::get();
-                    let beside = t.space_14 + t.space_6 + crate::ui_kit::ContentWidth::label(ui, tr("Flip")) + 3.0 * t.control_height;
-                    let room = ui.available_width() - beside - 3.0 * ui.spacing().item_spacing.x;
+                    let beside = t.space_14 + t.space_6 + crate::ui_kit::ContentWidth::label(ui, tr("Flip")) + t.control_height;
+                    let room = ui.available_width() - beside - 2.0 * ui.spacing().item_spacing.x;
                     // The type takes the width its longest label needs (never what Flip and the bin need).
                     let translated: Vec<&str> = labels.iter().map(|l| solidcraft_ui_text::tr_label(l)).collect();
                     let width = crate::ui_kit::ContentWidth::dropdown(ui, &translated).min(room);
@@ -1012,15 +1011,13 @@ fn corner_rows(ui: &mut egui::Ui, d: &mut Dialog, lit: Option<usize>, crossings:
                             *flip = on;
                         }
                     });
-                    // The Gap fills the row up to the bin, at the right edge of the value column.
-                    let width = (ui.available_width() - t.control_height - ui.spacing().item_spacing.x).max(0.0);
-                    enter |= crate::ui_kit::settings_control_width(ui, width, |ui| {
-                        crate::ui_kit::named_control(ui, "Gap", |ui| crate::ui_kit::hint_field(ui, gap, &frame_gap))
-                    });
+                    // The bin sits at the right edge of the value column.
+                    ui.add_space((ui.available_width() - t.control_height).max(0.0));
                     if crate::ui_kit::bin_button(ui, tr("Remove this corner")).clicked() {
                         drop = Some(pick.clone());
                     }
                 });
+                enter |= hint_row(ui, "Gap", gap, &frame_gap);
             });
         });
     }

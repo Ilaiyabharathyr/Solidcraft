@@ -1812,25 +1812,25 @@ fn saved(corners: &Value) -> Value {
     serde_json::to_value(serde_json::from_value::<Vec<solidcraft_engine::doc::frame::CornerOverride>>(corners.clone()).unwrap()).unwrap()
 }
 
-/// The text fields named `label` whose middle is at height `y` (a row's): each one's left edge and whether it is
-/// greyed.
-fn fields_on_row(h: &crate::scenario::Harness, label: &str, y: f64) -> Vec<(f64, bool)> {
+/// The Gap fields on the row under the one at height `y`: whether each is greyed.
+fn gaps_under(h: &crate::scenario::Harness, y: f64) -> Vec<bool> {
     let tree = h.output.accesskit_update.as_ref().unwrap();
+    let row = f64::from(solidcraft_theme::Tokens::get().control_height);
     tree.nodes
         .iter()
-        .filter(|(_, n)| n.role() == egui::accesskit::Role::TextInput && n.label() == Some(label))
-        .filter_map(|(_, n)| n.bounds().filter(|b| (f64::midpoint(b.y0, b.y1) - y).abs() < 2.0).map(|b| (b.x0, n.is_disabled())))
+        .filter(|(_, n)| n.role() == egui::accesskit::Role::TextInput && n.label() == Some("Gap"))
+        .filter(|(_, n)| n.bounds().is_some_and(|b| (2.0..1.5 * row).contains(&(f64::midpoint(b.y0, b.y1) - y))))
+        .map(|(_, n)| n.is_disabled())
         .collect()
 }
 
-/// Gap (#17854) is a field after Coped on the Fit Ends row: typed, it goes into the command as `gap`; 0 or empty
+/// Gap (#17854) is a row of its own under Fit Ends and Coped: typed, it goes into the command as `gap`; 0 or empty
 /// sends nothing; under None it is greyed and sends nothing. An edit brings it back.
 #[test]
 fn the_gap_field_is_sent() {
     let (mut h, _) = overrides_dialog("butt");
-    let [cx, cy] = h.widget("Coped").unwrap();
-    let gap = fields_on_row(&h, "Gap", cy);
-    assert!(matches!(gap.as_slice(), [(x, false)] if *x > cx), "one enabled Gap after Coped (at {cx}): {gap:?}");
+    let [_, cy] = h.widget("Coped").unwrap();
+    assert_eq!(gaps_under(&h, cy), [false], "one enabled Gap under Coped");
     let sent = |h: &crate::scenario::Harness| apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap()[0].1.get("gap").cloned();
     assert_eq!(sent(&h), None, "Gap starts empty: nothing sent");
     for (typed, expected) in [("3 mm", Some(json!("3 mm"))), ("0", None), ("0 mm", None), ("", None)] {
@@ -1841,7 +1841,7 @@ fn the_gap_field_is_sent() {
     member(h.app.dialog.as_mut().unwrap()).corner = corner_type("none");
     h.frames(2);
     let [_, cy] = h.widget("Coped").unwrap();
-    assert!(matches!(fields_on_row(&h, "Gap", cy).as_slice(), [(_, true)]), "Gap is greyed under None");
+    assert_eq!(gaps_under(&h, cy), [true], "Gap is greyed under None");
     assert_eq!(sent(&h), None, "under None no gap is sent");
     member(h.app.dialog.as_mut().unwrap()).corner = corner_type("butt");
     let c = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
@@ -1852,14 +1852,14 @@ fn the_gap_field_is_sent() {
     assert_eq!(member(&mut e).gap, "3 mm");
 }
 
-/// Each Corner Overrides row has a Gap field of its own (empty: the frame's): a row sends its `kind` and its gap, a
-/// Mitre row (Flip greyed) no `flip`, a Butt row its `flip`. A kept override of tubes that overlap has no Gap field.
+/// Each Corner Overrides row has a Gap row of its own under it (empty: the frame's): a row sends its `kind` and its
+/// gap, a Mitre row (Flip greyed) no `flip`, a Butt row its `flip`. A kept override of tubes that overlap has no Gap.
 #[test]
 fn an_override_row_sends_its_gap_and_kind() {
     let (mut h, _) = overrides_dialog("butt");
     for n in [1, 2] {
         let [_, y] = h.widget(&format!("Corner {n}")).unwrap();
-        assert_eq!(fields_on_row(&h, "Gap", y).len(), 1, "Corner {n} has a Gap");
+        assert_eq!(gaps_under(&h, y), [false], "Corner {n} has a Gap");
     }
     let m = member(h.app.dialog.as_mut().unwrap());
     m.overrides[0].corner = corner_type("mitre");
@@ -1892,7 +1892,7 @@ fn an_override_row_sends_its_gap_and_kind() {
     h.app.dialog = Some(e);
     h.frames(2);
     let [_, y] = h.widget("Corner 1").unwrap();
-    assert!(fields_on_row(&h, "Gap", y).is_empty(), "the overlap row has no Gap");
+    assert!(gaps_under(&h, y).is_empty(), "the overlap row has no Gap");
 }
 
 /// The Butt frame on the rectangle with an override at (0, 0) saved in today's order and one at (600, 400) saved
