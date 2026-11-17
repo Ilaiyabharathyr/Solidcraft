@@ -5987,6 +5987,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "solidcraft-develop"
+version = "0.44.0"
+dependencies = [
+ "solidcore-ops",
+ "solidcore-record",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "solidcraft-display-units"
 version = "0.44.0"
 
@@ -6003,6 +6012,7 @@ dependencies = [
  "solidcore-tess",
  "solidcraft-color",
  "solidcraft-derive",
+ "solidcraft-develop",
  "solidcraft-display-units",
  "solidcraft-format",
  "solidcraft-geom",
@@ -6044,6 +6054,7 @@ dependencies = [
  "solidcore-record",
  "solidcraft-color",
  "solidcraft-control",
+ "solidcraft-develop",
  "solidcraft-doc",
  "solidcraft-geom",
  "solidcraft-io",
