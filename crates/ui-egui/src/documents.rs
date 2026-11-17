@@ -13,8 +13,8 @@ use solidcraft_viewport::Camera;
 
 use crate::SolveApp;
 use crate::design_tab_prefs::DesignTabPrefs;
-use crate::design_views::{DesignView, ViewKind, ViewSet};
 use crate::ui_kit;
+use solidcraft_views::{DesignView, ViewKind, ViewSet};
 
 /// Continue transient shot queues without adopting their document or view into the active tab.
 pub(crate) fn advance_render_batches(app: &mut SolveApp, ctx: &egui::Context) {
@@ -60,6 +60,9 @@ pub struct DocSlot {
     pub(crate) tab: u64,
     /// The views of the design (its sub-tabs), kept while another design is shown.
     views: ViewSet,
+    /// What each of its views shows besides the camera ([`ViewInspect`]), kept while another design is shown.
+    inspect: ViewInspect,
+    navigation: ViewNavigation,
     /// Opened behind the shown design: framed when it is first shown.
     fit: bool,
 }
@@ -72,6 +75,8 @@ pub struct DocSlot {
 struct DocWork {
     /// Shared panel content belongs to the design, independently of its current placement.
     bom: Option<crate::bom_panel::BomPanel>,
+    params: Option<crate::params_dialog::ParamsDialog>,
+    design_properties: Option<crate::design_properties::DesignProperties>,
     dialog: Option<crate::dialogs::Dialog>,
     editing_state: Option<crate::dialogs::EditingState>,
     tool: Option<crate::tools::Tool>,
@@ -84,9 +89,9 @@ struct DocWork {
 /// computing after OK can't wait (its result belongs to the window thread): that dialog is
 /// cancelled, as without the preference. Without the preference the toolbar tab is still kept
 /// (`remember_toolbar_tab`), once the dialog and tool are gone, so it is a tab they leave behind.
-fn take_work(app: &mut SolveApp) -> DocWork {
+fn take_work(app: &mut SolveApp, presenting: bool) -> DocWork {
     let bom = app.bom.take();
-    if !app.preferences.keep_work_on_tab_switch || app.applying.is_some() {
+    if !presenting && (!app.preferences.keep_work_on_tab_switch || app.applying.is_some()) {
         crate::dialogs::cancel(app);
         app.tool = None;
         let tab = app.preferences.remember_toolbar_tab.then(|| (app.ui.tab.clone(), app.ui.ribbon_context.clone(), app.ui.sketch_return_tab.clone()));
@@ -94,6 +99,8 @@ fn take_work(app: &mut SolveApp) -> DocWork {
     }
     DocWork {
         bom,
+        params: presenting.then(|| app.params.take()).flatten(),
+        design_properties: presenting.then(|| app.design_properties.take()).flatten(),
         dialog: app.dialog.take(),
         editing_state: app.editing_state.take(),
         tool: app.tool.take(),
@@ -107,6 +114,8 @@ fn take_work(app: &mut SolveApp) -> DocWork {
 /// `before`: the session's revision before the switch moved it on to refresh the views.
 fn put_work(app: &mut SolveApp, mut work: DocWork, before: u64) {
     app.bom = work.bom;
+    app.params = work.params;
+    app.design_properties = work.design_properties;
     crate::bom_panel::set_focus_pending(app, true);
     // That refresh is not a change to the design: the edit's Cancel must still see the design
     // it left (`Session::restore_editor` compares revisions), as `PendingFeatureEdit` does.
@@ -170,6 +179,8 @@ impl DocSlot {
             jobs: Default::default(),
             tab: next_tab(),
             views: ViewSet::new(),
+            inspect: ViewInspect::new(),
+            navigation: ViewNavigation::new(),
             fit: false,
         }
     }
@@ -181,9 +192,37 @@ pub(crate) fn next_tab() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// What a place of a layout shows when the design has no view for it yet (the Layout menu's
+/// "Empty cells show"). A choice for this session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LayoutFill {
+    /// A new angle of the shown view: a copy of it.
+    #[default]
+    Angle,
+    /// The standard views in turn: front, right, top.
+    Standard,
+    /// An empty cell that asks what to show.
+    Picker,
+}
+
+impl LayoutFill {
+    pub const ALL: [LayoutFill; 3] = [LayoutFill::Angle, LayoutFill::Standard, LayoutFill::Picker];
+
+    /// The key the Layout menu's row has.
+    pub fn key(self) -> &'static str {
+        match self {
+            LayoutFill::Angle => "fill.angle",
+            LayoutFill::Standard => "fill.standard",
+            LayoutFill::Picker => "fill.picker",
+        }
+    }
+}
+
 /// The open designs: one slot per tab; the active tab's slot is empty (its design is in the app).
 #[derive(Default)]
 pub struct Documents {
+    /// What the places of a layout without a view show ([`LayoutFill`]).
+    pub(crate) layout_fill: LayoutFill,
     slots: Vec<Option<DocSlot>>,
     pub active: usize,
     /// A tab waiting for the answer to "save changes?".
@@ -209,8 +248,13 @@ pub struct Documents {
     active_tab: u64,
     /// The shown design's views ([`DocSlot::views`] for the others); see [`apply_view`].
     pub(crate) views: ViewSet,
+    /// What each of the shown design's views shows besides the camera ([`DocSlot::inspect`] for the others).
+    pub(crate) inspect: ViewInspect,
+    navigation: ViewNavigation,
     /// A view's name being typed in its sub-tab ([`view_rename_start`]).
     pub(crate) view_rename: Option<ViewRename>,
+    /// Click placement in progress (design tab id, view id).
+    pub(crate) view_placement: Option<(u64, u64)>,
 }
 
 /// A view of the shown design whose name is being typed: the view, the text and whether the
@@ -437,31 +481,43 @@ fn put_view(app: &mut SolveApp, v: DocView) {
 }
 
 /// Put `slot` into the app and return what was there.
-fn swap_in(app: &mut SolveApp, mut slot: DocSlot) -> DocSlot {
+fn swap_in(app: &mut SolveApp, mut slot: DocSlot, presenting: bool) -> DocSlot {
     let reveals = crate::browser::take_reveals(app);
-    crate::semantic_content::leave_document(app);
-    if crate::render_workspace::active(app) {
-        let _ = crate::render_workspace::enter(app, false);
+    if !presenting {
+        crate::select_other::close(app);
+        crate::semantic_content::leave_document(app);
+        if crate::render_workspace::active(app) {
+            let _ = crate::render_workspace::enter(app, false);
+        }
+        crate::timeline::stop_playback(app);
+        crate::sketch_text_move::cancel_drag(app);
+        crate::dim_view::cancel();
+        app.cancel_view_animation();
+        app.viewport.orbit_free = None;
+        app.preview.reset();
+        app.viewport.hover = None;
+        crate::design_properties::close_object(app);
+        crate::sketch_attachment_ui::clear(app);
+        crate::agent_chat::leave_document(app);
+        app.edit_anchor_hint = None;
     }
-    // Whatever was going on in the design leaves with it: cancelled, or kept with its tab
-    // (`take_work`).
-    crate::timeline::stop_playback(app);
-    crate::sketch_text_move::cancel_drag(app);
-    let work = take_work(app);
-    crate::dim_view::cancel();
-    app.params = None;
-    app.design_properties = None;
-    app.cancel_view_animation();
-    app.viewport.orbit_free = None;
-    app.preview.reset();
-    app.viewport.hover = None;
-    crate::design_properties::close_object(app);
-    crate::sketch_attachment_ui::clear(app);
-    crate::agent_chat::leave_document(app);
+    let work = take_work(app, presenting);
+    let outgoing_view = app.docs.views.active().id;
+    let mut outgoing_navigation = ViewLook::from_ui(&app.ui);
+    outgoing_navigation.motion.swap(app);
+    app.docs.navigation.insert(outgoing_view, outgoing_navigation);
+    // Tile slots are local to the shown design. Re-upload after another design used them.
+    for look in slot.navigation.values_mut() {
+        look.scenes = Default::default();
+    }
+    let incoming_view = slot.views.active().id;
+    if let Some(mut look) = slot.navigation.remove(&incoming_view) {
+        look.swap(app);
+    } else {
+        crate::viewport::ViewScenes::default().swap(&mut app.viewport);
+    }
     app.agent_chat.swap_document(&mut slot.agent_chat);
     let out_rev = app.session.revision;
-    // A click's point means nothing in the other design.
-    app.edit_anchor_hint = None;
     let mut out = DocSlot {
         session: std::mem::replace(&mut app.session, slot.session),
         autosave: app.autosave.as_mut().and_then(|a| std::mem::replace(&mut a.active, slot.autosave)),
@@ -480,6 +536,8 @@ fn swap_in(app: &mut SolveApp, mut slot: DocSlot) -> DocSlot {
         jobs: app.swap_jobs(slot.jobs),
         tab: std::mem::replace(&mut app.docs.active_tab, slot.tab),
         views: std::mem::replace(&mut app.docs.views, slot.views),
+        inspect: std::mem::replace(&mut app.docs.inspect, slot.inspect),
+        navigation: std::mem::replace(&mut app.docs.navigation, slot.navigation),
         fit: false,
     };
     crate::browser::restore_reveals(app, slot.reveals);
@@ -499,11 +557,13 @@ fn swap_in(app: &mut SolveApp, mut slot: DocSlot) -> DocSlot {
     crate::print_face_ui::sync(&mut app.session, &app.preferences);
     // Views cache by revision: the incoming design must not look unchanged.
     let before = app.session.revision;
-    app.session.invalidate_view(out_rev);
-    if let Some(pending) = &mut app.pending_feature_edit {
-        pending.view_changed(before, app.session.revision);
+    if !presenting {
+        app.session.invalidate_view(out_rev);
+        if let Some(pending) = &mut app.pending_feature_edit {
+            pending.view_changed(before, app.session.revision);
+        }
+        app.jobs_view_changed(before, app.session.revision);
     }
-    app.jobs_view_changed(before, app.session.revision);
     crate::browser::forget_found(app);
     put_work(app, slot.work, before);
     out
@@ -549,7 +609,7 @@ pub fn switch(app: &mut SolveApp, i: usize) {
     };
     crate::linked_source::note_unread(app);
     let fit = incoming.fit;
-    let out = swap_in(app, incoming);
+    let out = swap_in(app, incoming, false);
     // Give up the old design's renames now, before an editor drawn later in this frame commits one.
     give_up_renames_of_other_designs(app);
     if fit {
@@ -637,6 +697,7 @@ pub(crate) fn sync_views(app: &mut SolveApp) {
     };
     let prefs = DesignTabPrefs::from(&app.preferences);
     let views = &mut app.docs.views;
+    let before = views.active().id;
     match shown {
         Some((kind, subject)) => {
             if prefs.opens_sub_tab(kind) && (views.active().kind != kind || views.active().subject != subject) {
@@ -651,19 +712,365 @@ pub(crate) fn sync_views(app: &mut SolveApp) {
         }
         None => {}
     }
+    let after = views.active().id;
+    if before != after {
+        switch_navigation(app, before, after);
+    }
 }
 
 /// Change the shown design's views with `change`; when that changes the active view, the app
 /// shows the new one ([`apply_view`]).
 fn change_views<T>(app: &mut SolveApp, change: impl FnOnce(&mut ViewSet) -> T) -> T {
     let before = app.docs.views.active().id;
+    keep_look(app);
     let result = change(&mut app.docs.views);
+    app.docs.navigation.retain(|id, _| app.docs.views.has_open_or_closed(*id) || app.view_windows.keeps_view(app.docs.active_tab, *id));
     let active = app.docs.views.active();
     if active.id != before {
         let active = active.clone();
+        switch_navigation(app, before, active.id);
+        let perspective = app.ui.perspective;
         apply_view(app, &active);
+        if active.kind == ViewKind::Model {
+            // Leaving Render restores the Model projection from which it was entered.
+            // An explicitly selected Model view already supplied its own projection.
+            app.ui.perspective = perspective;
+        }
+        show_look(app, &active);
     }
     result
+}
+
+/// The section and analyses each view of a design shows, by view id: a view that was never left
+/// has none and shows what the design shows now.
+pub(crate) type ViewInspect = std::collections::HashMap<u64, solidcraft_engine::InspectState>;
+
+/// Runtime navigation state belongs to the view, including a gesture or animation in progress.
+type ViewNavigation = std::collections::HashMap<u64, ViewLook>;
+
+#[derive(Clone, Copy)]
+struct ViewOptions {
+    show_grid: bool,
+    ground_shadow: bool,
+    show_navigation_bar: bool,
+    tool_cursor: bool,
+    perspective: bool,
+    auto_ortho_faces: bool,
+    visual_style: u8,
+    view_angles_lock_yaw: bool,
+    view_angles_lock_pitch: bool,
+    view_angles_lock_roll: bool,
+}
+
+struct ViewLook {
+    options: ViewOptions,
+    motion: ViewMotion,
+    scenes: crate::viewport::ViewScenes,
+}
+
+impl ViewOptions {
+    fn from_ui(ui: &crate::UiState) -> Self {
+        Self {
+            show_grid: ui.show_grid,
+            ground_shadow: ui.ground_shadow,
+            show_navigation_bar: ui.show_navigation_bar,
+            tool_cursor: ui.tool_cursor,
+            perspective: ui.perspective,
+            auto_ortho_faces: ui.auto_ortho_faces,
+            visual_style: ui.visual_style,
+            view_angles_lock_yaw: ui.view_angles_lock_yaw,
+            view_angles_lock_pitch: ui.view_angles_lock_pitch,
+            view_angles_lock_roll: ui.view_angles_lock_roll,
+        }
+    }
+
+    fn swap(&mut self, ui: &mut crate::UiState) {
+        std::mem::swap(&mut self.show_grid, &mut ui.show_grid);
+        std::mem::swap(&mut self.ground_shadow, &mut ui.ground_shadow);
+        std::mem::swap(&mut self.show_navigation_bar, &mut ui.show_navigation_bar);
+        std::mem::swap(&mut self.tool_cursor, &mut ui.tool_cursor);
+        std::mem::swap(&mut self.perspective, &mut ui.perspective);
+        std::mem::swap(&mut self.auto_ortho_faces, &mut ui.auto_ortho_faces);
+        std::mem::swap(&mut self.visual_style, &mut ui.visual_style);
+        std::mem::swap(&mut self.view_angles_lock_yaw, &mut ui.view_angles_lock_yaw);
+        std::mem::swap(&mut self.view_angles_lock_pitch, &mut ui.view_angles_lock_pitch);
+        std::mem::swap(&mut self.view_angles_lock_roll, &mut ui.view_angles_lock_roll);
+    }
+}
+
+impl ViewLook {
+    fn from_ui(ui: &crate::UiState) -> Self {
+        Self { options: ViewOptions::from_ui(ui), motion: ViewMotion::default(), scenes: Default::default() }
+    }
+
+    fn swap(&mut self, app: &mut SolveApp) {
+        self.options.swap(&mut app.ui);
+        self.motion.swap(app);
+        self.scenes.swap(&mut app.viewport);
+    }
+}
+
+/// The gesture state used by the one navigation path while this view is in the app.
+#[derive(Default)]
+struct ViewMotion {
+    cam_anim: Option<solidcraft_viewport::CameraAnim>,
+    pending_fit: Option<(Camera, solidcraft_engine::geom::Aabb3, bool, bool)>,
+    fit_waits: u32,
+    axis_drag: Option<egui::Pos2>,
+    axis_warp: Option<egui::Pos2>,
+    nav: Option<crate::viewport::NavMode>,
+    primary_nav: Option<crate::viewport::NavMode>,
+    zoom_shortcut_drag: bool,
+    modifier_nav: Option<(crate::viewport::NavMode, egui::Pos2)>,
+    button_nav: Option<(crate::prefs::NavButton, Option<crate::viewport::NavMode>)>,
+    right_drag: bool,
+    orbit_pivot: Option<solidcore_record::Vec3>,
+    orbit_pivot_at: Option<egui::Pos2>,
+    twist_pivot: Option<solidcore_record::Vec3>,
+    twist_last: Option<f64>,
+    orbit_from: Option<crate::navigation::OrbitFrom>,
+    cursor_wrap: Option<egui::Vec2>,
+    orbit_free: Option<Camera>,
+    spin: bool,
+    spin_pivot: Option<solidcore_record::Vec3>,
+    spin_pivot_at: Option<egui::Pos2>,
+    wheel_zoom_raw_until_idle: bool,
+    trackpad_until_idle: bool,
+    trackpad_gesture: bool,
+    trackpad_gesture_bracketed: bool,
+    trackpad_coast: crate::navigation::TrackpadCoast,
+    device_pivot: Option<solidcore_record::Vec3>,
+    key_hold: Option<crate::navigation::KeyHold>,
+    mouse: Option<egui::Pos2>,
+    hover: Option<crate::viewport::Hit>,
+    select_other: crate::select_other::State,
+}
+
+impl ViewMotion {
+    fn swap(&mut self, app: &mut SolveApp) {
+        std::mem::swap(&mut self.cam_anim, &mut app.cam_anim);
+        std::mem::swap(&mut self.pending_fit, &mut app.pending_fit);
+        std::mem::swap(&mut self.fit_waits, &mut app.fit_waits);
+        std::mem::swap(&mut self.axis_drag, &mut app.viewport.axis_drag);
+        std::mem::swap(&mut self.axis_warp, &mut app.viewport.axis_warp);
+        std::mem::swap(&mut self.nav, &mut app.viewport.nav);
+        std::mem::swap(&mut self.primary_nav, &mut app.viewport.primary_nav);
+        std::mem::swap(&mut self.zoom_shortcut_drag, &mut app.viewport.zoom_shortcut_drag);
+        std::mem::swap(&mut self.modifier_nav, &mut app.viewport.modifier_nav);
+        std::mem::swap(&mut self.button_nav, &mut app.viewport.button_nav);
+        std::mem::swap(&mut self.right_drag, &mut app.viewport.right_drag);
+        std::mem::swap(&mut self.orbit_pivot, &mut app.viewport.orbit_pivot);
+        std::mem::swap(&mut self.orbit_pivot_at, &mut app.viewport.orbit_pivot_at);
+        std::mem::swap(&mut self.twist_pivot, &mut app.viewport.twist_pivot);
+        std::mem::swap(&mut self.twist_last, &mut app.viewport.twist_last);
+        std::mem::swap(&mut self.orbit_from, &mut app.viewport.orbit_from);
+        std::mem::swap(&mut self.cursor_wrap, &mut app.viewport.cursor_wrap);
+        std::mem::swap(&mut self.orbit_free, &mut app.viewport.orbit_free);
+        std::mem::swap(&mut self.spin, &mut app.viewport.spin);
+        std::mem::swap(&mut self.spin_pivot, &mut app.viewport.spin_pivot);
+        std::mem::swap(&mut self.spin_pivot_at, &mut app.viewport.spin_pivot_at);
+        std::mem::swap(&mut self.wheel_zoom_raw_until_idle, &mut app.viewport.wheel_zoom_raw_until_idle);
+        std::mem::swap(&mut self.trackpad_until_idle, &mut app.viewport.trackpad_until_idle);
+        std::mem::swap(&mut self.trackpad_gesture, &mut app.viewport.trackpad_gesture);
+        std::mem::swap(&mut self.trackpad_gesture_bracketed, &mut app.viewport.trackpad_gesture_bracketed);
+        std::mem::swap(&mut self.trackpad_coast, &mut app.viewport.trackpad_coast);
+        std::mem::swap(&mut self.device_pivot, &mut app.viewport.device_pivot);
+        std::mem::swap(&mut self.key_hold, &mut app.viewport.key_hold);
+        std::mem::swap(&mut self.mouse, &mut app.viewport.mouse);
+        std::mem::swap(&mut self.hover, &mut app.viewport.hover);
+        std::mem::swap(&mut self.select_other, &mut app.viewport.select_other);
+    }
+}
+
+fn switch_navigation(app: &mut SolveApp, before: u64, id: u64) {
+    crate::select_other::close(app);
+    let mut look = app.docs.navigation.remove(&id).unwrap_or_else(|| ViewLook::from_ui(&app.ui));
+    look.swap(app);
+    // A single view always uploads to slot zero, regardless of which sub-tab is shown.
+    if !app.docs.views.is_tiled() {
+        app.viewport.invalidate_view_uploads();
+    }
+    if app.docs.views.has_open_or_closed(before) {
+        app.docs.navigation.insert(before, look);
+    }
+}
+
+/// Find and select a design by its stable tab id, even after tabs move.
+pub(crate) fn select_tab(app: &mut SolveApp, tab: u64) -> bool {
+    if app.docs.current_tab() == tab {
+        return true;
+    }
+    let Some(index) = app.docs.slots.iter().position(|slot| slot.as_ref().is_some_and(|slot| slot.tab == tab)) else {
+        return false;
+    };
+    let Some(incoming) = app.docs.slots.get_mut(index).and_then(Option::take) else {
+        return false;
+    };
+    let out = swap_in(app, incoming, true);
+    if let Some(slot) = app.docs.slots.get_mut(app.docs.active) {
+        *slot = Some(out);
+    }
+    app.docs.active = index;
+    true
+}
+
+pub(crate) fn view_window_ids(app: &SolveApp) -> Vec<(u64, solidcraft_views::WindowId)> {
+    std::iter::once((app.docs.current_tab(), &app.docs.views))
+        .chain(app.docs.slots.iter().flatten().map(|slot| (slot.tab, &slot.views)))
+        .flat_map(|(tab, views)| views.windows().iter().map(move |window| (tab, window.id)))
+        .collect()
+}
+
+pub(crate) fn view_workspace(kind: ViewKind) -> &'static str {
+    match kind {
+        ViewKind::Sketch => "SKETCH",
+        ViewKind::Render => "RENDER",
+        _ => "MODEL",
+    }
+}
+
+pub(crate) fn move_view_to_window(
+    app: &mut SolveApp,
+    id: u64,
+    target: solidcraft_views::WindowTarget,
+) -> Result<solidcraft_views::Moved, solidcraft_views::MoveError> {
+    keep_look(app);
+    let before = app.docs.views.active().id;
+    let moved = app.docs.views.move_to_window(id, target)?;
+    if before != app.docs.views.active().id {
+        let active = app.docs.views.active().clone();
+        switch_navigation(app, before, active.id);
+        apply_view(app, &active);
+        show_look(app, &active);
+    }
+    Ok(moved)
+}
+
+#[cfg(test)]
+pub(crate) fn detach_view(app: &mut SolveApp, id: u64) -> Option<ViewSet> {
+    keep_look(app);
+    let before = app.docs.views.active().id;
+    let detached = app.docs.views.detach(id)?;
+    if before == id {
+        park_navigation(app, before);
+        let active = app.docs.views.active().clone();
+        apply_view(app, &active);
+        show_active_look(app);
+    }
+    Some(detached)
+}
+
+fn park_navigation(app: &mut SolveApp, id: u64) {
+    let mut look = ViewLook::from_ui(&app.ui);
+    look.swap(app);
+    app.docs.navigation.insert(id, look);
+}
+
+pub(crate) fn park_active_look(app: &mut SolveApp) {
+    keep_look(app);
+    let active = app.docs.views.active();
+    if active.kind == ViewKind::Render {
+        app.render_workspace.view.render_camera = Some(app.cam);
+    }
+    let id = active.id;
+    park_navigation(app, id);
+}
+
+pub(crate) fn show_active_look(app: &mut SolveApp) {
+    let view = app.docs.views.active().clone();
+    if let Some(mut look) = app.docs.navigation.remove(&view.id) {
+        look.swap(app);
+    }
+    if view.kind == ViewKind::Render
+        && let Some(camera) = app.render_workspace.view.render_camera
+    {
+        app.cam = camera;
+        app.ui.perspective = camera.fov > 0.0;
+    }
+    show_look(app, &view);
+}
+
+/// Put a window's view strip back when the window closes or its drawing finishes.
+pub(crate) fn exchange_window_views(app: &mut SolveApp, tab: u64, views: &mut ViewSet) {
+    if app.docs.current_tab() == tab {
+        std::mem::swap(&mut app.docs.views, views);
+    } else if let Some(slot) = app.docs.slots.iter_mut().flatten().find(|slot| slot.tab == tab) {
+        std::mem::swap(&mut slot.views, views);
+        if let Some(spec) = slot.views.active().spec {
+            slot.cam = spec.camera;
+        }
+    }
+}
+
+pub(crate) fn put_view_window(app: &mut SolveApp, tab: u64, window: solidcraft_views::PopOut) {
+    if app.docs.current_tab() == tab {
+        app.docs.views.put_window(window);
+    } else if let Some(slot) = app.docs.slots.iter_mut().flatten().find(|slot| slot.tab == tab) {
+        slot.views.put_window(window);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reattach_window_views(app: &mut SolveApp, tab: u64, views: ViewSet) {
+    if app.docs.current_tab() == tab {
+        app.docs.views.reattach(views);
+    } else if let Some(slot) = app.docs.slots.iter_mut().flatten().find(|slot| slot.tab == tab) {
+        slot.views.reattach(views);
+    }
+}
+
+/// Keep how the shown Model view looks at the design (its camera) with that view, so it comes back
+/// as it was left: two Model views of one design are two angles, not one.
+pub(crate) fn keep_look(app: &mut SolveApp) {
+    let active = app.docs.views.active();
+    if active.kind == ViewKind::Model {
+        let id = active.id;
+        app.docs.views.set_spec(id, solidcraft_viewport::ViewSpec::new(app.cam));
+        app.docs.inspect.insert(id, app.session.inspect());
+    }
+}
+
+/// Show `view` from the angle it was left at. A view that was never left (a new one) keeps the
+/// angle the design looks from now.
+fn show_look(app: &mut SolveApp, view: &DesignView) {
+    if view.kind == ViewKind::Model
+        && let Some(spec) = view.spec
+    {
+        app.cam = spec.camera;
+    }
+    if view.kind == ViewKind::Model
+        && let Some(state) = app.docs.inspect.get(&view.id)
+    {
+        app.session.set_inspect(state.clone());
+    }
+}
+
+/// Run `draw` with the Model view `id` standing in for the shown one: its camera and analyses are
+/// the app's while `draw` runs, and what `draw` left them as (an orbit, a dragged cut) is kept with
+/// that view. The shown view's own come back afterwards. This is how the views of a tiled window
+/// are each drawn and handled by the one viewport code.
+pub(crate) fn with_view_look<T>(app: &mut SolveApp, id: u64, draw: impl FnOnce(&mut SolveApp) -> T) -> T {
+    if id == app.docs.views.active().id {
+        return draw(app);
+    }
+    let Some(view) = app.docs.views.get(id).cloned() else { return draw(app) };
+    let shown = (app.cam, app.session.inspect());
+    let mut look = app.docs.navigation.remove(&id).unwrap_or_else(|| ViewLook::from_ui(&app.ui));
+    look.swap(app);
+    show_look(app, &view);
+    let out = draw(app);
+    app.docs.views.set_spec(id, solidcraft_viewport::ViewSpec::new(app.cam));
+    app.docs.inspect.insert(id, app.session.inspect());
+    look.swap(app);
+    app.docs.navigation.insert(id, look);
+    app.cam = shown.0;
+    app.session.set_inspect(shown.1);
+    out
+}
+
+/// Make the view `id` the shown one, keeping the look of the one it replaces.
+pub(crate) fn focus_view(app: &mut SolveApp, id: u64) -> bool {
+    change_views(app, |views| views.activate(id))
 }
 
 /// Open a view of `kind` showing `subject` in the shown design and show it (`reuse`: one that
@@ -673,7 +1080,7 @@ fn change_views<T>(app: &mut SolveApp, change: impl FnOnce(&mut ViewSet) -> T) -
 pub fn view_open(app: &mut SolveApp, kind: ViewKind, subject: Option<String>, reuse: bool) -> u64 {
     let prefs = DesignTabPrefs::from(&app.preferences);
     if !prefs.opens_sub_tab(kind) {
-        apply_view(app, &DesignView { id: 0, kind, name: String::new(), subject });
+        apply_view(app, &DesignView { id: 0, kind, name: String::new(), subject, spec: None });
         return app.docs.views.active().id;
     }
     change_views(app, |views| views.open(kind, subject, reuse && prefs.reuse_views))
@@ -698,6 +1105,17 @@ fn remember_views_in(app: &SolveApp, i: usize, dir: &std::path::Path) {
     }
     let session = if i == app.docs.active { Some(&app.session) } else { app.docs.slots.get(i).and_then(Option::as_ref).map(|slot| &slot.session) };
     let (Some(path), Some(views)) = (session.and_then(|session| session.path.as_deref()), views_of(app, i)) else { return };
+    // The shown Model view is saved from the angle the design looks from now.
+    let mut views = views.clone();
+    if i == app.docs.active && views.active().kind == ViewKind::Model {
+        let id = views.active().id;
+        views.set_spec(id, solidcraft_viewport::ViewSpec::new(app.cam));
+    }
+    // Persist the views now. Native placement restoration is a later slice.
+    let windows: Vec<_> = views.windows().iter().map(|window| window.id).collect();
+    for window in windows {
+        views.close_window(window);
+    }
     if let Err(e) = crate::view_memory::remember(dir, path, views.to_json()) {
         log::warn!("could not remember the views of {path}: {e}");
     }
@@ -717,15 +1135,21 @@ fn restore_views_in(app: &mut SolveApp, path: &str, dir: &std::path::Path) {
         return;
     }
     let Some(session) = session_at(app, path) else { return };
-    let Some(set) = crate::view_memory::recall(dir, path)
+    let Some(mut set) = crate::view_memory::recall(dir, path)
         .and_then(|saved| crate::view_memory::restorable(&saved, |kind, subject| can_restore(session, kind, subject)))
     else {
         return;
     };
+    let windows: Vec<_> = set.windows().iter().map(|window| window.id).collect();
+    for window in windows {
+        set.close_window(window);
+    }
     if app.session.path.as_deref().is_some_and(|p| same_path(p, path)) {
         app.docs.views = set;
+        app.docs.navigation.clear();
         let active = app.docs.views.active().clone();
         apply_view(app, &active);
+        show_look(app, &active);
     } else if let Some(slot) = app.docs.slots.iter_mut().flatten().find(|slot| slot.session.path.as_deref().is_some_and(|p| same_path(p, path))) {
         slot.views = set;
     }
@@ -747,7 +1171,15 @@ pub(crate) fn design_opened(app: &mut SolveApp, path: &str) {
 
 /// Close the view `id` of the shown design (never the last one; Reopen brings it back).
 pub fn view_close(app: &mut SolveApp, id: u64) -> bool {
+    if let Some(closed) = crate::view_windows::close_view(app, id) {
+        return closed;
+    }
     change_views(app, |views| views.close(id))
+}
+
+/// Stop showing the view `id` beside the others; it stays open, reached from the bar.
+pub fn view_unshow(app: &mut SolveApp, id: u64) -> bool {
+    change_views(app, |views| views.unshow(id))
 }
 
 /// Close the other views of the shown design, keeping `id`.
@@ -762,6 +1194,10 @@ pub fn view_close_right_of(app: &mut SolveApp, id: u64) {
 
 /// Show the view `id` of the shown design. False when there is none.
 pub fn view_activate(app: &mut SolveApp, id: u64) -> bool {
+    crate::view_windows::focus_view(app, id, None).is_ok()
+}
+
+pub(crate) fn activate_local_view(app: &mut SolveApp, id: u64) -> bool {
     change_views(app, |views| views.activate(id))
 }
 
@@ -785,7 +1221,110 @@ pub fn view_rename_start(app: &mut SolveApp, id: u64) -> bool {
 
 /// Copy the view `id` of the shown design next to it and show the copy.
 pub fn view_duplicate(app: &mut SolveApp, id: u64) -> Option<u64> {
-    change_views(app, |views| views.duplicate(id))
+    let options = app.docs.navigation.get(&id).map(|look| look.options);
+    let copy = change_views(app, |views| views.duplicate(id))?;
+    if let Some(mut options) = options {
+        options.swap(&mut app.ui);
+    }
+    Some(copy)
+}
+
+/// Arrange the available views, adding Model views or leaving picker cells as requested.
+pub fn view_layout(app: &mut SolveApp, preset: solidcraft_views::Preset) -> usize {
+    if preset == solidcraft_views::Preset::Single {
+        app.docs.views.untile();
+        return 1;
+    }
+    if !app.docs.views.active().kind.can_tile() {
+        return 1;
+    }
+    let fill = app.docs.layout_fill;
+    if fill == LayoutFill::Picker {
+        return app.docs.views.set_layout_padded(preset);
+    }
+    let shown = app.docs.views.active().clone();
+    for n in app.docs.views.layout_view_count()..preset.tiles() {
+        let added = match fill {
+            LayoutFill::Standard => view_copy_at(app, FILL_ANGLES[n.saturating_sub(1).min(FILL_ANGLES.len() - 1)]),
+            _ if shown.kind == ViewKind::Model => view_duplicate(app, shown.id),
+            _ => new_model_at(app, None),
+        };
+        if added.is_none() {
+            break;
+        }
+        view_activate(app, shown.id);
+    }
+    change_views(app, |views| views.set_layout(preset))
+}
+
+/// The standard views the empty places of a layout get, in turn ([`LayoutFill::Standard`]).
+const FILL_ANGLES: [solidcraft_viewport::StandardView; 3] =
+    [solidcraft_viewport::StandardView::Front, solidcraft_viewport::StandardView::Right, solidcraft_viewport::StandardView::Top];
+
+/// A new Model view of the shown design looking from `angle`, next to the shown one, which stays
+/// the shown one. None when the design has no room for another view.
+fn view_copy_at(app: &mut SolveApp, angle: solidcraft_viewport::StandardView) -> Option<u64> {
+    if app.docs.views.active().kind != ViewKind::Model {
+        return new_model_at(app, Some(angle));
+    }
+    let shown = app.docs.views.active().id;
+    let copy = view_duplicate(app, shown)?;
+    // The copy is shown now, its look in the app: turn it, and going back to the first keeps that.
+    app.cam.set_view(angle);
+    view_activate(app, shown);
+    Some(copy)
+}
+
+/// Start a Model view at the saved Model camera when a different workspace is showing.
+fn new_model_at(app: &mut SolveApp, angle: Option<solidcraft_viewport::StandardView>) -> Option<u64> {
+    if app.docs.views.len() >= solidcraft_views::MAX_VIEWS {
+        return None;
+    }
+    let active = app.docs.views.active().id;
+    let mut camera =
+        app.docs.views.views().iter().find(|view| view.kind == ViewKind::Model).and_then(|view| view.spec).map_or(app.cam, |spec| spec.camera);
+    if let Some(angle) = angle {
+        camera.set_view(angle);
+    }
+    let id = app.docs.views.open(ViewKind::Model, None, false);
+    app.docs.views.set_spec(id, solidcraft_viewport::ViewSpec::new(camera));
+    app.docs.views.activate(active);
+    Some(id)
+}
+
+/// Show a new view looking from `angle` in the empty cell number `ordinal` of the layout.
+pub fn view_fill_angle(app: &mut SolveApp, ordinal: usize, angle: solidcraft_viewport::StandardView) -> Option<u64> {
+    let copy = view_copy_at(app, angle)?;
+    change_views(app, |views| views.fill_empty(ordinal, copy)).then_some(copy)
+}
+
+/// Show the open view `id` in the empty cell number `ordinal` of the layout.
+pub fn view_fill_open(app: &mut SolveApp, ordinal: usize, id: u64) -> bool {
+    change_views(app, |views| views.fill_empty(ordinal, id))
+}
+
+/// Close the empty cell number `ordinal` of the layout.
+pub fn view_close_empty(app: &mut SolveApp, ordinal: usize) -> bool {
+    change_views(app, |views| views.remove_empty(ordinal))
+}
+
+/// Show an open view beside the active view. With no id, start another Model view.
+pub fn view_beside(app: &mut SolveApp, id: Option<u64>, edge: solidcraft_views::Edge) -> Option<u64> {
+    let shown = app.docs.views.active().clone();
+    if !shown.kind.can_tile() || (app.docs.views.is_tiled() && app.docs.views.tiles().is_some_and(|tiles| tiles.len() >= solidcraft_views::MAX_TILES))
+    {
+        return None;
+    }
+    let id = match id {
+        Some(id) => id,
+        None if shown.kind == ViewKind::Render => new_model_at(app, None)?,
+        None => {
+            let copy = view_duplicate(app, shown.id)?;
+            view_activate(app, shown.id);
+            copy
+        }
+    };
+    change_views(app, |views| views.show_beside(id, edge)).then_some(id)
 }
 
 /// Move the view at place `from` of the shown design to place `to`.
@@ -822,7 +1361,7 @@ pub(crate) fn view_command(app: &mut SolveApp, command: &str, mut v: Value) -> R
             Some(view_open(app, kind, subject, reuse))
         }
         "tab.view.close" => {
-            if app.docs.views.get(asked).is_none() {
+            if app.docs.views.window_of(asked).is_none() {
                 return Err(format!("there is no view {asked}"));
             }
             if !view_close(app, asked) {
@@ -832,12 +1371,13 @@ pub(crate) fn view_command(app: &mut SolveApp, command: &str, mut v: Value) -> R
         }
         "tab.view.reopen" => Some(view_reopen(app).ok_or("there is no closed view to reopen")?),
         "tab.view.activate" => {
+            let window = v.get("window").and_then(Value::as_u64).and_then(|id| u32::try_from(id).ok());
             let id = match place("index") {
-                Some(index) => app.docs.views.views().get(index).map(|view| view.id),
-                None => Some(asked),
+                Some(index) => crate::view_windows::view_at(app, window, index)?,
+                None => asked,
             };
-            id.filter(|id| view_activate(app, *id)).ok_or("there is no such view")?;
-            id
+            crate::view_windows::focus_view(app, id, window)?;
+            Some(id)
         }
         "tab.view.rename" => {
             match v.get("name").and_then(Value::as_str) {
@@ -849,6 +1389,41 @@ pub(crate) fn view_command(app: &mut SolveApp, command: &str, mut v: Value) -> R
             Some(asked)
         }
         "tab.view.duplicate" => Some(view_duplicate(app, asked).ok_or("there is no such view, or the design has too many views")?),
+        "tab.view.layout" => {
+            let preset = v.get("layout").and_then(Value::as_str).and_then(solidcraft_views::Preset::from_key).ok_or("unknown layout")?;
+            let shown = view_layout(app, preset);
+            v["shown"] = json!(shown);
+            None
+        }
+        "tab.view.beside" => {
+            let id = if let Some(placement) = v.get("placement") {
+                let placement = serde_json::from_value::<solidcraft_engine::schema::tab_views::TabViewPlacement>(placement.clone())
+                    .map_err(|error| error.to_string())?;
+                if !change_views(app, |views| views.place_tile(asked, placement.into())) {
+                    return Err("the requested view cannot be placed in that cell".into());
+                }
+                asked
+            } else {
+                let edge = match v.get("edge").and_then(Value::as_str) {
+                    Some("left") => solidcraft_views::Edge::Left,
+                    Some("top") => solidcraft_views::Edge::Top,
+                    Some("bottom") => solidcraft_views::Edge::Bottom,
+                    _ => solidcraft_views::Edge::Right,
+                };
+                let asked = v.get("id").and_then(Value::as_u64);
+                view_beside(app, asked, edge).ok_or("a layout holds up to four Model and Render views, including one Render view")?
+            };
+            v["shown"] = json!(app.docs.views.tiles().map_or(1, solidcraft_views::Tiles::len));
+            Some(id)
+        }
+        "tab.view.move_to_window" => {
+            let view = v.get("view").and_then(Value::as_u64).ok_or("no_such_view")?;
+            return crate::view_windows::detach(app, view, &v);
+        }
+        "tab.view.pop_out" => {
+            crate::view_windows::detach(app, asked, &v)?;
+            Some(asked)
+        }
         "tab.view.move" => {
             let len = app.docs.views.len();
             let (from, to) = (place("from").filter(|n| *n < len), place("to").filter(|n| *n < len));
@@ -1021,6 +1596,7 @@ pub fn adopt(app: &mut SolveApp, session: Session) -> bool {
         // Another design in the tab: what waits for the blank one's tab no longer does.
         app.docs.active_tab = next_tab();
         app.docs.views = ViewSet::new();
+        app.docs.navigation.clear();
         // The blank design's record of its links goes with it; the new one's start now.
         app.docs.link_stamps.clear();
         crate::history_folds::load(app);
@@ -1416,9 +1992,13 @@ pub(crate) fn sync_window_title(app: &mut SolveApp, ctx: &egui::Context) {
     // The start page can overlay existing designs; only its untouched launch/last-close
     // session represents no open design. Documents::count includes that placeholder.
     let no_design = app.home.open && app.docs.count() == 1 && active_is_blank(app);
-    let name = (!no_design).then_some(app.session.doc.name.as_str());
+    let child_title = app.view_windows.is_child().then(|| {
+        let locale = solidcraft_ui_text::Locale::for_language(&app.preferences.language);
+        format!("{} · {}", locale.given_name(&app.session.doc.name), locale.given_name(&app.docs.views.active().name))
+    });
+    let name = child_title.as_deref().or_else(|| (!no_design).then_some(app.session.doc.name.as_str()));
     if let Some(title) = app.window_title.update(name, app.session.is_dirty(), &app.preferences.language) {
-        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Title(title));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 }
 
@@ -1720,8 +2300,9 @@ const TAB_HANDLES: crate::app_bar::TabHandles<'static> = crate::app_bar::TabHand
 const TEAR_OFF_BELOW: f32 = 40.0;
 
 /// The footer of a design's view switcher (option B), under the list of its views.
-const SWITCHER_MENU: [crate::app_bar::TabMenuRow<'static>; 3] = [
+const SWITCHER_MENU: [crate::app_bar::TabMenuRow<'static>; 4] = [
     crate::app_bar::TabMenuRow::new(crate::design_view_ui::SWITCHER_OPEN, "Open another view", "Ctrl+T"),
+    crate::design_view_ui::MOVE_TO_WINDOW_MENU,
     crate::app_bar::TabMenuRow::new(crate::design_view_ui::SWITCHER_REOPEN, "Reopen closed view", "Ctrl+Shift+T"),
     crate::app_bar::TabMenuRow::new(crate::design_view_ui::SWITCHER_AS_TABS, "Show views as tabs", ""),
 ];
@@ -1750,7 +2331,7 @@ fn view_tip(view: &DesignView, place: usize) -> String {
 
 /// A view as the strip draws it: its icon in the view's colour (the bar is dark in every theme)
 /// and the same colour under it while it is shown.
-fn view_tab<'a>(view: &'a DesignView, active: bool, tip: &'a str) -> crate::app_bar::ViewTab<'a> {
+fn view_tab<'a>(view: &'a DesignView, active: bool, tip: &'a str, to_window: Option<u32>) -> crate::app_bar::ViewTab<'a> {
     let colour = crate::workspace::view_icon_colour(kind_word(view.kind), true);
     crate::app_bar::ViewTab {
         name: &view.name,
@@ -1760,6 +2341,7 @@ fn view_tab<'a>(view: &'a DesignView, active: bool, tip: &'a str) -> crate::app_
         state: crate::app_bar::ViewState::Normal,
         active,
         tip,
+        to_window,
     }
 }
 
@@ -1770,41 +2352,90 @@ const TAB_MENU: [crate::app_bar::TabMenuRow<'static>; 3] = [
     crate::app_bar::TabMenuRow::new("ui.closeAllTabs", "Close All Tabs", ""),
 ];
 
+pub(crate) fn strip_view_id(app: &SolveApp, index: usize) -> Option<u64> {
+    app.docs
+        .views
+        .views()
+        .get(index)
+        .map(|view| view.id)
+        .or_else(|| crate::view_windows::detached_views(app).nth(index.checked_sub(app.docs.views.len())?).map(|(_, view)| view.id))
+}
+
 /// The document tabs in the application bar, from `x0` to `x1` ([`crate::app_bar::tabs`]): click
 /// to switch, × to close, drag to reorder, + for the start page.
 pub fn tabs(app: &mut SolveApp, ui: &mut egui::Ui, r: Rect, x0: f32, x1: f32) {
-    let info = tabs_info(app);
-    let paths = tab_paths(app);
+    let child = app.view_windows.is_child();
+    let info = if child { vec![(app.session.doc.name.clone(), app.session.is_dirty())] } else { tabs_info(app) };
+    let paths = if child { vec![app.session.path.clone()] } else { tab_paths(app) };
     let n = info.len();
     let locale = solidcraft_ui_text::Locale::for_language(&app.preferences.language);
     let names: Vec<String> = info.iter().map(|(name, _)| locale.given_name(name)).collect();
-    let security = tab_security(app);
-    let badges = tab_badges(app);
+    let security = if child { vec![None] } else { tab_security(app) };
+    let badges = if child { vec![None] } else { tab_badges(app) };
     let places: Vec<String> = info
         .iter()
         .zip(&paths)
         .zip(&security)
         .map(|(((_, dirty), path), security)| tab_place(path.as_deref(), *dirty, security.as_deref()))
         .collect();
-    let selected = if app.docs.slots.is_empty() { 0 } else { app.docs.active };
+    let selected = if child || app.docs.slots.is_empty() { 0 } else { app.docs.active };
     let mut rename = app.menu.rename.take();
     let renaming = renaming_tab_state(rename.as_ref());
     // A view being renamed shows its field only while its design is shown with its views as tabs.
-    let as_tabs = DesignTabPrefs::from(&app.preferences).views_as_tabs && app.docs.views.len() > 1;
+    let as_tabs = child || (DesignTabPrefs::from(&app.preferences).views_as_tabs && app.docs.views.len() > 1);
     let mut view_edit = app.docs.view_rename.take().filter(|r| as_tabs && !app.home.open && app.docs.views.get(r.view).is_some());
     let view_place = view_edit.as_ref().and_then(|r| app.docs.views.views().iter().position(|v| v.id == r.view));
     let new_tip = app.tr("ui.start_page").to_string();
-    let views_as_tabs = DesignTabPrefs::from(&app.preferences).views_as_tabs;
-    let design_views: Vec<Vec<(DesignView, bool)>> = (0..n).map(|design| views_info(app, design)).collect();
-    let view_tips: Vec<Vec<String>> =
-        design_views.iter().map(|views| views.iter().enumerate().map(|(k, (view, _))| view_tip(view, k)).collect()).collect();
+    let views_as_tabs = child || DesignTabPrefs::from(&app.preferences).views_as_tabs || !app.docs.views.windows().is_empty();
+    let design_views: Vec<_> = (0..n)
+        .map(|design| {
+            let source = if child { app.docs.active } else { design };
+            let mut views: Vec<_> = views_info(app, source).into_iter().map(|(view, active)| (view, active, None)).collect();
+            if !child && design == selected {
+                views.extend(crate::view_windows::detached_views(app).map(|(window, view)| (view.clone(), false, Some(window))));
+            }
+            views
+        })
+        .collect();
+    let view_tips: Vec<Vec<String>> = design_views
+        .iter()
+        .map(|views| {
+            views
+                .iter()
+                .enumerate()
+                .map(
+                    |(k, (view, _, window))| {
+                        if window.is_some() { format!("{} · {}", view.name, app.tr("multi_window.window_mark")) } else { view_tip(view, k) }
+                    },
+                )
+                .collect()
+        })
+        .collect();
     let view_tabs: Vec<Vec<crate::app_bar::ViewTab>> = design_views
         .iter()
         .zip(&view_tips)
-        .map(|(views, tips)| views.iter().zip(tips).map(|((view, active), tip)| view_tab(view, *active, tip)).collect())
+        .map(|(views, tips)| views.iter().zip(tips).map(|((view, active, window), tip)| view_tab(view, *active, tip, *window)).collect())
         .collect();
     let more_text = solidcraft_ui_text::tr("tab_strip.more");
     let plus_menu = crate::design_view_ui::plus_menu(solidcraft_theme::is_dark());
+    let view_menu = crate::design_view_ui::view_menu_rows(app);
+    let switcher_menu: Vec<_> = SWITCHER_MENU
+        .iter()
+        .copied()
+        .filter(|row| row.id != crate::design_view_ui::MOVE_TO_WINDOW_MENU.id || crate::view_windows::supports_pop_out(app))
+        .collect();
+    let layout_menu = crate::design_view_ui::layout_menu();
+    let layout_current = if app.docs.views.is_tiled() {
+        match app.docs.views.tiles().and_then(solidcraft_views::Tiles::preset_kind) {
+            Some(solidcraft_views::Preset::SideBySide) => "layout.side_by_side",
+            Some(solidcraft_views::Preset::Stacked) => "layout.stacked",
+            Some(solidcraft_views::Preset::LargeAndTwo) => "layout.large_and_two",
+            Some(solidcraft_views::Preset::Grid) => "layout.grid",
+            _ => "",
+        }
+    } else {
+        "layout.single"
+    };
     let actions = {
         let mut strip = crate::app_bar::TabStrip {
             tabs: info
@@ -1836,9 +2467,10 @@ pub fn tabs(app: &mut SolveApp, ui: &mut egui::Ui, r: Rect, x0: f32, x1: f32) {
             close_tip: "Close",
             more_tip: solidcraft_ui_text::tr_label("All open designs"),
             new_tip: &new_tip,
-            id: tab_strip_id(),
+            id: tab_strip_id(ui.ctx().viewport_id()),
             handles: TAB_HANDLES,
             views_as_tabs,
+            pop_out: child,
             view_text: crate::app_bar::ViewText {
                 close_view: solidcraft_ui_text::tr_label("Close view"),
                 close_design: solidcraft_ui_text::tr_label("Close design"),
@@ -1846,13 +2478,19 @@ pub fn tabs(app: &mut SolveApp, ui: &mut egui::Ui, r: Rect, x0: f32, x1: f32) {
                 more: more_text,
                 switch_view: solidcraft_ui_text::tr("tab_strip.switch_view"),
             },
-            view_menu: &crate::design_view_ui::VIEW_MENU,
+            view_menu: &view_menu,
             view_right_row: crate::design_view_ui::VIEW_CLOSE_RIGHT,
-            view_rename: view_edit.as_mut().zip(view_place).map(|(r, place)| {
-                (place, crate::app_bar::TabRename { text: &mut r.text, focused: &mut r.focused, max: crate::design_views::MAX_NAME })
-            }),
+            view_rename: view_edit
+                .as_mut()
+                .zip(view_place)
+                .map(|(r, place)| (place, crate::app_bar::TabRename { text: &mut r.text, focused: &mut r.focused, max: solidcraft_views::MAX_NAME })),
             plus_menu: &plus_menu,
-            switcher_menu: &SWITCHER_MENU,
+            layout_menu: &layout_menu,
+            layout_current,
+            layout_tip: solidcraft_ui_text::tr_label("Show views together"),
+            layout_fill: app.docs.layout_fill.key(),
+            layout_fill_heading: solidcraft_ui_text::tr_label("Empty cells show"),
+            switcher_menu: &switcher_menu,
             tear_off_below: TEAR_OFF_BELOW,
         };
         crate::app_bar::tabs(ui, &mut strip, r, x0, x1)
@@ -1931,7 +2569,7 @@ pub fn tabs(app: &mut SolveApp, ui: &mut egui::Ui, r: Rect, x0: f32, x1: f32) {
             | crate::app_bar::TabAction::ViewRenameCancelled => {}
             view_action => {
                 if idle {
-                    crate::design_view_ui::handle(app, view_action);
+                    crate::design_view_ui::handle(app, ui.ctx(), view_action);
                 }
             }
         }
@@ -2248,13 +2886,13 @@ pub(crate) fn uses_file(app: &SolveApp, path: &str) -> bool {
 }
 
 /// Where SolidCraft's document tab strip keeps its state.
-fn tab_strip_id() -> egui::Id {
-    egui::Id::unique("sc_doc_tabs")
+fn tab_strip_id(viewport: egui::ViewportId) -> egui::Id {
+    egui::Id::unique(("sc_doc_tabs", viewport))
 }
 
 /// Whether the document tab strip's list of every open design is open.
 pub fn tab_list_open(ctx: &egui::Context) -> bool {
-    crate::app_bar::tab_list_open(ctx, tab_strip_id())
+    crate::app_bar::tab_list_open(ctx, tab_strip_id(ctx.viewport_id()))
 }
 
 /// A tab's tooltip ([`crate::app_bar::tab_tip`] over [`tab_place`]).
@@ -2292,6 +2930,76 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn unsaved_view_can_move_windows_without_replacing_its_session() {
+        let mut app = SolveApp::new(Session::default(), Default::default());
+        let uid = app.session.uid;
+        let revision = app.session.revision;
+        let model = app.docs.views.active().id;
+        let other = view_duplicate(&mut app, model).unwrap();
+        let tab = app.docs.active_tab();
+        app.ui.visual_style = 2;
+        app.ui.perspective = true;
+        let mut child = detach_view(&mut app, other).unwrap();
+        assert!(app.session.path.is_none());
+        assert_eq!(app.docs.views.active().id, model);
+        park_active_look(&mut app);
+        exchange_window_views(&mut app, tab, &mut child);
+        show_active_look(&mut app);
+        assert_eq!(app.docs.views.active().id, other);
+        assert_eq!(app.ui.visual_style, 2);
+        assert!(app.ui.perspective);
+        assert_eq!((app.session.uid, app.session.revision), (uid, revision));
+        park_active_look(&mut app);
+        exchange_window_views(&mut app, tab, &mut child);
+        show_active_look(&mut app);
+        assert_eq!(app.ui.visual_style, 0);
+        assert!(!app.ui.perspective);
+        reattach_window_views(&mut app, tab, child);
+        assert!(app.docs.views.get(other).is_some());
+        assert_eq!(app.docs.views.active().id, model);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pop_out_commands_share_the_design_and_work_in_a_virtual_window() {
+        let mut app = SolveApp::new(Session::default(), Default::default());
+        let uid = app.session.uid;
+        let first = app.docs.views.active().id;
+        assert_eq!(app.run("tab.view.move_to_window", json!({"view":first})).unwrap_err(), "last_view_of_main_window");
+        let second = view_duplicate(&mut app, first).unwrap();
+        let moved = app.run("tab.view.move_to_window", json!({"view":second})).unwrap();
+        let window = moved["window"].as_u64().unwrap();
+        assert_eq!(moved["placement"], Value::Null);
+        let listed = app.run("tab.window.list", json!({})).unwrap();
+        assert_eq!(listed["windows"][0]["views"], json!([first]));
+        assert_eq!(listed["windows"][1]["views"], json!([second]));
+        assert_eq!(listed["windows"][1]["display"], Value::Null);
+        app.run("tab.view.activate", json!({"id":second,"window":window})).unwrap();
+        assert_eq!(app.run("tab.view.activate", json!({"index":0,"window":window})).unwrap()["id"], second);
+        assert_eq!(app.run("tab.view.activate", json!({"index":0})).unwrap()["id"], second);
+        assert_eq!(app.docs.views.active().id, first);
+        assert_eq!(app.run("tab.window.close", json!({"window":window})).unwrap()["returned"], json!([second]));
+        assert_eq!(app.session.uid, uid);
+        assert!(app.session.path.is_none());
+        assert_eq!(app.docs.views.views().iter().map(|view| view.id).collect::<Vec<_>>(), [first, second]);
+        assert!(app.docs.views.check());
+    }
+
+    #[test]
+    fn preparing_view_windows_reads_native_scale_in_a_frame() {
+        let mut app = SolveApp::new(Session::default(), Default::default());
+        let context = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().native_pixels_per_point = Some(1.5);
+        let mut prepared = false;
+        let _ = context.run_ui(input, |ui| {
+            crate::view_windows::prepare(&mut app, ui.ctx());
+            prepared = true;
+        });
+        assert!(prepared);
     }
 
     #[test]
@@ -3623,15 +4331,111 @@ mod tests {
         h.frames(2);
         let sketch = h.app.session.active_sketch.unwrap();
         let active = h.app.docs.views.active().clone();
-        assert_eq!((active.kind, active.subject), (crate::design_views::ViewKind::Sketch, Some(sketch.to_string())));
+        assert_eq!((active.kind, active.subject), (solidcraft_views::ViewKind::Sketch, Some(sketch.to_string())));
         assert_eq!(h.app.docs.views.len(), before + 1);
         h.app.run("sketch.line", json!({"points": [[0, 0], [20, 10]]})).unwrap();
         h.app.run("sketch.finish", json!({})).unwrap();
         h.frames(2);
-        assert_eq!(h.app.docs.views.active().kind, crate::design_views::ViewKind::Model);
+        assert_eq!(h.app.docs.views.active().kind, solidcraft_views::ViewKind::Model);
         assert_eq!(h.app.docs.views.len(), before + 1, "the sketch's view stays");
         assert!(view_activate(&mut h.app, active.id));
         assert_eq!(h.app.session.active_sketch, Some(sketch), "showing it edits the sketch again");
+    }
+
+    /// Two Model views of one design are two angles: each keeps the camera it was left with, and a
+    /// new one starts from where the design looks now.
+    #[test]
+    fn model_views_keep_their_own_angle() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        let first = h.app.docs.views.active().id;
+        h.app.cam.yaw = 0.25;
+        let second = view_open(&mut h.app, ViewKind::Model, None, false);
+        assert_ne!(first, second, "a second Model view is opened, not the first reused");
+        assert_eq!(h.app.cam.yaw, 0.25, "a new view starts from the angle the design looks from");
+        h.app.cam.yaw = 1.5;
+        assert!(view_activate(&mut h.app, first));
+        assert_eq!(h.app.cam.yaw, 0.25, "the first view comes back at its own angle");
+        assert!(view_activate(&mut h.app, second));
+        assert_eq!(h.app.cam.yaw, 1.5, "and the second at its own");
+        let copy = view_duplicate(&mut h.app, second).unwrap();
+        assert_eq!(h.app.cam.yaw, 1.5, "a copy starts at the angle of the view it copies");
+        h.app.cam.yaw = -0.5;
+        assert!(view_activate(&mut h.app, second));
+        assert_eq!(h.app.cam.yaw, 1.5);
+        assert!(view_activate(&mut h.app, copy));
+        assert_eq!(h.app.cam.yaw, -0.5);
+    }
+
+    /// A layout opens the views it needs, and a view standing in for the shown one is drawn from its
+    /// own angle and leaves the shown view's as it was.
+    #[test]
+    fn a_layout_opens_views_and_each_is_drawn_from_its_own_angle() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        let first = h.app.docs.views.active().id;
+        h.app.cam.yaw = 0.25;
+        assert_eq!(view_layout(&mut h.app, solidcraft_views::Preset::SideBySide), 2);
+        assert!(h.app.docs.views.is_tiled());
+        assert_eq!(h.app.docs.views.active().id, first, "the view that was shown stays the focused one");
+        let other = h.app.docs.views.tiles().unwrap().views().into_iter().find(|id| *id != first).unwrap();
+        let yaw = with_view_look(&mut h.app, other, |app| {
+            app.cam.yaw = 2.0;
+            app.cam.yaw
+        });
+        assert_eq!(yaw, 2.0);
+        assert_eq!(h.app.cam.yaw, 0.25, "the focused view's angle is back");
+        assert!(focus_view(&mut h.app, other));
+        assert_eq!(h.app.cam.yaw, 2.0, "the other view kept the angle it was orbited to");
+        assert_eq!(view_layout(&mut h.app, solidcraft_views::Preset::Single), 1);
+        assert!(!h.app.docs.views.is_tiled());
+    }
+
+    #[test]
+    fn a_render_tile_keeps_its_camera_when_focused_beside_model() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        let model = h.app.docs.views.active().id;
+        h.app.cam.yaw = 0.25;
+        let render = view_open(&mut h.app, ViewKind::Render, None, false);
+        assert!(crate::render_workspace::active(&h.app));
+        h.app.cam.yaw = 1.25;
+        assert_eq!(view_beside(&mut h.app, Some(model), solidcraft_views::Edge::Left), Some(model));
+        assert!(view_activate(&mut h.app, model));
+        assert_eq!(h.app.cam.yaw, 0.25);
+
+        crate::render_workspace::with_tile_camera(&mut h.app, |app| {
+            assert!(crate::render_workspace::active(app));
+            assert_eq!(app.cam.yaw, 1.25);
+            app.cam.yaw = 1.75;
+        });
+        assert!(!crate::render_workspace::active(&h.app));
+        assert_eq!(h.app.cam.yaw, 0.25);
+        assert!(view_activate(&mut h.app, render));
+        assert_eq!(h.app.cam.yaw, 1.75);
+        assert!(crate::view_tiles::shown(&h.app));
+        assert_eq!(view_layout(&mut h.app, solidcraft_views::Preset::Single), 1);
+        assert!(!crate::view_tiles::shown(&h.app));
+        assert!(crate::render_workspace::active(&h.app), "maximising keeps the Render workspace");
+    }
+
+    /// Each Model view keeps its own section and analysis too, so one design can be inspected two
+    /// ways at once; the design itself is the same.
+    #[test]
+    fn model_views_keep_their_own_analysis() {
+        use solidcraft_engine::SurfaceAnalysis;
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        let first = h.app.docs.views.active().id;
+        let second = view_open(&mut h.app, ViewKind::Model, None, false);
+        h.app.session.analysis = Some(SurfaceAnalysis::Zebra { stripes: 8.0 });
+        assert!(view_activate(&mut h.app, first));
+        assert_eq!(h.app.session.analysis, None, "the first view never had the analysis");
+        h.app.session.analysis = Some(SurfaceAnalysis::Environment);
+        assert!(view_activate(&mut h.app, second));
+        assert_eq!(h.app.session.analysis, Some(SurfaceAnalysis::Zebra { stripes: 8.0 }));
+        assert!(view_activate(&mut h.app, first));
+        assert_eq!(h.app.session.analysis, Some(SurfaceAnalysis::Environment));
     }
 
     /// The Layout page's "Design tabs" choices govern the views: a kind kept out of sub-tabs is
