@@ -127,7 +127,7 @@ pub fn earlier_tools(
                 continue;
             }
             FeatureKind::Move { bodies, .. } => (bodies.as_slice(), &[], move_matrix(vals, &g.kind).into_iter().collect()),
-            FeatureKind::Pattern { features, pattern, bodies } => {
+            FeatureKind::Pattern { features, pattern, bodies, .. } => {
                 (bodies.as_slice(), features.as_slice(), pattern_transforms(doc, vals, st, g.component, pattern).unwrap_or_default())
             }
             FeatureKind::Mirror { features, plane, bodies, combine: false, .. } => {
