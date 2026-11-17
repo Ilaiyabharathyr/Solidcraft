@@ -16,8 +16,8 @@ use super::{ModelBody, ModelState, SolvedSketch, new_name, path_in_frame, select
 use crate::expr::{Kind, Value};
 use crate::frame::{self, CornerOverride, CornerType, MAX_MEMBERS, MemberPair, MemberProfile};
 use crate::frame_corners::{self, Corner, Cut};
-use crate::frame_fit;
 use crate::frame_layout::{self, ChainCorner, Fit, Joint, MemberPlane, Plan};
+use crate::frame_multi_trim;
 use crate::lineage::Traced;
 use crate::{DocError, Document, Feature, FeatureKind, ProfileSel, Result};
 
@@ -794,7 +794,7 @@ fn cut_members(
     // Copes after every plane cut. T filled is T built from its outlines alone, holes closed;
     // U keeps its largest piece on its own side of T, its centre of mass on U's side (what lies
     // past T, and slivers on T's far side, go).
-    let outlines = frame_fit::filled_outline(regions);
+    let outlines = frame_multi_trim::filled_outline(regions);
     for (t, u, point, n) in copes {
         let filled = crate::lineage::numbered_tool(build(t, &outlines)?.body);
         let gone = || DocError::Invalid(format!("the member on line `{}` was cut away completely", id(u)));
@@ -951,7 +951,7 @@ fn pieced(segments: Vec<(String, Vec3, Vec3)>, planes: Vec<MemberPlane>, drawn: 
 type Pieced = (Vec<(String, Vec3, Vec3)>, Vec<MemberPlane>, Vec<usize>);
 
 /// For each of `plan`'s pieces, whether it was cut where tubes cross (at either end): its ends are fitted by
-/// [`frame_fit::fit_piece_end`].
+/// [`frame_multi_trim::fit_piece_end`].
 fn cut_pieces(plan: &Plan) -> Vec<bool> {
     plan.pieces.iter().map(|p| p.from > 0.0 || p.to < 1.0).collect()
 }
@@ -1250,7 +1250,7 @@ fn auto_ends(
 /// fits (a piece's own id, [`pieced`]), `corner_start:<member>:face:<k>` (`corner_end:…`), so a member's fitted faces
 /// keep names of their own whatever the laying or pick order, and where three tubes cross. `plan`: the frame's
 /// [`frame_layout::plan`], over `segments` [`pieced`] by it. A piece of a line cut where tubes cross keeps what lies
-/// past the tubes it is fitted to ([`frame_fit::fit_piece_end`], ruling C4): with nothing left it is dropped, as
+/// past the tubes it is fitted to ([`frame_multi_trim::fit_piece_end`], ruling C4): with nothing left it is dropped, as
 /// the second list says (`true`: no body). The third: each member's cut ends, as it was built with them. `coped`:
 /// the frame copes ([`copes`]).
 pub(crate) fn auto_members(
@@ -1272,7 +1272,7 @@ pub(crate) fn auto_members(
 /// Each end of `fits` (in laying order) of `out` (each member as built) cut to fit the members it meets as their plane
 /// cuts (`ends`) build them (each member's cutting tool, [`member_tool`], made once). A fitted face is named for the
 /// end it finishes and the id of the member it fits, `corner_start:<member>:face:<k>` (`corner_end:…`). A piece cut
-/// where tubes cross (`crossed`) keeps what lies past them ([`frame_fit::fit_piece_end`]); with nothing left it has
+/// where tubes cross (`crossed`) keeps what lies past them ([`frame_multi_trim::fit_piece_end`]); with nothing left it has
 /// no body, and `dropped` says so. `coped`: each tool is its member's real shape ([`member_tool`]).
 fn fit_members(
     segments: &[(String, Vec3, Vec3)],
@@ -1315,18 +1315,18 @@ fn fit_members(
         let slot = out.get_mut(f.member).ok_or_else(|| no_member(f.member))?;
         let member = slot.take().ok_or_else(|| no_member(f.member))?;
         if crossed.get(f.member) == Some(&true) {
-            *slot = frame_fit::fit_piece_end(&member, end, toward, middle, &against, id)?;
+            *slot = frame_multi_trim::fit_piece_end(&member, end, toward, middle, &against, id)?;
             if let (None, Some(d)) = (slot.as_ref(), dropped.get_mut(f.member)) {
                 *d = true;
             }
         } else {
-            *slot = Some(frame_fit::fit_end(&member, end, toward, middle, &against, id)?);
+            *slot = Some(frame_multi_trim::fit_end(&member, end, toward, middle, &against, id)?);
         }
     }
     Ok(())
 }
 
-/// Member m's cutting tool ([`frame_fit::fit_tool`], or under `coped` its real shape, [`frame_fit::coped_tool`]) as
+/// Member m's cutting tool ([`frame_multi_trim::fit_tool`], or under `coped` its real shape, [`frame_multi_trim::coped_tool`]) as
 /// its plane cuts (`ends`) build it: a fitted or coped end stops at its line's end, inside the tube it meets.
 fn member_tool(
     segments: &[(String, Vec3, Vec3)],
@@ -1343,7 +1343,7 @@ fn member_tool(
     let (start, end) = (cut(start), cut(end));
     let cuts: Vec<Cut> = [start, end].into_iter().flatten().map(|c| c.0).collect();
     let (plane, regions) = along(placed(m, *a), regions, *b - *a);
-    let tool = if coped { frame_fit::coped_tool } else { frame_fit::fit_tool };
+    let tool = if coped { frame_multi_trim::coped_tool } else { frame_multi_trim::fit_tool };
     tool(&plane, &regions, -start.map_or(0.0, |c| c.1), a.dist(*b) + end.map_or(0.0, |c| c.1), &cuts)
 }
 
@@ -1504,10 +1504,10 @@ struct Own<'a> {
 }
 
 /// `made` (each member as built, by member) with each of `ends` fitted to the earlier Frame Members' tubes
-/// ([`frame_fit::fit_end`]), a free end to this frame's members laid before its own too (`own`), each tool built
+/// ([`frame_multi_trim::fit_end`]), a free end to this frame's members laid before its own too (`own`), each tool built
 /// once. A fitted face is named for the end it finishes and the body or line it fits, `corner_start:<body>:face:<k>`
 /// (`corner_end:…`). `middle(m)`: a point in member m's material half way along. A piece cut where tubes cross
-/// (`crossed`, [`cut_pieces`]) is fitted as [`frame_fit::fit_piece_end`] fits it, and has no body (`None` in `made`)
+/// (`crossed`, [`cut_pieces`]) is fitted as [`frame_multi_trim::fit_piece_end`] fits it, and has no body (`None` in `made`)
 /// when nothing of it is left.
 fn fit_to_earlier(
     made: &mut [Option<Traced>],
@@ -1546,9 +1546,9 @@ fn fit_to_earlier(
         let slot = made.get_mut(m).ok_or_else(|| DocError::Invalid(format!("no member {m}")))?;
         let Some(member) = slot.as_ref() else { continue };
         *slot = if crossed.get(m) == Some(&true) {
-            frame_fit::fit_piece_end(member, end, toward, middle(m), &against, id)?
+            frame_multi_trim::fit_piece_end(member, end, toward, middle(m), &against, id)?
         } else {
-            Some(frame_fit::fit_end(member, end, toward, middle(m), &against, id)?)
+            Some(frame_multi_trim::fit_end(member, end, toward, middle(m), &against, id)?)
         };
     }
     Ok(())

@@ -31,8 +31,8 @@
 //! is not fitted to, rather than fitted to in the wrong place.
 //!
 //! The tool is the source member as built ([`super::member_tool`]): its feature's members laid out and its corner
-//! plane cuts made as [`super::member_section`] makes them, then filled and squared ([`frame_fit::fit_tool`]); for
-//! a Coped frame (#17854), filled with its radii kept ([`frame_fit::coped_tool`]), whatever the earlier frame says.
+//! plane cuts made as [`super::member_section`] makes them, then filled and squared ([`frame_multi_trim::fit_tool`]); for
+//! a Coped frame (#17854), filled with its radii kept ([`frame_multi_trim::coped_tool`]), whatever the earlier frame says.
 //! Under Auto its members are its pieces (#4003 stage 3, [`super::pieced`]): each piece is a member as above, its
 //! span, quarter points and tool its own, so a copy of a piece is matched to that piece. A piece's end at a crossing
 //! is fitted, so its tool stops at its line's end there, as a T-junction's does.

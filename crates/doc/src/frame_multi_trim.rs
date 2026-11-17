@@ -1,5 +1,7 @@
-//! Cut to fit (#4003): a tube end cut to the tubes it meets, as a fabricator fits it. The tool is the other tube
-//! with its hole filled and its corner radii squared off, built from its section ([`squared_outline`]): a fitted
+//! Multi-trim (#4003 `frame.multi_trim`): a tube cut by the shapes of other tubes — end cuts, copes, notches in a
+//! tube's middle, overlaps and fits to earlier frames.
+//!
+//! A tube end is cut to the tubes it meets, as a fabricator fits it. The tool is the other tube with its hole filled and its corner radii squared off, built from its section ([`squared_outline`]): a fitted
 //! end stops flat on a flat side, and is an exact fishmouth on a round tube. A Coped frame (#17854) cuts to the
 //! other tube's real shape instead, its radii kept ([`coped_tool`]). Exact geometry only, never a mesh.
 
@@ -219,5 +221,5 @@ fn diagonal(body: &kernel::Body, end: Vec3, toward: Vec3, middle: Vec3) -> f64 {
 }
 
 #[cfg(test)]
-#[path = "frame_fit_tests.rs"]
+#[path = "frame_multi_trim_tests.rs"]
 mod tests;
