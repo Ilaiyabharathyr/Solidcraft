@@ -389,6 +389,12 @@ fn the_schemas_take_what_the_handlers_read() {
             (json!({"sketch": "Frame", "profile": {"size": "RSC 203x89", "kind": "channel"}}), true),
             (json!({"sketch": "Frame", "profile": {"size": "RSC 203x89", "height": 200}}), false),
             (json!({"sketch": "Frame", "profile": {"size": ""}}), false),
+            // A corner override needs its type, as `kind` or an older `corner`, one of them.
+            (json!({"sketch": "Frame", "profile": tube(), "corners": [{"members": ["l1", "l2"], "kind": "butt", "gap": "2 mm"}]}), true),
+            (json!({"sketch": "Frame", "profile": tube(), "corners": [{"members": ["l1", {"line": "l2"}], "corner": "mitre", "flip": true}]}), true),
+            (json!({"sketch": "Frame", "profile": tube(), "corners": [{"members": ["l1", "l2"]}]}), false),
+            (json!({"sketch": "Frame", "profile": tube(), "corners": [{"members": ["l1", "l2"], "flip": false}]}), false),
+            (json!({"sketch": "Frame", "profile": tube(), "corners": [{"members": ["l1", "l2"], "kind": "butt", "corner": "butt"}]}), false),
             (
                 json!({"sketch": "Frame", "profile": {"kind": "channel", "height": 100, "width": 50, "web": 6, "flange": 8, "flange_slope": "5 deg"}}),
                 true,

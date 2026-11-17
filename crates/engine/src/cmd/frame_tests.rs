@@ -5466,6 +5466,30 @@ fn a_butted_rectangle_with_a_gap() {
 }
 
 #[test]
+fn an_auto_angled_butt_sets_only_the_short_member_back() {
+    // `auto_vee(160)` in [`bar45`]: the table's angled butt (20° from in line). The long 400 is cut square to its line
+    // at the corner (x = 0) and keeps that cut whatever the gap: A·400. The short 300 sits on the same plane, which
+    // the gap moves g back along −X, away from the long bar: x = −g meets its line (at 20° from −X) g / cos 20° from
+    // the corner, so it keeps A·(300 − g / cos 20°). A wrong sign would make it longer, into the long bar.
+    let vee = |gap: f64| {
+        let t = 160f64.to_radians();
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "V"}));
+        run(&mut s, "sketch.line", json!({"points": [[400, 0], [0, 0], [300.0 * t.cos(), 300.0 * t.sin()]]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "frame.member", json!({"sketch": "V", "profile": bar45(), "corner": "auto", "gap": gap}));
+        let (long, short) = long_and_short(&mut s);
+        (long.1, short.1)
+    };
+    let a = 2025.0;
+    let (plain, gapped) = (vee(0.0), vee(2.0));
+    assert!(rel(plain.0, a * 400.0) < 1e-6 && rel(plain.1, a * 300.0) < 1e-6, "{plain:?}");
+    let short = a * (300.0 - 2.0 / 20f64.to_radians().cos());
+    assert!(rel(gapped.0, plain.0) < 1e-9, "the long bar: {gapped:?} vs {plain:?}");
+    assert!(rel(gapped.1, short) < 1e-6, "the short bar: {} vs {short}", gapped.1);
+}
+
+#[test]
 fn an_override_gap_beats_the_frames() {
     // Gap 1 on the frame, 3 at the corner (0, 0): the bottom and left bars lose (3 + 1)/√2 over their two ends, the
     // top and right ones 2/√2.
@@ -5586,6 +5610,33 @@ fn a_gap_out_of_range_is_refused() {
     let reopened = Session::new(solidcraft_doc::Document::from_json(&json_doc.replace(r#""gap": "1 mm""#, r#""gap": "-1 mm""#)).unwrap());
     let e = reopened.model.result(member).and_then(|r| r.error.clone()).unwrap_or_default();
     assert!(e.contains("gap") && e.contains("0…1000 mm"), "{e}");
+}
+
+#[test]
+fn a_bare_gap_is_in_the_design_units() {
+    // In an inch design a bare gap is inches, checked as such: 0.1 (2.54 mm) builds and is saved `0.1 in`; 40 is
+    // 1016 mm, refused by the command before anything is added, the frame's gap and an override's alike.
+    let mut s = Session::default();
+    run(&mut s, "document.units", json!({"units": "in"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "V"}));
+    run(&mut s, "sketch.line", json!({"points": [[10, 0], [0, 0], [0, 8]], "ids": ["a", "b"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let bar = json!({"kind": "bar", "width": 1, "height": 1});
+    let features = s.doc.features.len();
+    let corners = json!([{"members": ["a", "b"], "kind": "mitre", "gap": 40}]);
+    for p in [
+        json!({"sketch": "V", "profile": bar, "corner": "mitre", "gap": 40}),
+        json!({"sketch": "V", "profile": bar, "corner": "mitre", "corners": corners}),
+    ] {
+        let e = s.execute("frame.member", &p).unwrap_err().to_string();
+        assert!(e.contains("frame.member") && e.contains("0…1000 mm, not 1016 mm"), "{p}: {e}");
+        assert_eq!(s.doc.features.len(), features, "{p}: nothing added");
+    }
+    let corners = json!([{"members": ["a", "b"], "kind": "mitre", "gap": 0.2}]);
+    run(&mut s, "frame.member", json!({"sketch": "V", "profile": bar, "corner": "mitre", "gap": 0.1, "corners": corners}));
+    let solidcraft_doc::FeatureKind::FrameMember { gap, corners, .. } = &s.doc.features.last().unwrap().kind else { panic!() };
+    assert_eq!((gap.as_deref(), corners[0].gap.as_deref()), (Some("0.1 in"), Some("0.2 in")));
+    assert_eq!(bodies(&mut s).len(), 2);
 }
 
 #[test]

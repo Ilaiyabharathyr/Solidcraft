@@ -451,8 +451,8 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
     if corners.iter().flat_map(|c| &c.members).any(|m| m.feature.is_some()) {
         return Err(bad(cmd, "`corners`: not supported yet: a corner with a member of another frame"));
     }
-    for gap in corners.iter().filter_map(|c| c.gap.as_ref()) {
-        check_gap(s, gap, cmd, "`corners` gap")?;
+    for gap in corners.iter_mut().filter_map(|c| c.gap.as_mut()) {
+        *gap = design_gap(s, gap, cmd, "`corners` gap")?.into();
     }
     // An older script's Coped corner type is Butt with Coped (#17854).
     frame::read_coped(&mut corner, &mut corners, &mut coped);
@@ -468,8 +468,7 @@ fn member(s: &mut Session, p: &Value) -> Result<Value> {
         None | Some(Value::Null) => None,
         Some(_) => {
             let e = expr(p, "gap").ok_or_else(|| bad(cmd, "`gap` must be a length expression"))?;
-            check_gap(s, &e, cmd, "`gap`")?;
-            Some(e)
+            Some(design_gap(s, &e, cmd, "`gap`")?.into())
         }
     };
     let mirror = match p.get("mirror") {
@@ -579,10 +578,13 @@ fn no_piece(lines: &[String], ids: &[String], later: &frame::LaterPieces) -> std
     }
 }
 
-/// A weld gap: a length expression within 0…[`frame::MAX_GAP`] mm, `what` naming it.
-fn check_gap(s: &Session, e: &str, cmd: &str, what: &str) -> Result<()> {
-    let g = s.doc.eval(e, solidcraft_doc::expr::Kind::Length).map_err(|err| bad(cmd, format!("{what}: {err}")))?;
-    frame::checked_gap(g, what).map(|_| ()).map_err(|e| bad(cmd, e.to_string()))
+/// A weld gap typed as `e`, as it is saved: a bare length means the design's unit (`0.1` is `0.1 in` in an inch
+/// design, as a new feature's input is), then checked within 0…[`frame::MAX_GAP`] mm, `what` naming it.
+fn design_gap(s: &Session, e: &str, cmd: &str, what: &str) -> Result<String> {
+    let e = s.doc.with_design_unit(e, solidcraft_doc::expr::Kind::Length);
+    let g = s.doc.eval(&e, solidcraft_doc::expr::Kind::Length).map_err(|err| bad(cmd, format!("{what}: {err}")))?;
+    frame::checked_gap(g, what).map_err(|e| bad(cmd, e.to_string()))?;
+    Ok(e)
 }
 
 /// Each corner of the Frame Member `f` whose entry gives a Flip (`flips`, by entry) saved as an order: the order
@@ -748,13 +750,8 @@ fn multi_trim(s: &mut Session, p: &Value) -> Result<Value> {
         let gap = match given("gap") {
             false => None,
             true => {
-                let mut e = expr(p, "gap").ok_or_else(|| bad(cmd, "`gap` must be a length expression"))?;
-                // A bare length typed in an inch (or cm…) design means that unit, as a new feature's does.
-                if s.doc.units.trim() != "mm" {
-                    e = s.doc.with_design_unit(&e, solidcraft_doc::expr::Kind::Length).into();
-                }
-                check_gap(s, &e, cmd, "`gap`")?;
-                Some(e)
+                let e = expr(p, "gap").ok_or_else(|| bad(cmd, "`gap` must be a length expression"))?;
+                Some(design_gap(s, &e, cmd, "`gap`")?.into())
             }
         };
         // The set must meet, as evaluation requires; its order today's rules give it, for Flip (given false: that order).

@@ -556,7 +556,12 @@ impl JsonSchema for CornersParam {
                     "flip": {"type": "boolean"},
                     "gap": {"type": ["string", "number"]}
                 },
-                "required": ["members"]
+                // Its type as `kind` or an older `corner`, one of them, as the handler reads it.
+                "required": ["members"],
+                "anyOf": [
+                    {"required": ["kind"], "not": {"required": ["corner"]}},
+                    {"required": ["corner"], "not": {"required": ["kind"]}}
+                ]
             }
         })
     }
