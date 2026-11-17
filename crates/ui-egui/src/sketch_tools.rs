@@ -97,6 +97,12 @@ thread_local! {
     static EXTEND_PAIR: Cell<bool> = const { Cell::new(false) };
     /// Glyphs drawn this frame (constraint id, screen centre) and the selected one.
     static GLYPHS: RefCell<Vec<(String, Pos2)>> = const { RefCell::new(Vec::new()) };
+    /// Collapsed constraint group badges drawn this frame (group key, screen rect).
+    static COLLAPSED_BADGES: RefCell<Vec<(AnchorKey, egui::Rect)>> = const { RefCell::new(Vec::new()) };
+    /// Screen rects of all painted constraint badges and box containers this frame (for blocking picks behind them).
+    static CONSTRAINT_HIT_RECTS: RefCell<Vec<egui::Rect>> = const { RefCell::new(Vec::new()) };
+    /// Hover/expand state for grouped constraint badges and hovered sketch geometry.
+    static GROUP_HOVER: RefCell<GroupHoverState> = const { RefCell::new(GroupHoverState::new()) };
     /// The side of the glyphs drawn this frame (screen pixels), for [`glyph_at`] (#10794).
     static GLYPH_PX: Cell<f32> = const { Cell::new(GLYPH) };
     static PICKED: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -860,8 +866,16 @@ pub fn active_glyph_deletion(app: &SolveApp, id: &str) -> Vec<solidcraft_engine:
 
 /// The constraint glyph under a screen position (its constraint id).
 pub fn glyph_at(pos: Pos2) -> Option<String> {
-    let reach = GLYPH_PX.with(Cell::get) * 0.6;
-    GLYPHS.with(|g| nearest_glyph(g.borrow().iter().map(|(id, c)| (id.as_str(), *c)), pos, reach).map(|(id, _)| id.to_owned()))
+    let glyph = GLYPH_PX.with(Cell::get);
+    let reach = glyph * 0.6;
+    let half = glyph * 0.5 + 1.0;
+    GLYPHS.with(|g| {
+        g.borrow()
+            .iter()
+            .filter(|(_, c)| (c.x - pos.x).abs() <= half && (c.y - pos.y).abs() <= half || c.distance(pos) <= reach)
+            .min_by(|a, b| a.1.distance(pos).total_cmp(&b.1.distance(pos)))
+            .map(|(id, _)| id.clone())
+    })
 }
 
 /// The glyph within `reach` of `pos` whose centre is nearest (its id and centre). Large glyphs'
@@ -876,18 +890,78 @@ pub fn glyph_positions() -> Vec<(String, Pos2)> {
     GLYPHS.with(|g| g.borrow().clone())
 }
 
-/// Delete the selected constraint glyph (true when one was selected).
-pub fn delete_glyph(app: &mut SolveApp) -> bool {
-    let Some(id) = PICKED.with(|p| p.borrow_mut().take()) else { return false };
-    let entities: Vec<String> = active_glyph_deletion(app, &id)
+/// Delete a constraint glyph (and any shared MidPoint group / orphan point) by id.
+fn delete_glyph_by_id(app: &mut SolveApp, id: &str) -> bool {
+    let entities: Vec<String> = active_glyph_deletion(app, id)
         .into_iter()
         .filter_map(|s| match s {
             solidcraft_engine::Sel::SketchConstraint { id } | solidcraft_engine::Sel::SketchPoint { id } => Some(id),
             _ => None,
         })
         .collect();
+    if entities.is_empty() {
+        return false;
+    }
     let _ = app.run("sketch.delete", json!({ "entities": entities }));
     true
+}
+
+/// Delete the selected constraint glyph (true when one was selected).
+pub fn delete_glyph(app: &mut SolveApp) -> bool {
+    let Some(id) = PICKED.with(|p| p.borrow_mut().take()) else { return false };
+    delete_glyph_by_id(app, &id)
+}
+
+/// Delete the individual constraint glyph under `pos`, if any (never deletes a collapsed group badge).
+pub fn delete_glyph_at(app: &mut SolveApp, pos: Pos2) -> bool {
+    if app.session.active_sketch.is_none() || app.ui.pick_off.iter().any(|x| x == "constraints") {
+        return false;
+    }
+    let Some(id) = glyph_at(pos) else { return false };
+    PICKED.with(|p| {
+        let mut picked = p.borrow_mut();
+        if picked.as_deref() == Some(id.as_str()) {
+            *picked = None;
+        }
+    });
+    delete_glyph_by_id(app, &id)
+}
+
+/// Click a collapsed constraint group badge at `pos` to expand it immediately without waiting for the hover delay.
+pub fn click_group_badge(app: &SolveApp, pos: Pos2) -> bool {
+    if app.session.active_sketch.is_none() || app.ui.pick_off.iter().any(|x| x == "constraints") {
+        return false;
+    }
+    let hit = COLLAPSED_BADGES.with(|b| {
+        let reach = GLYPH_PX.with(Cell::get) * 0.1;
+        b.borrow().iter().find(|(_, r)| r.expand(reach).contains(pos)).copied()
+    });
+    let Some((key, rect)) = hit else { return false };
+    GROUP_HOVER.with(|s| {
+        let mut st = s.borrow_mut();
+        st.expanded = Some((key, rect));
+        st.pending = None;
+    });
+    true
+}
+
+/// True when `pos` is over a collapsed group badge or inside an expanded group container.
+pub fn over_group_badge_or_expanded(pos: Pos2) -> bool {
+    let reach = GLYPH_PX.with(Cell::get) * 0.1;
+    let on_badge = COLLAPSED_BADGES.with(|b| b.borrow().iter().any(|(_, r)| r.expand(reach).contains(pos)));
+    on_badge
+        || GROUP_HOVER.with(|s| {
+            let st = s.borrow();
+            st.expanded.is_some_and(|(_, r)| r.contains(pos)) || st.geom_expanded.iter().any(|(_, r)| r.contains(pos))
+        })
+}
+
+/// True when `pos` is over any visible constraint glyph, collapsed group badge, or group box container.
+pub fn over_constraint_ui(app: &SolveApp, pos: Pos2) -> bool {
+    if app.session.active_sketch.is_none() || app.ui.pick_off.iter().any(|x| x == "constraints") {
+        return false;
+    }
+    CONSTRAINT_HIT_RECTS.with(|rects| rects.borrow().iter().any(|r| r.contains(pos))) || glyph_at(pos).is_some() || over_group_badge_or_expanded(pos)
 }
 
 /// What the extra tools do with clicks.
@@ -1851,6 +1925,88 @@ const GLYPH: f32 = 15.0;
 /// The `constraint_glyph_scale` values Preferences › Sketch offers and the glyphs honour (#10794).
 pub const GLYPH_SCALES: std::ops::RangeInclusive<f32> = 1.0..=3.0;
 
+/// Accepted range for `constraint_group_threshold`: 1..=9 constraints, or 10 for Never.
+pub const CONSTRAINT_GROUP_THRESHOLD_RANGE: std::ops::RangeInclusive<u8> = 1..=10;
+
+/// Sentinel threshold value meaning never group constraint glyphs.
+pub const CONSTRAINT_GROUP_NEVER: u8 = 10;
+
+/// Delay before hovering a collapsed group badge expands its constraints (seconds).
+const HOVER_EXPAND_DELAY_SECS: f64 = 0.200;
+
+/// Delay before hovering a sketch geometry highlights and expands its constraints (seconds).
+const GEOM_HOVER_EXPAND_DELAY_SECS: f64 = 0.400;
+
+/// Format `constraint_group_threshold` for the Preferences › Sketch slider.
+pub fn format_group_threshold(value: f64) -> String {
+    if value.round() as u8 >= CONSTRAINT_GROUP_NEVER {
+        solidcraft_ui_text::tr("prefs.constraint_group_never").to_owned()
+    } else {
+        format!("{:.0}", value.round().clamp(1.0, 9.0))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum AnchorKey {
+    PointCluster(usize),
+    Curve(usize),
+    PointPair(usize, usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum HoveredGeom {
+    Curve(usize),
+    PointCluster(usize),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SelectedGeomKey {
+    Curve(String),
+    Point(String),
+}
+
+struct GroupHoverState {
+    expanded: Option<(AnchorKey, egui::Rect)>,
+    pending: Option<(AnchorKey, f64)>,
+    geom_pending: Option<(HoveredGeom, f64)>,
+    geom_active: Option<HoveredGeom>,
+    geom_expanded: Vec<(AnchorKey, egui::Rect)>,
+    geom_pinned: Option<(HoveredGeom, AnchorKey, egui::Rect)>,
+    locked_sel: Option<SelectedGeomKey>,
+}
+
+impl GroupHoverState {
+    const fn new() -> Self {
+        Self { expanded: None, pending: None, geom_pending: None, geom_active: None, geom_expanded: Vec::new(), geom_pinned: None, locked_sel: None }
+    }
+}
+
+struct ConstraintAnchorGroup {
+    key: AnchorKey,
+    at: Vec2,
+    dir: Option<Vec2>,
+    constraint_ids: Vec<String>,
+}
+
+struct PlacedGroup {
+    group: ConstraintAnchorGroup,
+    grouped: bool,
+    has_box: bool,
+    cols: usize,
+    base: Pos2,
+    rect: egui::Rect,
+}
+
+/// Grid `(cols, rows)` packing `count` glyphs as squarely as possible (`cols = ceil(sqrt(count))`).
+pub(crate) fn square_grid_dims(count: usize) -> (usize, usize) {
+    if count <= 1 {
+        return (count, count);
+    }
+    let cols = (count as f32).sqrt().ceil() as usize;
+    let rows = count.div_ceil(cols);
+    (cols, rows)
+}
+
 /// The side of a constraint glyph on screen for the `constraint_glyph_scale` preference. A value
 /// outside [`GLYPH_SCALES`] (a hand-edited settings file) is brought into it; one that is not a
 /// number gives the default size.
@@ -1983,17 +2139,611 @@ fn sketch_px_per_mm(plane: &Plane, proj: &Proj) -> Option<f32> {
     Some(a.distance(b))
 }
 
+fn find_point_cluster(parent: &mut [usize], mut x: usize) -> usize {
+    while let Some(&p) = parent.get(x) {
+        if p == x {
+            break;
+        }
+        let gp = parent.get(p).copied().unwrap_or(p);
+        if let Some(slot) = parent.get_mut(x) {
+            *slot = gp;
+        }
+        x = p;
+    }
+    x
+}
+
+fn curve_midpoint_and_dir(sk: &solidcraft_engine::sketch::Sketch, c: usize) -> Option<(Vec2, Option<Vec2>)> {
+    let poly = sk.polyline(c);
+    let total: f64 = poly.windows(2).map(|w| w[0].dist(w[1])).sum();
+    let mut acc = 0.0;
+    for w in poly.windows(2) {
+        let l = w[0].dist(w[1]);
+        if acc + l >= total * 0.5 && l > 0.0 {
+            return Some((w[0].lerp(w[1], (total * 0.5 - acc) / l), (w[1] - w[0]).normalized()));
+        }
+        acc += l;
+    }
+    poly.first().map(|p| (*p, None))
+}
+
+fn anchor_groups(sk: &solidcraft_engine::sketch::Sketch) -> Vec<ConstraintAnchorGroup> {
+    use solidcraft_engine::sketch::ConstraintKind::*;
+
+    let mut parent: Vec<usize> = (0..sk.points.len()).collect();
+    for c in &sk.constraints {
+        if let Coincident { p, q } = c.kind {
+            let rp = find_point_cluster(&mut parent, p);
+            let rq = find_point_cluster(&mut parent, q);
+            if rp != rq
+                && let Some(slot) = parent.get_mut(rq)
+            {
+                *slot = rp;
+            }
+        }
+    }
+
+    let mut groups: Vec<ConstraintAnchorGroup> = Vec::new();
+    let mut push_entry = |key: AnchorKey, at: Vec2, dir: Option<Vec2>, id: &str| {
+        if let Some(existing) = groups.iter_mut().find(|g| g.key == key) {
+            if !existing.constraint_ids.iter().any(|x| x == id) {
+                existing.constraint_ids.push(id.to_owned());
+            }
+        } else {
+            groups.push(ConstraintAnchorGroup { key, at, dir, constraint_ids: vec![id.to_owned()] });
+        }
+    };
+
+    for c in glyph_constraints(sk) {
+        match c.kind {
+            Coincident { p, .. } | Fix { p } | Midpoint { p, .. } | PointOnCurve { p, .. } | PointAlong { p, .. } => {
+                let root = find_point_cluster(&mut parent, p);
+                if let Some(at) = sk.point(root).or_else(|| sk.point(p)) {
+                    push_entry(AnchorKey::PointCluster(root), at, None, &c.id);
+                }
+            }
+            PatternPoint { p, center, .. } => {
+                let target = center.unwrap_or(p);
+                let root = find_point_cluster(&mut parent, target);
+                if let Some(at) = sk.point(root).or_else(|| sk.point(target)) {
+                    push_entry(AnchorKey::PointCluster(root), at, None, &c.id);
+                }
+            }
+            PatternRadius { .. } => {}
+            HorizontalPoints { p, q } | VerticalPoints { p, q } | Symmetric { p, q, .. } => {
+                let r1 = find_point_cluster(&mut parent, p);
+                let r2 = find_point_cluster(&mut parent, q);
+                let (lo, hi) = if r1 <= r2 { (r1, r2) } else { (r2, r1) };
+                if let Some((a, b)) = sk.point(p).zip(sk.point(q)) {
+                    push_entry(AnchorKey::PointPair(lo, hi), (a + b) * 0.5, None, &c.id);
+                }
+            }
+            Horizontal { l } | Vertical { l } => {
+                if let Some((at, dir)) = curve_midpoint_and_dir(sk, l) {
+                    push_entry(AnchorKey::Curve(l), at, dir, &c.id);
+                }
+            }
+            Parallel { a, b }
+            | Perpendicular { a, b }
+            | Collinear { a, b }
+            | Equal { a, b }
+            | Concentric { a, b }
+            | Tangent { a, b }
+            | Smooth { a, b } => {
+                for curve in [a, b] {
+                    if let Some((at, dir)) = curve_midpoint_and_dir(sk, curve) {
+                        push_entry(AnchorKey::Curve(curve), at, dir, &c.id);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    groups
+}
+
+fn clamp_rect_to_bounds(r: egui::Rect, bounds: egui::Rect) -> egui::Rect {
+    let w = r.width().min(bounds.width());
+    let h = r.height().min(bounds.height());
+    let max_x = (bounds.right() - w).max(bounds.left());
+    let max_y = (bounds.bottom() - h).max(bounds.top());
+    let min = egui::pos2(r.left().clamp(bounds.left(), max_x), r.top().clamp(bounds.top(), max_y));
+    egui::Rect::from_min_size(min, egui::vec2(w, h))
+}
+
+fn rect_overlap_area(a: egui::Rect, b: egui::Rect) -> f32 {
+    let i = a.intersect(b);
+    if i.width() > 0.0 && i.height() > 0.0 { i.width() * i.height() } else { 0.0 }
+}
+
+fn point_cluster_map(sk: &solidcraft_engine::sketch::Sketch) -> Vec<usize> {
+    let mut parent: Vec<usize> = (0..sk.points.len()).collect();
+    for c in &sk.constraints {
+        if let solidcraft_engine::sketch::ConstraintKind::Coincident { p, q } = c.kind {
+            let rp = find_point_cluster(&mut parent, p);
+            let rq = find_point_cluster(&mut parent, q);
+            if rp != rq
+                && let Some(slot) = parent.get_mut(rq)
+            {
+                *slot = rp;
+            }
+        }
+    }
+    parent
+}
+
+fn constraint_relates_to_geom(parent: &mut [usize], k: &solidcraft_engine::sketch::ConstraintKind, geom: HoveredGeom) -> bool {
+    let (cs, ps) = constraint_entities(k);
+    match geom {
+        HoveredGeom::Curve(ci) => cs.contains(&ci),
+        HoveredGeom::PointCluster(root) => ps.into_iter().any(|p| find_point_cluster(parent, p) == root),
+    }
+}
+
+fn rect_dist_to_point(r: egui::Rect, p: Pos2) -> f32 {
+    let dx = (r.left() - p.x).max(p.x - r.right()).max(0.0);
+    let dy = (r.top() - p.y).max(p.y - r.bottom()).max(0.0);
+    dx.hypot(dy)
+}
+
+/// Place a base group rect (single badge or box-wrapped ungrouped grid) clear of placed rects,
+/// dimension labels, visible sketch/origin points, and optionally the pointer.
+#[allow(clippy::too_many_arguments)]
+fn place_group_rect(
+    base: Pos2,
+    dir_screen: Option<Pos2>,
+    size: egui::Vec2,
+    glyph: f32,
+    placed_rects: &[egui::Rect],
+    dim_texts: &[egui::Rect],
+    point_obstacles: &[egui::Rect],
+    cursor_obstacle: Option<egui::Rect>,
+) -> egui::Rect {
+    let free = |r: egui::Rect| !placed_rects.iter().any(|p| p.expand(1.0).intersects(r));
+    let on_dim = |r: egui::Rect| dim_texts.iter().any(|d| d.intersects(r));
+    let on_pt = |r: egui::Rect| point_obstacles.iter().any(|p| p.intersects(r));
+    let on_cursor = |r: egui::Rect| cursor_obstacle.is_some_and(|c| c.intersects(r));
+
+    let mut candidates: Vec<egui::Rect> = Vec::new();
+    match dir_screen {
+        Some(q) => {
+            let t = (q - base).normalized();
+            let side = if t.length() > 0.5 { egui::vec2(-t.y, t.x) } else { egui::vec2(0.7, -0.7) };
+            let step = egui::vec2(side.y, -side.x);
+            let side_clearance = |s: egui::Vec2, extra: f32| 0.5 * (s.x.abs() * size.x + s.y.abs() * size.y) + glyph * 0.4 + extra;
+            let slide_step = (glyph * 0.75).max(8.0);
+            let mut offsets = vec![0.0_f32];
+            for k in 1..=8 {
+                offsets.push(k as f32);
+                offsets.push(-(k as f32));
+            }
+            // Interleave both sides and rings so opposite-side or slight outward positions near
+            // `base` are tested before sliding far down the curve.
+            for ring in 0..=3 {
+                let extra = ring as f32 * slide_step;
+                for &k in &offsets {
+                    for s in [side, -side] {
+                        let s0 = base + s * side_clearance(s, extra);
+                        candidates.push(egui::Rect::from_center_size(s0 + step * (k * slide_step), size));
+                    }
+                }
+            }
+        }
+        None => {
+            let gap = glyph * 0.4;
+            let step = (glyph * 0.75).max(8.0);
+            let dirs = [
+                egui::vec2(0.0, -1.0),
+                egui::vec2(1.0, 0.0),
+                egui::vec2(-1.0, 0.0),
+                egui::vec2(0.0, 1.0),
+                egui::vec2(0.7, -0.7),
+                egui::vec2(-0.7, -0.7),
+                egui::vec2(0.7, 0.7),
+                egui::vec2(-0.7, 0.7),
+            ];
+            for ring in 0..=5 {
+                let extra = ring as f32 * step;
+                for d in dirs {
+                    let s = d.normalized();
+                    let c = if d.x.abs() > 0.1 && d.y.abs() > 0.1 {
+                        base + egui::vec2(d.x.signum() * (size.x * 0.5 + gap + extra * 0.7), d.y.signum() * (size.y * 0.5 + gap + extra * 0.7))
+                    } else {
+                        base + s * (0.5 * (s.x.abs() * size.x + s.y.abs() * size.y) + gap + extra)
+                    };
+                    candidates.push(egui::Rect::from_center_size(c, size));
+                }
+            }
+        }
+    }
+
+    if let Some(c) = cursor_obstacle {
+        let cb = c.expand(2.0);
+        for min in [
+            egui::pos2(base.x - size.x * 0.5, cb.top() - size.y),
+            egui::pos2(base.x - size.x * 0.5, cb.bottom()),
+            egui::pos2(cb.left() - size.x, base.y - size.y * 0.5),
+            egui::pos2(cb.right(), base.y - size.y * 0.5),
+        ] {
+            candidates.push(egui::Rect::from_min_size(min, size));
+        }
+    }
+
+    let dist_to_base = |r: &egui::Rect| rect_dist_to_point(*r, base) * 4.0 + r.center().distance(base);
+    candidates.sort_by(|a, b| dist_to_base(a).total_cmp(&dist_to_base(b)));
+
+    if let Some(best_clear) = candidates.iter().copied().find(|&r| free(r) && !on_cursor(r) && !on_dim(r) && !on_pt(r)) {
+        return best_clear;
+    }
+    if let Some(no_pt) = candidates.iter().copied().find(|&r| free(r) && !on_cursor(r) && !on_pt(r)) {
+        return no_pt;
+    }
+    if let Some(no_dim) = candidates.iter().copied().find(|&r| free(r) && !on_cursor(r) && !on_dim(r)) {
+        return no_dim;
+    }
+    if let Some(no_cursor) = candidates.iter().copied().find(|&r| free(r) && !on_cursor(r)) {
+        return no_cursor;
+    }
+    candidates
+        .into_iter()
+        .min_by(|a, b| {
+            let score = |r: &egui::Rect| {
+                let p_ov: f32 = placed_rects.iter().map(|p| rect_overlap_area(p.expand(1.0), *r)).sum();
+                let d_ov: f32 = dim_texts.iter().map(|d| rect_overlap_area(*d, *r)).sum();
+                let pt_ov: f32 = point_obstacles.iter().map(|pt| rect_overlap_area(*pt, *r)).sum();
+                let cur_ov: f32 = cursor_obstacle.map_or(0.0, |c| rect_overlap_area(c, *r));
+                cur_ov * 100.0 + p_ov * 8.0 + pt_ov * 3.0 + d_ov * 2.0 + dist_to_base(r) * 0.5
+            };
+            score(a).total_cmp(&score(b))
+        })
+        .unwrap_or_else(|| egui::Rect::from_center_size(base + egui::vec2(size.x * 0.5 + glyph * 0.4, -(size.y * 0.5 + glyph * 0.4)), size))
+}
+
+/// Place an expanded group container clear of `hard_blockers` (other expanded groups, cursor) and
+/// as close as possible to `anchor_base` while avoiding neighbors, dimension labels, and points.
+#[allow(clippy::too_many_arguments)]
+fn place_expanded_container(
+    badge_rect: egui::Rect,
+    anchor_base: Pos2,
+    box_size: egui::Vec2,
+    bounds: egui::Rect,
+    must_enclose_badge: bool,
+    hard_blockers: &[egui::Rect],
+    neighbor_rects: &[egui::Rect],
+    dim_texts: &[egui::Rect],
+    point_obstacles: &[egui::Rect],
+    pad_margin: f32,
+) -> egui::Rect {
+    let bc = badge_rect.center();
+    let xs = [bc.x - box_size.x * 0.5, badge_rect.left(), badge_rect.right() - box_size.x];
+    let ys = [bc.y - box_size.y * 0.5, badge_rect.bottom() - box_size.y, badge_rect.top()];
+    let mut candidates: Vec<egui::Rect> = Vec::new();
+    for y in ys {
+        for x in xs {
+            let cand = clamp_rect_to_bounds(egui::Rect::from_min_size(egui::pos2(x, y), box_size), bounds);
+            if !must_enclose_badge || cand.contains(bc) {
+                candidates.push(cand);
+            }
+        }
+    }
+    if !must_enclose_badge {
+        let gap = 6.0;
+        let dirs = [
+            egui::vec2(0.0, -1.0),
+            egui::vec2(0.0, 1.0),
+            egui::vec2(-1.0, 0.0),
+            egui::vec2(1.0, 0.0),
+            egui::vec2(0.7, -0.7),
+            egui::vec2(-0.7, -0.7),
+            egui::vec2(0.7, 0.7),
+            egui::vec2(-0.7, 0.7),
+        ];
+        // Tight rings directly around the geometry anchor so expanding checks every side nearby
+        // instead of jumping outward in coarse steps.
+        for ring in 0..=10 {
+            let extra = ring as f32 * 10.0;
+            for dir in dirs {
+                let s = dir.normalized();
+                let c = if dir.x.abs() > 0.1 && dir.y.abs() > 0.1 {
+                    anchor_base
+                        + egui::vec2(dir.x.signum() * (box_size.x * 0.5 + gap + extra * 0.7), dir.y.signum() * (box_size.y * 0.5 + gap + extra * 0.7))
+                } else {
+                    anchor_base + s * (0.5 * (s.x.abs() * box_size.x + s.y.abs() * box_size.y) + gap + extra)
+                };
+                candidates.push(clamp_rect_to_bounds(egui::Rect::from_center_size(c, box_size), bounds));
+            }
+        }
+        // Snap right outside any hard blocker (e.g. cursor or sibling box) while staying aligned to anchor_base.
+        for b in hard_blockers {
+            let pb = b.expand(pad_margin);
+            for min in [
+                egui::pos2(anchor_base.x - box_size.x * 0.5, pb.top() - box_size.y),
+                egui::pos2(anchor_base.x - box_size.x * 0.5, pb.bottom()),
+                egui::pos2(pb.left() - box_size.x, anchor_base.y - box_size.y * 0.5),
+                egui::pos2(pb.right(), anchor_base.y - box_size.y * 0.5),
+            ] {
+                candidates.push(clamp_rect_to_bounds(egui::Rect::from_min_size(min, box_size), bounds));
+            }
+        }
+    }
+
+    let ref_pt = if must_enclose_badge { bc } else { anchor_base };
+    let dist_metric = |cand: &egui::Rect| rect_dist_to_point(*cand, ref_pt) * 2.0 + cand.center().distance(ref_pt) * 0.25;
+
+    let mut best_clear: Option<(f32, egui::Rect)> = None;
+    let mut best_fallback: Option<(f32, egui::Rect)> = None;
+    for cand in candidates {
+        let padded = cand.expand(pad_margin);
+        let hard_overlap: f32 = hard_blockers.iter().map(|b| rect_overlap_area(padded, *b)).sum();
+        let neighbor_overlap: f32 = neighbor_rects.iter().map(|n| rect_overlap_area(padded, *n)).sum();
+        let dim_overlap: f32 = dim_texts.iter().map(|d| rect_overlap_area(padded, *d)).sum();
+        let pt_overlap: f32 = point_obstacles.iter().map(|pt| rect_overlap_area(cand, *pt)).sum();
+        let soft_overlap = neighbor_overlap * 4.0 + dim_overlap * 2.0 + pt_overlap * 1.5;
+        let dist = dist_metric(&cand);
+        if hard_overlap == 0.0 && soft_overlap == 0.0 && best_clear.is_none_or(|(bd, _)| dist < bd) {
+            best_clear = Some((dist, cand));
+        }
+        let score = hard_overlap * 100_000.0 + soft_overlap * 4.0 + dist;
+        if best_fallback.is_none_or(|(best_score, _)| score < best_score) {
+            best_fallback = Some((score, cand));
+        }
+    }
+    best_clear.or(best_fallback).map(|(_, r)| r).unwrap_or_else(|| clamp_rect_to_bounds(egui::Rect::from_center_size(ref_pt, box_size), bounds))
+}
+
+/// Shift `rect` clear of all `blockers` (expanded boxes) and `settled` (other placed groups).
+fn nudge_rect_clear_of(
+    rect: egui::Rect,
+    blockers: &[egui::Rect],
+    settled: &[egui::Rect],
+    bounds: egui::Rect,
+    dim_texts: &[egui::Rect],
+    point_obstacles: &[egui::Rect],
+) -> egui::Rect {
+    if blockers.iter().all(|b| !rect.intersects(*b)) {
+        return rect;
+    }
+    let mut candidates: Vec<egui::Rect> = Vec::new();
+    for b in blockers {
+        for min in [
+            egui::pos2(b.left() - rect.width(), rect.top()),
+            egui::pos2(b.right(), rect.top()),
+            egui::pos2(rect.left(), b.top() - rect.height()),
+            egui::pos2(rect.left(), b.bottom()),
+            egui::pos2(b.left() - rect.width(), b.top() - rect.height()),
+            egui::pos2(b.right(), b.top() - rect.height()),
+            egui::pos2(b.left() - rect.width(), b.bottom()),
+            egui::pos2(b.right(), b.bottom()),
+        ] {
+            candidates.push(clamp_rect_to_bounds(egui::Rect::from_min_size(min, rect.size()), bounds));
+        }
+    }
+    let dirs = [
+        egui::vec2(0.0, -1.0),
+        egui::vec2(0.0, 1.0),
+        egui::vec2(-1.0, 0.0),
+        egui::vec2(1.0, 0.0),
+        egui::vec2(0.7, -0.7),
+        egui::vec2(-0.7, -0.7),
+        egui::vec2(0.7, 0.7),
+        egui::vec2(-0.7, 0.7),
+    ];
+    let step = rect.width().max(rect.height()).max(16.0) + 4.0;
+    for ring in 1..=12 {
+        let d = ring as f32 * step;
+        for dir in dirs {
+            let c = rect.center() + dir.normalized() * d;
+            candidates.push(clamp_rect_to_bounds(egui::Rect::from_center_size(c, rect.size()), bounds));
+        }
+    }
+
+    let pick = |require_settled: bool| {
+        let mut best: Option<(f32, egui::Rect)> = None;
+        for &cand in &candidates {
+            if blockers.iter().any(|b| cand.intersects(*b)) {
+                continue;
+            }
+            if require_settled && settled.iter().any(|s| cand.intersects(s.expand(1.0))) {
+                continue;
+            }
+            let dim_penalty = if dim_texts.iter().any(|d| d.intersects(cand)) { 10_000.0 } else { 0.0 };
+            let pt_penalty = if point_obstacles.iter().any(|p| p.intersects(cand)) { 5_000.0 } else { 0.0 };
+            let score = cand.center().distance(rect.center()) + dim_penalty + pt_penalty;
+            if best.is_none_or(|(b, _)| score < b) {
+                best = Some((score, cand));
+            }
+        }
+        best.map(|(_, r)| r)
+    };
+    pick(true).or_else(|| pick(false)).unwrap_or(rect)
+}
+
+fn highlight_constraints_entities(
+    ss: &solidcraft_engine::doc::SolvedSketch,
+    painter: &egui::Painter,
+    proj: &Proj,
+    tk: &solidcraft_theme::Tokens,
+    ids: &[String],
+) {
+    let (cs, ps) = ss.sketch.constraints.iter().filter(|c| ids.contains(&c.id)).map(|c| constraint_entities(&c.kind)).fold(
+        (Vec::new(), Vec::new()),
+        |(mut cs, mut ps), (c, p)| {
+            cs.extend(c);
+            ps.extend(p);
+            (cs, ps)
+        },
+    );
+    let mut display_budget = solidcraft_engine::render::SamplingBudget::new(32_768, 65_536);
+    for ci in cs {
+        crate::tools::paint_curve(&ss.sketch, ci, &ss.plane, painter, proj, Stroke::new(3.0, tk.accent.gamma_multiply(0.7)), &mut display_budget);
+    }
+    for pi in ps {
+        if let Some(q) = ss.sketch.point(pi).and_then(|q| proj.to_screen(ss.plane.to_world(q))) {
+            painter.circle_filled(q, 4.5, tk.accent);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_constraint_glyph(
+    app: &SolveApp,
+    ss: &solidcraft_engine::doc::SolvedSketch,
+    painter: &egui::Painter,
+    tk: &solidcraft_theme::Tokens,
+    id: &str,
+    center: Pos2,
+    glyph: f32,
+    scale: f32,
+    picked: Option<&str>,
+    hovered: Option<&str>,
+    geom_lit: bool,
+    drawn: &mut Vec<(String, Pos2)>,
+) {
+    let Some(c) = ss.sketch.constraints.iter().find(|c| c.id == id) else { return };
+    let group = glyph_group(&ss.sketch, id);
+    let failing = group.iter().any(|g| ss.report.failing.contains(g));
+    // Redundant (already implied by the others, but holding): dimmed, not an error.
+    let redundant = !failing && group.iter().all(|g| ss.report.redundant.contains(g));
+    let selected = picked == Some(id)
+        || app.session.selection.iter().any(|s| matches!(s, solidcraft_engine::Sel::SketchConstraint { id: x } if group.contains(x)));
+    let lit = selected || hovered == Some(id) || geom_lit;
+    let col = if failing {
+        crate::viewport::Conflict::glyph_colour(app, tk)
+    } else if lit {
+        tk.accent
+    } else if redundant {
+        tk.glyph_text.gamma_multiply(0.45)
+    } else {
+        tk.glyph_text
+    };
+    let r = egui::Rect::from_center_size(center, egui::vec2(glyph, glyph));
+    painter.rect_filled(r, tk.radius_sm.saturating_sub(1), if lit { tk.accent_soft } else { tk.glyph_bg });
+    painter.rect_stroke(
+        r,
+        tk.radius_sm.saturating_sub(1),
+        Stroke::new(1.0, if failing || lit { col } else { tk.glyph_edge }),
+        egui::StrokeKind::Inside,
+    );
+    let pattern_icon =
+        ss.sketch.patterns.iter().find(|p| p.instances.first().and_then(|i| i.constraints.first()).map(String::as_str) == Some(id)).map(|p| {
+            if matches!(p.kind, solidcraft_engine::sketch::SketchPatternKind::Circular { .. }) {
+                "sketch_circ_pattern"
+            } else {
+                "sketch_rect_pattern"
+            }
+        });
+    match pattern_icon.or_else(|| glyph_icon(c.kind.name())) {
+        Some(icon) => crate::icons::paint_icon(painter, r.shrink(2.0 * scale), icon, f32::from(col.a()) / 255.0),
+        None => {
+            painter.text(center, egui::Align2::CENTER_CENTER, glyph_letter(c.kind.name()), egui::FontId::proportional(tk.font_panel * scale), col);
+        }
+    }
+    drawn.push((id.to_owned(), center));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_group_badge(
+    app: &SolveApp,
+    ss: &solidcraft_engine::doc::SolvedSketch,
+    painter: &egui::Painter,
+    tk: &solidcraft_theme::Tokens,
+    ids: &[String],
+    rect: egui::Rect,
+    scale: f32,
+    picked: Option<&str>,
+    hovered: bool,
+) {
+    let failing = ids.iter().any(|id| glyph_group(&ss.sketch, id).iter().any(|g| ss.report.failing.contains(g)));
+    let redundant = !failing && ids.iter().all(|id| glyph_group(&ss.sketch, id).iter().all(|g| ss.report.redundant.contains(g)));
+    let selected = ids.iter().any(|id| {
+        let g = glyph_group(&ss.sketch, id);
+        picked == Some(id.as_str())
+            || app.session.selection.iter().any(|s| matches!(s, solidcraft_engine::Sel::SketchConstraint { id: x } if g.contains(x)))
+    });
+    let lit = selected || hovered;
+    let col = if failing {
+        crate::viewport::Conflict::glyph_colour(app, tk)
+    } else if lit {
+        tk.accent
+    } else if redundant {
+        tk.glyph_text.gamma_multiply(0.45)
+    } else {
+        tk.glyph_text
+    };
+    let rounding = tk.radius_sm.saturating_sub(1);
+    painter.rect_filled(rect, rounding, if lit { tk.accent_soft } else { tk.glyph_bg });
+    painter.rect_stroke(rect, rounding, Stroke::new(1.0, if failing || lit { col } else { tk.glyph_edge }), egui::StrokeKind::Inside);
+    let label = ids.len().to_string();
+    let font_size = if label.len() > 1 { tk.font_small * scale } else { tk.font_panel * scale };
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(font_size), col);
+}
+
+/// Minimum cosine of the angle between the camera view axis and the sketch plane normal for
+/// constraint glyphs to remain visible (`cos(70°)`).
+const MIN_VIEW_NORMAL_COS: f64 = 0.342_020_143_325_668_8;
+
+fn constraint_glyphs_visible_at_angle(plane: &Plane, cam: &solidcraft_viewport::Camera) -> bool {
+    cam.back().dot(plane.normal()).abs() >= MIN_VIEW_NORMAL_COS - 1e-6
+}
+
+fn clear_glyph_state() {
+    GLYPHS.with(|g| g.borrow_mut().clear());
+    COLLAPSED_BADGES.with(|b| b.borrow_mut().clear());
+    CONSTRAINT_HIT_RECTS.with(|r| r.borrow_mut().clear());
+    GROUP_HOVER.with(|s| *s.borrow_mut() = GroupHoverState::new());
+}
+
+fn hovered_sketch_geom(app: &SolveApp, sid: u64, sk: &solidcraft_engine::sketch::Sketch, parent: &mut [usize]) -> Option<HoveredGeom> {
+    if !app.preferences.show_constraints_on_geometry_hover || app.tool.is_some() || app.dialog.as_ref().is_some_and(|d| d.wants_picks()) {
+        return None;
+    }
+    match app.viewport.hover.as_ref()? {
+        Hit::SketchCurve { sketch, id, .. } | Hit::SketchMidpoint { sketch, id, .. } if *sketch == sid => sk.curve_index(id).map(HoveredGeom::Curve),
+        Hit::SketchPoint { sketch, id, .. } if *sketch == sid => {
+            sk.resolve_point(id).map(|p| HoveredGeom::PointCluster(find_point_cluster(parent, p)))
+        }
+        _ => None,
+    }
+}
+
+fn last_selected_sketch_geom(
+    app: &SolveApp,
+    sid: u64,
+    sk: &solidcraft_engine::sketch::Sketch,
+    parent: &mut [usize],
+) -> Option<(SelectedGeomKey, HoveredGeom)> {
+    if !app.preferences.show_constraints_on_geometry_hover || app.tool.is_some() || app.dialog.as_ref().is_some_and(|d| d.wants_picks()) {
+        return None;
+    }
+    app.session.selection.iter().rev().find_map(|sel| match sel {
+        solidcraft_engine::Sel::SketchCurve { id, sketch } if sketch.is_none_or(|s| s == sid) => {
+            sk.curve_index(id).map(|ci| (SelectedGeomKey::Curve(id.clone()), HoveredGeom::Curve(ci)))
+        }
+        solidcraft_engine::Sel::SketchMidpoint { id } => sk.curve_index(id).map(|ci| (SelectedGeomKey::Curve(id.clone()), HoveredGeom::Curve(ci))),
+        solidcraft_engine::Sel::SketchPoint { id } => {
+            sk.resolve_point(id).map(|p| (SelectedGeomKey::Point(id.clone()), HoveredGeom::PointCluster(find_point_cluster(parent, p))))
+        }
+        _ => None,
+    })
+}
+
 fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Pos2>) {
-    let Some(sid) = active_sketch(app) else { return };
+    let Some(sid) = active_sketch(app) else {
+        clear_glyph_state();
+        return;
+    };
     // While a dimension's value is typed, the glyphs sit where that value puts their geometry.
     let st = crate::dim_view::preview_world(app).unwrap_or_else(|| crate::open_meshing::session_world(&app.session));
-    let Some(ss) = st.sketch(sid) else { return };
+    let Some(ss) = st.sketch(sid) else {
+        clear_glyph_state();
+        return;
+    };
     // The badge's side, from Preferences › Sketch (#10794); 15 px at the default.
     let glyph = glyph_px(app.preferences.constraint_glyph_scale);
     let scale = glyph / GLYPH;
     GLYPH_PX.with(|g| g.set(glyph));
-    if ss.sketch.view.hide_constraints {
-        GLYPHS.with(|g| g.borrow_mut().clear());
+    if ss.sketch.view.hide_constraints || !constraint_glyphs_visible_at_angle(&ss.plane, &proj.cam) {
+        clear_glyph_state();
         return;
     }
     // Zoomed out far enough: fixed-size glyphs would dominate the sketch (#8980), unless the
@@ -2001,128 +2751,441 @@ fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Po
     if let Some(scale) = sketch_px_per_mm(&ss.plane, proj)
         && !constraint_glyphs_visible_at_scale(scale, app.preferences.hide_constraint_glyphs_zoomed_out, || sketch_span_px(ss, proj))
     {
-        GLYPHS.with(|g| g.borrow_mut().clear());
+        clear_glyph_state();
         return;
     }
     let tk = solidcraft_theme::Tokens::get();
     let picked = PICKED.with(|p| p.borrow().clone());
-    // Where each glyph goes: beside its entity (to its left, away from the line), every entity
-    // of a two-entity constraint getting one; glyphs that would overlap step along. A glyph
-    // that would sit on a dimension's value goes to the other side of its line.
     let dim_texts: Vec<egui::Rect> = crate::dim_view::text_rects().into_iter().map(|(_, r)| r.expand(2.0)).collect();
-    let on_dim = |p: Pos2| {
-        let r = egui::Rect::from_center_size(p, egui::vec2(glyph, glyph));
-        dim_texts.iter().any(|d| d.intersects(r))
-    };
-    let mut placed: Vec<(String, Pos2, Pos2)> = Vec::new();
-    for c in glyph_constraints(&ss.sketch) {
-        for (at, dir) in glyph_anchors(&ss.sketch, &c.kind) {
-            let Some(base) = proj.to_screen(ss.plane.to_world(at)) else { continue };
-            // The entity's direction on screen, and its side.
-            let side = match dir.and_then(|d| proj.to_screen(ss.plane.to_world(at + d))) {
-                Some(q) => {
-                    let t = (q - base).normalized();
-                    if t.length() > 0.5 { egui::vec2(-t.y, t.x) } else { egui::vec2(0.7, -0.7) }
-                }
-                None => egui::vec2(0.7, -0.7),
-            };
-            let step = if dir.is_some() { egui::vec2(side.y, -side.x) } else { egui::vec2(1.0, 0.0) };
-            let free = |sp: Pos2| !placed.iter().any(|(_, q, _)| q.distance(sp) < glyph + 1.0);
-            let start = |s: egui::Vec2| base + s * (glyph * 0.9);
-            let side = if on_dim(start(side)) && !on_dim(start(-side)) { -side } else { side };
-            // Step along until clear of other glyphs, preferring a spot clear of dimension
-            // values too.
-            let settle = |avoid_dims: bool| {
-                let mut sp = start(side);
-                for _ in 0..12 {
-                    if free(sp) && !(avoid_dims && on_dim(sp)) {
-                        return Some(sp);
-                    }
-                    sp += step * (glyph + 2.0);
-                }
-                None
-            };
-            let sp = settle(true).or_else(|| settle(false)).unwrap_or_else(|| start(side) + step * (12.0 * (glyph + 2.0)));
-            placed.push((c.id.clone(), sp, base));
-        }
+    let vis_points = solidcraft_engine::view::SketchPointVisibility::new(&ss.sketch);
+    let mut point_obstacles: Vec<egui::Rect> = ss
+        .sketch
+        .points
+        .iter()
+        .filter(|p| vis_points.takes(p))
+        .filter_map(|p| proj.to_screen(ss.plane.to_world(p.pos)))
+        .map(|sp| egui::Rect::from_center_size(sp, egui::vec2(6.0 * scale, 6.0 * scale)))
+        .collect();
+    if app.origin_visible()
+        && let Some(op) = proj.to_screen(Vec3::ZERO)
+    {
+        point_obstacles.push(egui::Rect::from_center_size(op, egui::vec2(6.0 * scale, 6.0 * scale)));
     }
-    // The hovered glyph instance (a Parallel draws one per entity, all with the same id).
-    let hovered_at =
-        hover.and_then(|h| nearest_glyph(placed.iter().map(|(id, q, _)| (id.as_str(), *q)), h, glyph * 0.6)).map(|(id, q)| (id.to_owned(), q));
-    let hovered = hovered_at.as_ref().map(|(id, _)| id.clone());
-    // The hovered (or selected) constraint's entities lit up.
-    if let Some(id) = hovered.as_ref().or(picked.as_ref()) {
-        let group = glyph_group(&ss.sketch, id);
-        let (cs, ps) = ss.sketch.constraints.iter().filter(|c| group.contains(&c.id)).map(|c| constraint_entities(&c.kind)).fold(
-            (Vec::new(), Vec::new()),
-            |(mut cs, mut ps), (c, p)| {
-                cs.extend(c);
-                ps.extend(p);
-                (cs, ps)
-            },
-        );
-        let mut display_budget = solidcraft_engine::render::SamplingBudget::new(32_768, 65_536);
-        for ci in cs {
-            crate::tools::paint_curve(&ss.sketch, ci, &ss.plane, painter, proj, Stroke::new(3.0, tk.accent.gamma_multiply(0.7)), &mut display_budget);
+
+    let cell_gap = (2.0 * scale).round().max(2.0);
+    let pad = (4.0 * scale).round().max(3.0);
+    let threshold = app.preferences.constraint_group_threshold;
+    let only_on_hover = app.preferences.show_constraints_on_geometry_hover && app.preferences.only_show_constraints_on_geometry_hover;
+    let is_grouped = |count: usize| !only_on_hover && threshold < CONSTRAINT_GROUP_NEVER && count > usize::from(threshold);
+
+    // Resolve hover-expand state (200 ms on collapsed badge, 400 ms on hovered sketch geometry,
+    // plus locking the last selected geometry once it has also met the 400 ms hover requirement).
+    let now = painter.ctx().input(|i| i.time);
+    let expand_margin = 10.0 * scale;
+    let mut point_parent = point_cluster_map(&ss.sketch);
+    let hovered_geom = hovered_sketch_geom(app, sid, &ss.sketch, &mut point_parent);
+    let last_sel = last_selected_sketch_geom(app, sid, &ss.sketch, &mut point_parent);
+
+    let (geom_active, geom_pinned, locked_geom, prev_badge_expanded) = GROUP_HOVER.with(|state_cell| {
+        let mut state = state_cell.borrow_mut();
+
+        if !app.preferences.show_constraints_on_geometry_hover {
+            state.geom_pending = None;
+            state.geom_active = None;
+            state.geom_expanded.clear();
+            state.geom_pinned = None;
+            state.locked_sel = None;
+        } else {
+            let prev_geom_active = state.geom_active;
+            if let Some(geom) = hovered_geom {
+                match state.geom_pending {
+                    Some((pending_geom, t0)) if pending_geom == geom => {
+                        let elapsed = now - t0;
+                        if elapsed >= GEOM_HOVER_EXPAND_DELAY_SECS {
+                            state.geom_active = Some(geom);
+                        } else {
+                            state.geom_active = None;
+                            painter
+                                .ctx()
+                                .request_repaint_after(std::time::Duration::from_secs_f64((GEOM_HOVER_EXPAND_DELAY_SECS - elapsed).max(0.01)));
+                        }
+                    }
+                    _ => {
+                        state.geom_pending = Some((geom, now));
+                        state.geom_active = None;
+                        painter.ctx().request_repaint_after(std::time::Duration::from_secs_f64(GEOM_HOVER_EXPAND_DELAY_SECS));
+                    }
+                }
+            } else {
+                state.geom_pending = None;
+                state.geom_active = None;
+            }
+
+            // Pin a revealed box/glyph if the cursor moves off hovered geometry directly onto it.
+            if let Some((pg, _pkey, prect)) = state.geom_pinned
+                && state.geom_active.is_none_or(|a| a == pg)
+                && hover.is_some_and(|h| prect.expand(expand_margin).contains(h))
+            {
+                // Keep geom_pinned alive while the pointer stays inside its expanded area.
+            } else if hovered_geom.is_none()
+                && let Some(prev_g) = prev_geom_active
+                && let Some(h) = hover
+                && let Some(&(key, rect)) = state.geom_expanded.iter().find(|(_, r)| r.expand(expand_margin).contains(h))
+            {
+                if only_on_hover {
+                    state.geom_pinned = Some((prev_g, key, rect));
+                } else {
+                    state.geom_pinned = None;
+                    state.expanded = Some((key, rect));
+                }
+            } else {
+                state.geom_pinned = None;
+            }
+
+            // Lock the last selected geometry only once it is both selected and hovered >= 400 ms
+            // (in either order). Selecting another geometry drops the previous lock.
+            if state.locked_sel.as_ref() != last_sel.as_ref().map(|(k, _)| k) {
+                state.locked_sel = None;
+            }
+            if let (Some((sel_key, sel_geom)), Some(active_g)) = (&last_sel, state.geom_active)
+                && *sel_geom == active_g
+            {
+                state.locked_sel = Some(sel_key.clone());
+            }
         }
-        for pi in ps {
-            if let Some(q) = ss.sketch.point(pi).and_then(|q| proj.to_screen(ss.plane.to_world(q))) {
-                painter.circle_filled(q, 4.5, tk.accent);
+        state.geom_expanded.clear();
+
+        let locked_geom = state.locked_sel.as_ref().and_then(|lk| last_sel.as_ref().filter(|(k, _)| k == lk).map(|(_, g)| *g));
+        let prev_exp = if only_on_hover {
+            state.expanded = None;
+            None
+        } else if let Some((exp_key, prev_rect)) = state.expanded {
+            if hover.is_some_and(|h| prev_rect.expand(expand_margin).contains(h)) {
+                state.pending = None;
+                Some((exp_key, prev_rect))
+            } else {
+                state.expanded = None;
+                None
+            }
+        } else {
+            None
+        };
+
+        (state.geom_active, state.geom_pinned, locked_geom, prev_exp)
+    });
+
+    let effective_geom = geom_active.or(geom_pinned.map(|(g, _, _)| g)).or(locked_geom);
+    let geom_lit_ids: std::collections::HashSet<String> = match effective_geom {
+        Some(geom) => {
+            glyph_constraints(&ss.sketch).filter(|c| constraint_relates_to_geom(&mut point_parent, &c.kind, geom)).map(|c| c.id.clone()).collect()
+        }
+        None => std::collections::HashSet::new(),
+    };
+    let always_visible_ids: std::collections::HashSet<String> = if only_on_hover {
+        glyph_constraints(&ss.sketch)
+            .filter(|c| {
+                let group = glyph_group(&ss.sketch, &c.id);
+                let failing = group.iter().any(|g| ss.report.failing.contains(g));
+                let selected = picked.as_deref() == Some(c.id.as_str())
+                    || app.session.selection.iter().any(|s| matches!(s, solidcraft_engine::Sel::SketchConstraint { id: x } if group.contains(x)));
+                failing || selected
+            })
+            .map(|c| c.id.clone())
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let cursor_obstacle = hover.map(|h| egui::Rect::from_center_size(h, egui::vec2(18.0 * scale, 18.0 * scale)));
+    let mut placed_groups: Vec<PlacedGroup> = Vec::new();
+    let mut placed_rects: Vec<egui::Rect> = Vec::new();
+    for mut group in anchor_groups(&ss.sketch) {
+        if only_on_hover {
+            group.constraint_ids.retain(|id| always_visible_ids.contains(id) || geom_lit_ids.contains(id));
+            if group.constraint_ids.is_empty() {
+                continue;
+            }
+        }
+        let Some(base) = proj.to_screen(ss.plane.to_world(group.at)) else { continue };
+        let dir_screen = group.dir.and_then(|d| proj.to_screen(ss.plane.to_world(group.at + d)));
+        let grouped = is_grouped(group.constraint_ids.len());
+        let has_box = !grouped && group.constraint_ids.len() >= 2;
+        let (cols, rows) = if grouped { (1, 1) } else { square_grid_dims(group.constraint_ids.len()) };
+        let grid_w = cols as f32 * glyph + cols.saturating_sub(1) as f32 * cell_gap;
+        let grid_h = rows as f32 * glyph + rows.saturating_sub(1) as f32 * cell_gap;
+        let box_pad = if has_box { pad * 2.0 } else { 0.0 };
+        let size = egui::vec2(grid_w + box_pad, grid_h + box_pad);
+        let pinned_rect = geom_pinned.filter(|&(_, k, r)| k == group.key && (r.size() - size).length() <= 1.0).map(|(_, _, r)| r);
+        let rect = if let Some(r) = pinned_rect {
+            r
+        } else {
+            let avoid_cursor = if only_on_hover && geom_active.is_some() { cursor_obstacle } else { None };
+            place_group_rect(base, dir_screen, size, glyph, &placed_rects, &dim_texts, &point_obstacles, avoid_cursor)
+        };
+        if only_on_hover && (geom_active.is_some() || geom_pinned.is_some_and(|(_, k, _)| k == group.key)) {
+            GROUP_HOVER.with(|s| s.borrow_mut().geom_expanded.push((group.key, rect)));
+        }
+        placed_rects.push(rect);
+        placed_groups.push(PlacedGroup { group, grouped, has_box, cols, base, rect });
+    }
+
+    // In normal mode, resolve direct hover/click expansion of a collapsed badge.
+    let badge_expanded_idx = if only_on_hover {
+        None
+    } else if let Some((exp_key, _)) = prev_badge_expanded {
+        let idx = placed_groups.iter().position(|p| p.grouped && p.group.key == exp_key);
+        if idx.is_none() {
+            GROUP_HOVER.with(|s| s.borrow_mut().expanded = None);
+        }
+        idx
+    } else if geom_active.is_some() {
+        GROUP_HOVER.with(|s| s.borrow_mut().pending = None);
+        None
+    } else {
+        let hovered_badge = hover.and_then(|h| {
+            placed_groups
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.grouped && p.rect.expand(glyph * 0.1).contains(h))
+                .min_by(|(_, a), (_, b)| a.rect.center().distance(h).total_cmp(&b.rect.center().distance(h)))
+                .map(|(i, p)| (i, p.group.key, p.rect))
+        });
+        GROUP_HOVER.with(|state_cell| {
+            let mut state = state_cell.borrow_mut();
+            if let Some((idx, key, badge_rect)) = hovered_badge {
+                match state.pending {
+                    Some((pending_key, t0)) if pending_key == key => {
+                        let elapsed = now - t0;
+                        if elapsed >= HOVER_EXPAND_DELAY_SECS {
+                            state.pending = None;
+                            state.expanded = Some((key, badge_rect));
+                            return Some(idx);
+                        }
+                        painter.ctx().request_repaint_after(std::time::Duration::from_secs_f64((HOVER_EXPAND_DELAY_SECS - elapsed).max(0.01)));
+                    }
+                    _ => {
+                        state.pending = Some((key, now));
+                        painter.ctx().request_repaint_after(std::time::Duration::from_secs_f64(HOVER_EXPAND_DELAY_SECS));
+                    }
+                }
+            } else {
+                state.pending = None;
+            }
+            None
+        })
+    };
+
+    // Determine all expanded group indices (from direct badge hover/click OR effective geometry hover/lock).
+    let mut expanded_indices: Vec<usize> = Vec::new();
+    if let Some(idx) = badge_expanded_idx {
+        expanded_indices.push(idx);
+    }
+    if effective_geom.is_some() {
+        for (i, p) in placed_groups.iter().enumerate() {
+            if p.grouped && !expanded_indices.contains(&i) && p.group.constraint_ids.iter().any(|id| geom_lit_ids.contains(id)) {
+                expanded_indices.push(i);
             }
         }
     }
-    let mut drawn: Vec<(String, Pos2)> = Vec::new();
-    for (id, sp, base) in &placed {
-        let Some(c) = ss.sketch.constraints.iter().find(|c| &c.id == id) else { continue };
-        let group = glyph_group(&ss.sketch, id);
-        let failing = group.iter().any(|g| ss.report.failing.contains(g));
-        // Redundant (already implied by the others, but holding): dimmed, not an error.
-        let redundant = !failing && group.iter().all(|g| ss.report.redundant.contains(g));
-        let selected = picked.as_deref() == Some(id.as_str())
-            || app.session.selection.iter().any(|s| matches!(s, solidcraft_engine::Sel::SketchConstraint { id: x } if group.contains(x)));
-        let lit = selected || hovered.as_deref() == Some(id.as_str());
-        let col = if failing {
-            crate::viewport::Conflict::glyph_colour(app, &tk)
-        } else if lit {
-            tk.accent
-        } else if redundant {
-            tk.glyph_text.gamma_multiply(0.45)
-        } else {
-            tk.glyph_text
-        };
-        // A faint leader back to the entity when the glyph was pushed away from it.
-        if sp.distance(*base) > glyph * 1.6 {
-            painter.line_segment([*base, *sp], Stroke::new(0.8, tk.text_dim.gamma_multiply(0.6)));
+
+    // Place expanded containers clear of one another, the cursor (for geometry hover), points,
+    // and neighbors, then nudge every overlapped non-expanded constraint group clear of all expanded boxes.
+    struct ExpandedBox {
+        idx: usize,
+        rect: egui::Rect,
+        cols: usize,
+    }
+    let mut expanded_boxes: Vec<ExpandedBox> = Vec::new();
+    for &idx in &expanded_indices {
+        let Some(exp) = placed_groups.get(idx) else { continue };
+        let (cols, rows) = square_grid_dims(exp.group.constraint_ids.len());
+        let grid_w = cols as f32 * glyph + cols.saturating_sub(1) as f32 * cell_gap;
+        let grid_h = rows as f32 * glyph + rows.saturating_sub(1) as f32 * cell_gap;
+        let box_size = egui::vec2(grid_w + pad * 2.0, grid_h + pad * 2.0);
+        let must_enclose = badge_expanded_idx == Some(idx);
+        let mut hard_blockers: Vec<egui::Rect> = expanded_boxes.iter().map(|b| b.rect).collect();
+        if !must_enclose
+            && geom_active.is_some()
+            && let Some(c) = cursor_obstacle
+        {
+            hard_blockers.push(c);
         }
-        let r = egui::Rect::from_center_size(*sp, egui::vec2(glyph, glyph));
-        painter.rect_filled(r, tk.radius_sm.saturating_sub(1), if lit { tk.accent_soft } else { tk.glyph_bg });
-        painter.rect_stroke(
-            r,
-            tk.radius_sm.saturating_sub(1),
-            Stroke::new(1.0, if failing || lit { col } else { tk.glyph_edge }),
-            egui::StrokeKind::Inside,
+        let neighbors: Vec<egui::Rect> =
+            placed_groups.iter().enumerate().filter(|(i, _)| *i != idx && !expanded_indices.contains(i)).map(|(_, p)| p.rect).collect();
+        let exp_rect = place_expanded_container(
+            exp.rect,
+            exp.base,
+            box_size,
+            proj.rect,
+            must_enclose,
+            &hard_blockers,
+            &neighbors,
+            &dim_texts,
+            &point_obstacles,
+            4.0 * scale,
         );
-        let pattern_icon = ss.sketch.patterns.iter().find(|p| p.instances.first().and_then(|i| i.constraints.first()) == Some(id)).map(|p| {
-            if matches!(p.kind, solidcraft_engine::sketch::SketchPatternKind::Circular { .. }) {
-                "sketch_circ_pattern"
-            } else {
-                "sketch_rect_pattern"
+        GROUP_HOVER.with(|s| {
+            let mut st = s.borrow_mut();
+            if must_enclose {
+                st.expanded = Some((exp.group.key, exp_rect));
+            }
+            if geom_active.is_some() {
+                st.geom_expanded.push((exp.group.key, exp_rect));
             }
         });
-        match pattern_icon.or_else(|| glyph_icon(c.kind.name())) {
-            Some(icon) => crate::icons::paint_icon(painter, r.shrink(2.0 * scale), icon, f32::from(col.a()) / 255.0),
-            None => {
-                painter.text(
-                    *sp,
-                    egui::Align2::CENTER_CENTER,
-                    glyph_letter(c.kind.name()),
-                    egui::FontId::proportional(solidcraft_theme::Tokens::get().font_panel * scale),
-                    col,
-                );
+        expanded_boxes.push(ExpandedBox { idx, rect: exp_rect, cols });
+    }
+    if !expanded_boxes.is_empty() {
+        let blockers: Vec<egui::Rect> = expanded_boxes.iter().map(|eb| eb.rect.expand(4.0 * scale)).collect();
+        let mut settled: Vec<egui::Rect> = placed_groups
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| !expanded_indices.contains(i) && blockers.iter().all(|b| !p.rect.intersects(*b)))
+            .map(|(_, p)| p.rect)
+            .collect();
+        for (i, p) in placed_groups.iter_mut().enumerate() {
+            if expanded_indices.contains(&i) {
+                continue;
+            }
+            if blockers.iter().any(|b| p.rect.intersects(*b)) {
+                p.rect = nudge_rect_clear_of(p.rect, &blockers, &settled, proj.rect, &dim_texts, &point_obstacles);
+                settled.push(p.rect);
             }
         }
-        drawn.push((id.clone(), *sp));
     }
+
+    // Individual glyphs that are visible this frame (for hit testing and tooltips).
+    let mut visible_glyph_centers: Vec<(String, Pos2)> = Vec::new();
+    for (idx, p) in placed_groups.iter().enumerate() {
+        if let Some(eb) = expanded_boxes.iter().find(|b| b.idx == idx) {
+            for (k, cid) in p.group.constraint_ids.iter().enumerate() {
+                let col_i = k % eb.cols;
+                let row_i = k / eb.cols;
+                let c = egui::pos2(
+                    eb.rect.left() + pad + glyph * 0.5 + col_i as f32 * (glyph + cell_gap),
+                    eb.rect.top() + pad + glyph * 0.5 + row_i as f32 * (glyph + cell_gap),
+                );
+                visible_glyph_centers.push((cid.clone(), c));
+            }
+        } else if !p.grouped {
+            let inner_pad = if p.has_box { pad } else { 0.0 };
+            for (k, cid) in p.group.constraint_ids.iter().enumerate() {
+                let col_i = k % p.cols;
+                let row_i = k / p.cols;
+                let c = egui::pos2(
+                    p.rect.left() + inner_pad + glyph * 0.5 + col_i as f32 * (glyph + cell_gap),
+                    p.rect.top() + inner_pad + glyph * 0.5 + row_i as f32 * (glyph + cell_gap),
+                );
+                visible_glyph_centers.push((cid.clone(), c));
+            }
+        }
+    }
+
+    // The hovered individual glyph instance (within expanded container or ungrouped).
+    let hovered_at = hover
+        .and_then(|h| nearest_glyph(visible_glyph_centers.iter().map(|(id, q)| (id.as_str(), *q)), h, glyph * 0.6))
+        .map(|(id, q)| (id.to_owned(), q));
+    let hovered = hovered_at.as_ref().map(|(id, _)| id.clone());
+    let hovered_collapsed_idx = if hovered.is_none() && expanded_boxes.is_empty() {
+        hover.and_then(|h| {
+            placed_groups
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.grouped && p.rect.expand(glyph * 0.1).contains(h))
+                .min_by(|(_, a), (_, b)| a.rect.center().distance(h).total_cmp(&b.rect.center().distance(h)))
+                .map(|(i, _)| i)
+        })
+    } else {
+        None
+    };
+
+    // Highlight affected geometry for hovered/selected constraint or hovered collapsed group.
+    if let Some(id) = hovered.as_ref().or(picked.as_ref()) {
+        let group = glyph_group(&ss.sketch, id);
+        highlight_constraints_entities(ss, painter, proj, &tk, &group);
+    } else if let Some(p) = hovered_collapsed_idx.and_then(|i| placed_groups.get(i)) {
+        highlight_constraints_entities(ss, painter, proj, &tk, &p.group.constraint_ids);
+    } else if let Some(eb) = expanded_boxes.iter().find(|eb| hover.is_some_and(|h| eb.rect.contains(h)))
+        && let Some(p) = placed_groups.get(eb.idx)
+    {
+        highlight_constraints_entities(ss, painter, proj, &tk, &p.group.constraint_ids);
+    }
+
+    let mut drawn: Vec<(String, Pos2)> = Vec::new();
+    let mut collapsed_badges: Vec<(AnchorKey, egui::Rect)> = Vec::new();
+    let mut hit_rects: Vec<egui::Rect> = Vec::new();
+    let box_rounding = tk.radius_sm + 2;
+
+    // Draw non-expanded groups first (collapsed count badges and ungrouped clusters/boxes).
+    for (idx, p) in placed_groups.iter().enumerate() {
+        if expanded_boxes.iter().any(|eb| eb.idx == idx) {
+            continue;
+        }
+        if p.rect.center().distance(p.base) > glyph * 1.6 {
+            painter.line_segment([p.base, p.rect.center()], Stroke::new(0.8, tk.text_dim.gamma_multiply(0.6)));
+        }
+        if p.grouped {
+            paint_group_badge(app, ss, painter, &tk, &p.group.constraint_ids, p.rect, scale, picked.as_deref(), hovered_collapsed_idx == Some(idx));
+            collapsed_badges.push((p.group.key, p.rect));
+            hit_rects.push(p.rect.expand(1.5));
+        } else {
+            if p.has_box {
+                painter.rect_filled(p.rect, box_rounding, tk.panel);
+                painter.rect_stroke(p.rect, box_rounding, Stroke::new(1.0, tk.dialog_border), egui::StrokeKind::Inside);
+                hit_rects.push(p.rect.expand(1.5));
+            }
+            let inner_pad = if p.has_box { pad } else { 0.0 };
+            for (k, cid) in p.group.constraint_ids.iter().enumerate() {
+                let col_i = k % p.cols;
+                let row_i = k / p.cols;
+                let center = egui::pos2(
+                    p.rect.left() + inner_pad + glyph * 0.5 + col_i as f32 * (glyph + cell_gap),
+                    p.rect.top() + inner_pad + glyph * 0.5 + row_i as f32 * (glyph + cell_gap),
+                );
+                let is_geom_lit = geom_lit_ids.contains(cid);
+                paint_constraint_glyph(
+                    app,
+                    ss,
+                    painter,
+                    &tk,
+                    cid,
+                    center,
+                    glyph,
+                    scale,
+                    picked.as_deref(),
+                    hovered.as_deref(),
+                    is_geom_lit,
+                    &mut drawn,
+                );
+                if !p.has_box {
+                    hit_rects.push(egui::Rect::from_center_size(center, egui::vec2(glyph, glyph)).expand(1.5));
+                }
+            }
+        }
+    }
+
+    // Draw expanded group containers on top so they never get occluded.
+    for eb in &expanded_boxes {
+        let Some(p) = placed_groups.get(eb.idx) else { continue };
+        if eb.rect.center().distance(p.base) > glyph * 1.6 {
+            painter.line_segment([p.base, eb.rect.center()], Stroke::new(0.9, tk.accent.gamma_multiply(0.6)));
+        }
+        painter.rect_filled(eb.rect, box_rounding, tk.panel);
+        painter.rect_stroke(eb.rect, box_rounding, Stroke::new(1.0, tk.dialog_border), egui::StrokeKind::Inside);
+        hit_rects.push(eb.rect.expand(1.5));
+        for (k, cid) in p.group.constraint_ids.iter().enumerate() {
+            let col_i = k % eb.cols;
+            let row_i = k / eb.cols;
+            let center = egui::pos2(
+                eb.rect.left() + pad + glyph * 0.5 + col_i as f32 * (glyph + cell_gap),
+                eb.rect.top() + pad + glyph * 0.5 + row_i as f32 * (glyph + cell_gap),
+            );
+            let is_geom_lit = geom_lit_ids.contains(cid);
+            paint_constraint_glyph(app, ss, painter, &tk, cid, center, glyph, scale, picked.as_deref(), hovered.as_deref(), is_geom_lit, &mut drawn);
+        }
+    }
+
+    // Show tooltip label only when hovering an individual constraint glyph (never on collapsed group badges).
     if let (Some((id, at_glyph)), Some(h)) = (hovered_at, hover)
         && let Some(c) = ss.sketch.constraints.iter().find(|c| c.id == id)
     {
@@ -2133,17 +3196,25 @@ fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Po
             format!("{} ({ids})", c.kind.name())
         };
         // Wrapped to the view's width so a narrow view never clips it (#10794).
-        let g =
-            painter.layout(label, egui::FontId::proportional(solidcraft_theme::Tokens::get().font_small), tk.text, glyph_label_wrap_width(proj.rect));
-        // Clear of the cursor, which hangs below and right of the pointer, and next to the
-        // glyph instance under it (#10794).
-        let chip = glyph_label_rect(h, egui::Rect::from_center_size(at_glyph, egui::vec2(glyph, glyph)), g.size() + egui::vec2(6.0, 6.0), proj.rect);
+        let g = painter.layout(label, egui::FontId::proportional(tk.font_small), tk.text, glyph_label_wrap_width(proj.rect));
+        // Clear of the cursor and the enclosing group box (so the label never sits over an
+        // expanded or boxed group's other glyphs) (#10794).
+        let glyph_rect = egui::Rect::from_center_size(at_glyph, egui::vec2(glyph, glyph));
+        let anchor_rect = expanded_boxes
+            .iter()
+            .find(|eb| eb.rect.contains(at_glyph))
+            .map(|eb| eb.rect)
+            .or_else(|| placed_groups.iter().find(|p| p.has_box && !p.grouped && p.rect.contains(at_glyph)).map(|p| p.rect))
+            .unwrap_or(glyph_rect);
+        let chip = glyph_label_rect(h, anchor_rect, g.size() + egui::vec2(6.0, 6.0), proj.rect);
         crate::scenario::publish_rect("sketch:glyph_label", chip);
         painter.rect_filled(chip, tk.radius_sm.saturating_sub(1), tk.panel);
         // A label cut to fit beside the cursor shows only what fits in its chip.
         painter.with_clip_rect(chip.intersect(painter.clip_rect())).galley(chip.min + egui::vec2(3.0, 3.0), g, tk.text);
     }
     GLYPHS.with(|g| *g.borrow_mut() = drawn);
+    COLLAPSED_BADGES.with(|b| *b.borrow_mut() = collapsed_badges);
+    CONSTRAINT_HIT_RECTS.with(|r| *r.borrow_mut() = hit_rects);
 }
 
 /// The curves and points a constraint ties together.
@@ -2173,6 +3244,7 @@ fn constraint_entities(k: &solidcraft_engine::sketch::ConstraintKind) -> (Vec<us
 
 /// Where a constraint's glyphs go: one per entity (the middle of a curve, with its direction
 /// there; a point, without).
+#[cfg(test)]
 fn glyph_anchors(sk: &solidcraft_engine::sketch::Sketch, k: &solidcraft_engine::sketch::ConstraintKind) -> Vec<(Vec2, Option<Vec2>)> {
     use solidcraft_engine::sketch::ConstraintKind::*;
     // Half way along the curve, and the direction there.
@@ -2434,6 +3506,130 @@ mod glyph_zoom_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn square_grid_dims_packs_most_squarely() {
+        let expected = [
+            (0, (0, 0)),
+            (1, (1, 1)),
+            (2, (2, 1)),
+            (3, (2, 2)),
+            (4, (2, 2)),
+            (5, (3, 2)),
+            (6, (3, 2)),
+            (7, (3, 3)),
+            (8, (3, 3)),
+            (9, (3, 3)),
+            (10, (4, 3)),
+        ];
+        for (n, dims) in expected {
+            assert_eq!(super::square_grid_dims(n), dims, "count {n}");
+        }
+    }
+
+    #[test]
+    fn anchor_groups_clusters_coincident_points_and_keeps_curves_distinct() {
+        use solidcraft_engine::sketch::{ConstraintKind, CurveKind, Sketch};
+        let mut sk = Sketch::new();
+        let (Ok(p0), Ok(p1), Ok(p2)) = (
+            sk.add_point(super::Vec2::new(0.0, 0.0), None),
+            sk.add_point(super::Vec2::new(0.0, 0.0), None),
+            sk.add_point(super::Vec2::new(10.0, 0.0), None),
+        ) else {
+            panic!("points");
+        };
+        let Ok(l1) = sk.add_curve(CurveKind::Line { a: p0, b: p2 }, None) else { panic!("line") };
+        sk.add_constraint(ConstraintKind::Coincident { p: p0, q: p1 }, None).unwrap();
+        sk.add_constraint(ConstraintKind::Fix { p: p1 }, None).unwrap();
+        sk.add_constraint(ConstraintKind::Horizontal { l: l1 }, None).unwrap();
+        let groups = super::anchor_groups(&sk);
+        assert_eq!(groups.len(), 2, "one coincident point cluster and one curve");
+        assert_eq!(groups[0].constraint_ids.len(), 2, "Coincident and Fix share one cluster");
+        assert_eq!(groups[1].constraint_ids.len(), 1, "Horizontal sits on curve l1");
+    }
+
+    #[test]
+    fn expanded_container_encloses_badge_and_nudges_neighbors_clear() {
+        let view = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
+        let badge = egui::Rect::from_center_size(egui::pos2(200.0, 150.0), egui::vec2(15.0, 15.0));
+        let neighbor = egui::Rect::from_center_size(egui::pos2(228.0, 150.0), egui::vec2(15.0, 15.0));
+        let box_size = egui::vec2(52.0, 52.0);
+        let exp = super::place_expanded_container(badge, badge.center(), box_size, view, true, &[], &[neighbor], &[], &[], 4.0);
+        assert!(exp.contains(badge.center()), "container {exp:?} must enclose badge {badge:?}");
+        assert!(view.contains_rect(exp), "container {exp:?} stays inside view");
+        assert!(!exp.intersects(neighbor), "container chose left/vertical alignment to avoid {neighbor:?}: {exp:?}");
+
+        let nudged = super::nudge_rect_clear_of(
+            egui::Rect::from_center_size(badge.center() + egui::vec2(10.0, 0.0), egui::vec2(15.0, 15.0)),
+            &[exp.expand(4.0)],
+            &[],
+            view,
+            &[],
+            &[],
+        );
+        assert!(!nudged.intersects(exp.expand(4.0)), "nudged {nudged:?} clears expanded {exp:?}");
+        assert!(view.contains_rect(nudged));
+    }
+
+    #[test]
+    fn constraint_grouping_hover_click_and_right_click_delete_flow() {
+        use serde_json::json;
+        let mut h = crate::scenario::Harness::new();
+        h.app.home.open = false;
+        h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
+        h.app.run("sketch.line", json!({"points": [[0, 0], [30, 0]], "connect": false, "infer": false})).unwrap();
+        h.app.run("sketch.line", json!({"points": [[0, 20], [30, 20]], "connect": false, "infer": false})).unwrap();
+        h.app.run("sketch.constraint.horizontal_vertical", json!({"line": "l1", "mode": "horizontal"})).unwrap();
+        h.app.run("sketch.constraint.parallel", json!({"a": "l1", "b": "l2"})).unwrap();
+        h.app.run("sketch.constraint.equal", json!({"a": "l1", "b": "l2"})).unwrap();
+        h.app.run("sketch.constraint.horizontal_vertical", json!({"line": "l2", "mode": "horizontal"})).unwrap();
+        h.app.cam.set_view(solidcraft_viewport::StandardView::Top);
+        h.app.fit_view();
+        h.frames(2);
+
+        // l1 has 3 constraints (> default 2): collapsed into one badge. l2 also has 3.
+        assert_eq!(super::COLLAPSED_BADGES.with(|b| b.borrow().len()), 2);
+        assert!(super::glyph_positions().is_empty());
+
+        // Hovering a collapsed badge for < 200 ms keeps it collapsed and emits no hint label.
+        let badge_pos = super::COLLAPSED_BADGES.with(|b| b.borrow()[0].1.center());
+        h.step(&json!({"move": [badge_pos.x, badge_pos.y]})).unwrap();
+        h.frames(2);
+        assert!(super::glyph_positions().is_empty(), "still collapsed before 200 ms");
+        assert!(crate::scenario::rect_of("sketch:glyph_label").is_none(), "no hint chip on collapsed badge");
+
+        // Advancing past 200 ms (15 frames at 60 Hz = 250 ms) opens the group.
+        h.frames(15);
+        let opened = super::glyph_positions();
+        assert_eq!(opened.len(), 3, "expanded group shows all 3 constraints: {opened:?}");
+        for (i, (_, p)) in opened.iter().enumerate() {
+            for (_, q) in opened.iter().skip(i + 1) {
+                assert!(p.distance(*q) >= 16.0, "expanded grid glyphs never collide: {opened:?}");
+            }
+        }
+
+        // Right-clicking one constraint inside the expanded group deletes it immediately,
+        // dropping the group count from 3 to 2 so it automatically ungroups into a 2x1 pair.
+        let target = opened[0].1;
+        let before_count = {
+            let st = crate::open_meshing::session_world(&h.app.session);
+            let sid = h.app.session.active_sketch.unwrap();
+            st.sketch(sid).unwrap().sketch.constraints.len()
+        };
+        h.frame_with(vec![
+            egui::Event::PointerMoved(target),
+            egui::Event::PointerButton { pos: target, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos: target, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE },
+        ]);
+        h.frames(2);
+        let after_count = {
+            let st = crate::open_meshing::session_world(&h.app.session);
+            let sid = h.app.session.active_sketch.unwrap();
+            st.sketch(sid).unwrap().sketch.constraints.len()
+        };
+        assert_eq!(after_count + 1, before_count, "right-click deleted one constraint");
+        assert!(h.app.viewport.context_menu.is_none(), "right-click did not open context menu");
     }
 }
 

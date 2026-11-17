@@ -4489,16 +4489,20 @@ fn tool_hover(app: &SolveApp, hits: &[Hit]) -> Option<Hit> {
     hits.iter().find(|h| crate::sketch_tools::takes(cmd, h)).cloned()
 }
 
-/// A sketch annotation under either a left-click or a context-menu click. Dimension text
-/// wins over geometry; dimension lines yield to points and curves, and glyphs to midpoints.
+/// A sketch annotation under either a left-click or a context-menu click. Constraints and
+/// constraint boxes win over dimensions and geometry behind them; otherwise dimension text wins
+/// over geometry and dimension lines yield to points and curves.
 pub(crate) fn sketch_constraint_at(app: &SolveApp, pos: Pos2, hit: Option<&Hit>) -> Option<Sel> {
     app.session.active_sketch?;
     let off = |kind: &str| app.ui.pick_off.iter().any(|x| x == kind);
+    let glyph = crate::sketch_tools::glyph_at(pos).filter(|_| !off("constraints"));
+    if glyph.is_some() || crate::sketch_tools::over_constraint_ui(app, pos) {
+        return glyph.map(|id| Sel::SketchConstraint { id });
+    }
     let on_geometry = matches!(hit, Some(Hit::SketchPoint { .. } | Hit::SketchMidpoint { .. } | Hit::SketchCurve { .. }));
     let dimension =
         crate::dim_view::hit_text(pos).or_else(|| if on_geometry { None } else { crate::dim_view::hit(pos) }).filter(|_| !off("dimensions"));
-    let glyph = crate::sketch_tools::glyph_at(pos).filter(|_| !off("constraints") && !matches!(hit, Some(Hit::SketchMidpoint { .. })));
-    dimension.or(glyph).map(|id| Sel::SketchConstraint { id })
+    dimension.map(|id| Sel::SketchConstraint { id })
 }
 
 /// What a click would pick: the first hit the open dialog's active input accepts, or with no
@@ -6270,15 +6274,24 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     // highlight (`drag_layer::holds_pointer`). A part dragged along its joint owns the pointer
     // too: nothing under it lights up (#5137).
     let dragging_layer = drag_layer::holds_pointer(app, layered, manipulator_dragging);
+    let constraint_pointer = app.tool.is_none()
+        && !app.dialog.as_ref().is_some_and(|d| d.wants_picks())
+        && hover.is_some_and(|p| inside && crate::sketch_tools::over_constraint_ui(app, p));
     let hits = hover
         .filter(|_| {
-            inside && app.viewport.boxsel.is_none() && !crate::joint_drag::active(app) && !joint_handle_pointer && !navigating && !dragging_layer
+            inside
+                && app.viewport.boxsel.is_none()
+                && !crate::joint_drag::active(app)
+                && !joint_handle_pointer
+                && !constraint_pointer
+                && !navigating
+                && !dragging_layer
         })
         .map(|p| pick_cached(app, &proj, p))
         .unwrap_or_default();
     // The Fillet and Chamfer window resolves its own corners: the nearest sketch point to a
     // corner drawn from the origin is the fixed origin, which ends no two curves.
-    let corner = hover.filter(|_| inside && !navigating).and_then(|p| crate::sketch_modify_ui::corner_hit(app, &proj, p));
+    let corner = hover.filter(|_| inside && !navigating && !constraint_pointer).and_then(|p| crate::sketch_modify_ui::corner_hit(app, &proj, p));
     let cand = if app.tool.is_some() {
         tool_hover(app, &hits).map(|h| (h, None))
     } else if let Some((hit, sel)) = corner {
@@ -6288,7 +6301,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     };
     // The view moved under a still pointer: the highlight under it stays on the face it
     // was on instead of going off (#2130). It is picked again when the gesture ends.
-    if !(hover_frozen && inside) {
+    if constraint_pointer || !(hover_frozen && inside) {
         app.viewport.hover = cand.as_ref().map(|c| c.0.clone());
     }
     wake_centre(app, &hits, hover, &proj);
@@ -6303,7 +6316,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     // held Space owns drags, not a still press, so only a navigation that has started cancels
     // it. A preset's modifier binding (Maya Alt, Alias Shift+Alt) or Ctrl+left orbit is a
     // gesture to navigate from the press on, so it still cancels the hold at once.
-    let navigating_from_press = mode.is_some() || app.viewport.primary_nav.is_some() || joint_handle_pointer;
+    let navigating_from_press = mode.is_some() || app.viewport.primary_nav.is_some() || joint_handle_pointer || constraint_pointer;
     let held = crate::select_other::track_hold(app, ui.ctx(), &proj, inside, primary_pressed, primary_down, hover, navigating_from_press);
     crate::select_other::hover_override(app);
     list_hover(app);
@@ -6635,6 +6648,8 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                     }
                     app.dialog = Some(dialog);
                 }
+            } else if crate::sketch_tools::click_group_badge(app, p) {
+                // Clicking a collapsed constraint group badge expands it immediately.
             } else {
                 let annotation = sketch_constraint_at(app, p, cand.as_ref().map(|c| &c.0));
                 if crate::sketch_text_handles::over(app, &proj, p) {
@@ -6642,6 +6657,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                 } else if !crate::sketch3d::click(app, &proj, p) {
                     match annotation {
                         Some(sel) => select(app, Some(sel), add, allow_toggle),
+                        None if crate::sketch_tools::over_constraint_ui(app, p) => {}
                         // Clicking again on the same spot selects the next thing under it (not
                         // the second click of a double-click, which has its own actions).
                         None if !add && !resp.double_clicked() && crate::select_other::cycle_click(app, &proj, p) => {}
@@ -6669,8 +6685,8 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             && app.tool.is_none()
             && app.dialog.is_none()
             && (crate::sketch_modify_ui::double_click_pattern(app, p)
-                || crate::dim_view::double_click(app, p)
-                || crate::dim_view::model_double_click(app, p));
+                || (!crate::sketch_tools::over_constraint_ui(app, p)
+                    && (crate::dim_view::double_click(app, p) || crate::dim_view::model_double_click(app, p))));
         // Double-click a text (an outline or inside a letter; the first click selected it): edit it.
         if resp.double_clicked()
             && !held
@@ -6744,7 +6760,11 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             if app.tool.is_some() {
                 crate::tools::finish(app);
             } else if app.dialog.is_none() {
-                crate::context_menu::open(app, p, held_mods);
+                if app.preferences.right_click_deletes_constraint && crate::sketch_tools::delete_glyph_at(app, p) {
+                    // Right-clicking an individual constraint glyph deletes it directly.
+                } else {
+                    crate::context_menu::open(app, p, held_mods);
+                }
             } else if app.preferences.right_click_confirms {
                 crate::dialogs::right_click(app);
             }
@@ -6763,7 +6783,11 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             .drag_started_by(egui::PointerButton::Primary)
             .then(|| ui.input(|i| i.pointer.press_origin()))
             .flatten()
-            .filter(|a| !crate::sketch_text_handles::drag_start(app, &proj, *a) && !crate::sketch3d::drag_start(app, &proj, *a))
+            .filter(|a| {
+                !crate::sketch_text_handles::drag_start(app, &proj, *a)
+                    && !crate::sketch3d::drag_start(app, &proj, *a)
+                    && !crate::sketch_tools::over_constraint_ui(app, *a)
+            })
             .map(|a| (a, pick(app, &proj, a).into_iter().next()));
         // A drag from a tangent handle a selected spline only shows stores its handles first,
         // in the drag's undo step (#6502).
@@ -6781,6 +6805,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         });
         if let Some((a, hit)) = &grabbed
             && !crate::sketch_text_handles::dragging(app)
+            && !crate::sketch_tools::over_constraint_ui(app, *a)
             && let Some(q) = on_plane(app, *a)
         {
             let on_geometry = matches!(hit, Some(Hit::SketchPoint { .. } | Hit::SketchMidpoint { .. } | Hit::SketchCurve { .. }));
