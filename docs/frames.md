@@ -287,7 +287,7 @@ brace landing at a very shallow angle can leave a small step.
 **Multi-trim** is how a Frame Member cuts a tube by the shapes of other tubes: the cuts at corners,
 copes, ends fitted to a tube's middle or where three or more end, the pieces at crossings, the
 notches and splits where tubes overlap, and the ends fitted to earlier frames. It is SolidCraft's own
-code (`solidcraft_doc::frame_multi_trim`). A frame stays one timeline entry: only the corners you
+code in `crates/doc` (`frame_multi_trim.rs`). A frame stays one timeline entry: only the corners you
 change are saved (Corner Overrides), and the frame works out every other corner each time it
 rebuilds, so sketch edits keep working. `frame.multi_trim` (below) changes one corner of a frame.
 
@@ -368,8 +368,10 @@ are its UI) sets, changes or removes one override of a Frame Member in place, as
 It replaces the override of the same members (in any order) or adds one, and returns the edited
 feature as `frame.member` does.
 
-In the dialog, the frame's **Gap** sits under Fit Ends to Earlier Frames and Coped, and each Corner
-Overrides row has a **Gap** of its own, empty for the frame's (shown as its hint). A row's **Flip**
+In the dialog, the frame's **Gap** sits under Fit Ends to Earlier Frames and Coped, and each picked
+Corner Overrides row has a **Gap** of its own, empty for the frame's (shown as its hint). Rows listed
+with only a bin have none: an overlap takes no gap, and an X-brace crossing's, or that of a corner of
+pairs or of a 3D sketch with no sketch point to pick, is set with `frame.multi_trim`. A row's **Flip**
 shows ticked when its saved order differs from the order the frame would choose now: after a sketch
 edit that changes which member is longer a row can show ticked, and its saved order still holds. A
 row whose Flip is left alone goes back in its saved order on OK.
