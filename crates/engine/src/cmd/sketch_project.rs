@@ -644,11 +644,13 @@ pub(super) fn resolve_new_placed(
     let plane = sketch_plane(&shown, id, &framed)?;
     let placed = solidcraft_doc::project::Placed { raw: &raw, component: doc.feature(id).map(|f| f.component).unwrap_or(0) };
     let (r, relative) = solidcraft_doc::project::resolve_placed(doc, &vals, placed, &plane, kind, src, placement)?;
+    // A mesh body's face is found again by its point, not a name (#13464), as on the ordinary path.
+    let named = |body: &str| raw.body(body).filter(|body| !body.body.is_mesh());
     let face_name = match (&r.source, r.face_index) {
         (LinkSource::Face { body, .. }, Some(index)) => {
-            raw.body(body).and_then(|body| solidcraft_doc::naming::face_names(body).get(index).filter(|name| !name.is_empty()).cloned())
+            named(body).and_then(|body| solidcraft_doc::naming::face_names(body).get(index).filter(|name| !name.is_empty()).cloned())
         }
-        (LinkSource::Face { body, at }, None) => raw.body(body).and_then(|body| solidcraft_doc::naming::face_name_at_body(body, *at)),
+        (LinkSource::Face { body, at }, None) => named(body).and_then(|body| solidcraft_doc::naming::face_name_at_body(body, *at)),
         _ => None,
     };
     let edge_name = solidcraft_doc::project::resolved_edge_name(&raw, &r);
