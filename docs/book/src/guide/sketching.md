@@ -313,6 +313,11 @@ project another copy of its own component, and a sketch of a part placed more th
 needs a `path` to be projected from. Whatever the sketch is constrained to and the features
 built on it are rebuilt with it.
 
+A curve or point of another component's sketch is the exception when that component is placed
+once: the projection keeps the place it had relative to the sketch's component when it was
+made, so joint motion carries the two parts together. A sketch of a component placed more than
+once is read from the placement its `path` names, as body geometry is.
+
 Projections follow captured positions: a move kept pending (`occurrence.move` with
 `capture: false`) is not followed until it is captured. Each projection is listed under its
 sketch in the browser, with the placement it reads and its state (lost, frozen, pending). Its

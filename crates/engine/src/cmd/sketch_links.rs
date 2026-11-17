@@ -568,6 +568,8 @@ fn repair_link(s: &mut Session, p: &Value) -> Result<Value> {
         l.face_name = new.face_name;
         l.edge_name = new.edge_name;
         l.placement = new.placement;
+        // The new source's captured sketch frames (#17980), none when it is not another sketch.
+        l.sketch_placements = new.sketch_placements;
         // The new source is a link of its own, not the attachment face's border.
         l.auto_face = new.auto_face;
         l.lost = false;

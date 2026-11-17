@@ -367,19 +367,21 @@ pub(super) fn pick(s: &Session, doc: &Document, id: u64, sk: &Sketch, v: &Value,
                     _ => Ok((src, None)),
                 };
             }
-            let path = match explicit {
-                Some(path) if doc.path_placement(&path).is_some_and(|(c, _)| c == comp) => path,
-                Some(_) => return Err(bad(cmd, "`path` is not a placement of that sketch's component")),
-                None => {
-                    let mut all = doc.placements().into_iter().filter(|(c, ..)| *c == comp).map(|(_, path, _)| path);
-                    match (all.next(), all.next()) {
-                        (Some(path), None) => path,
-                        (Some(_), Some(_)) => {
-                            return Err(bad(cmd, "that sketch's component is placed more than once: give the placement's `path`"));
-                        }
-                        (None, _) => return Err(bad(cmd, "that sketch's component is not placed")),
-                    }
-                }
+            let all: Vec<Vec<u64>> = doc.placements().into_iter().filter(|(c, ..)| *c == comp).map(|(_, path, _)| path).collect();
+            if let Some(path) = &explicit
+                && !doc.path_placement(path).is_some_and(|(c, _)| c == comp)
+            {
+                return Err(bad(cmd, "`path` is not a placement of that sketch's component"));
+            }
+            // A sketch of a component placed once is linked as main links it (#17980): the frame
+            // it had relative to the sketch's component when the link was made is kept, so
+            // assembly motion leaves the projection where it was. Only a sketch of a component
+            // placed more than once needs the placement it is read from.
+            let path = match (explicit, all.as_slice()) {
+                (_, [_]) => return Ok((src, None)),
+                (Some(path), _) => path,
+                (None, []) => return Err(bad(cmd, "that sketch's component is not placed")),
+                (None, _) => return Err(bad(cmd, "that sketch's component is placed more than once: give the placement's `path`")),
             };
             refuse_inside(&path, &author)?;
             Ok((src, Some(LinkPlacement { source: path, author, seen: None })))
