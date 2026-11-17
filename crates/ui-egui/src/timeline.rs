@@ -218,6 +218,8 @@ impl TimelineKind {
         match kind {
             FeatureKind::Sketch { .. } => Self::Sketch,
             FeatureKind::Extrude { sketch, .. } | FeatureKind::Revolve { sketch, .. } | FeatureKind::Sweep { sketch, .. } => Self::Profile(*sketch),
+            // An edge flange drawn from a profile sketch (#3516).
+            FeatureKind::SheetFlange { profile: Some(sketch), .. } => Self::Profile(*sketch),
             _ => Self::Other,
         }
     }

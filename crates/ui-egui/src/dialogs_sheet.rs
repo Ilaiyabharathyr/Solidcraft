@@ -112,6 +112,9 @@ crate::dialog_descriptor::dialog_descriptors! {
                 /// Edge flanges: where the height is measured from (index into `HEIGHT_FROM`).
                 height_from: usize,
                 flip: bool,
+                /// Edge flanges: draw a profile sketch for the flange and build it from that sketch
+                /// (#3516), so editing the sketch reshapes the flange (the command's `profile_sketch`).
+                profile_sketch: bool,
                 distance: String,
                 reverse: bool,
                 rule: usize,
@@ -199,6 +202,7 @@ fn new_flange(app: &SolveApp, ty: usize) -> Sm {
         position: 0,
         height_from: 0,
         flip: false,
+        profile_sketch: app.preferences.flange_profile_sketch,
         distance: crate::dialogs::length_default(&app.session, "20"),
         reverse: false,
         rule: 0,
@@ -271,7 +275,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
     let t = Tokens::get();
     let mut enter = false;
     match k {
-        Sm::Flange { ty, height, angle, radius, position, height_from, flip, distance, reverse, rule, own, relief, relief_size, then, segments } => {
+        Sm::Flange { ty, height, angle, radius, position, height_from, flip, profile_sketch, distance, reverse, rule, own, relief, relief_size, then, segments } => {
             *ty = flange_type(inputs);
             form_row(ui, "Type", |ui| {
                 ui.label(FLANGE_TYPES.get(*ty).copied().map(solidcraft_ui_text::tr).unwrap_or(""));
@@ -410,6 +414,8 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
             }
             if *ty == 2 {
                 crate::ui_kit::options(ui, "sheet_options", &mut [("Flip", flip), ("Other side", reverse)]);
+            } else if *ty == 1 {
+                crate::ui_kit::options(ui, "sheet_options", &mut [("Flip", flip), ("Profile Sketch", profile_sketch)]);
             } else {
                 crate::ui_kit::options(ui, "sheet_options", &mut [("Flip", flip)]);
             }
@@ -838,7 +844,7 @@ pub fn commands(app: &SolveApp, k: &Sm, inputs: &[SelInput], extra: &Map<String,
     let s = &app.session;
     let (cmd, mut p): (&str, Value) = match k {
         Sm::Flange {
-            height, angle, radius, position, height_from, flip, distance, reverse, rule, own, relief, relief_size, then, segments, ..
+            height, angle, radius, position, height_from, flip, profile_sketch, distance, reverse, rule, own, relief, relief_size, then, segments, ..
         } => {
             let mut p = match flange_type(inputs) {
                 1 => {
@@ -852,6 +858,14 @@ pub fn commands(app: &SolveApp, k: &Sm, inputs: &[SelInput], extra: &Map<String,
                         p["corner_relief_shape"] = json!(shape);
                     }
                     put(&mut p, &[("corner_relief", relief_size)]);
+                    // A new flange from a profile sketch draws it; an edited one keeps its own (`extra`).
+                    // Only a flange on one whole edge, with no chain and its height from the
+                    // default, takes a sketch: with the option on by default (preference
+                    // `flange_profile_sketch`) the others stay plain flanges rather than failing.
+                    let one_edge = p["edges"].as_array().is_some_and(|e| e.len() == 1) && segments.iter().all(|(_, list)| list.is_empty());
+                    if *profile_sketch && one_edge && then.is_empty() && *height_from == 0 && !extra.contains_key("profile") {
+                        p["profile_sketch"] = json!(true);
+                    }
                     // A split edge takes no `then` in v1: a chain needs one far edge to stand on,
                     // and the refusal names the edge whose segments took it away.
                     if !then.is_empty() {
@@ -1021,9 +1035,13 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
             }
             (f, curves.iter().map(|id| crate::selection::curve_pick(id, sketch.0, app.session.active_sketch)).collect())
         }
-        FeatureKind::SheetFlange { edges, height, angle, radius, position, flip, body, corner_relief_shape, corner_relief, height_from, .. } => {
+        FeatureKind::SheetFlange { edges, height, angle, radius, position, flip, body, corner_relief_shape, corner_relief, height_from, profile } => {
             if let Some(b) = body {
                 extra.insert("body".into(), json!(b));
+            }
+            // A flange from a profile sketch keeps it: the sketch is where its outline is edited.
+            if let Some(sk) = profile {
+                extra.insert("profile".into(), json!(sk.0));
             }
             // The edges' segments, by the point of the edge each belongs to: the fractions the
             // design has (a split edge keeps them; the equal stretches are the dialog's own), each
@@ -1070,6 +1088,7 @@ pub fn for_feature(app: &SolveApp, kind: &FeatureKind) -> Option<(Kind, Vec<SelI
                     .and_then(|name| HEIGHT_FROM.iter().position(|h| h.eq_ignore_ascii_case(name.trim())))
                     .unwrap_or(0),
                 flip: *flip,
+                profile_sketch: profile.is_some(),
                 distance: crate::dialogs::length_default(&app.session, "20"),
                 reverse: false,
                 rule: 0,

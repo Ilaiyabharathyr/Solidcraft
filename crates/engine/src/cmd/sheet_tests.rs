@@ -8020,3 +8020,130 @@ fn a_cut_passing_a_hair_off_a_flange_corner_builds() {
     }
     assert!(failed.is_empty(), "{failed:?}");
 }
+
+/// A 100 x 60 base (the default rule: 2.5 mm, K 0.44, R 2.5) and a flange profile drawn on the
+/// outer face of a flange turned up 90° on its y = 0 edge: that face is the plane y = 0 and the
+/// outer virtual sharp the line y = 0, z = 0, so the sketch's (x, y) are world (x, z) (#3516).
+fn profile_on_front(s: &mut Session, points: &[[f64; 2]], hole: Option<([f64; 2], f64)>) {
+    base(s, 100.0, 60.0);
+    run(s, "sketch.create", json!({"plane": {"origin": [0, 0, 0], "x_dir": [1, 0, 0], "y_dir": [0, 0, 1]}, "name": "Shape"}));
+    run(s, "sketch.line", json!({"points": points, "closed": true}));
+    if let Some((center, radius)) = hole {
+        run(s, "sketch.circle.center", json!({"center": center, "radius": radius}));
+    }
+    run(s, "sketch.finish", json!({}));
+}
+
+#[test]
+fn a_drawn_profile_sketch_builds_the_same_flange_as_its_height_and_follows_the_angle() {
+    // The plain flange and the one from the profile sketch it draws are the same part, at 90°
+    // and at 50° (where the profile's plane leans).
+    for angle in [90.0, 50.0] {
+        let mut plain = Session::default();
+        base(&mut plain, 100.0, 60.0);
+        run(&mut plain, "sheet.flange", json!({"edges": [[50, 0, 2.5]], "height": 20, "angle": format!("{angle} deg")}));
+        let mut drawn = Session::default();
+        base(&mut drawn, 100.0, 60.0);
+        let undo = drawn.undo.len();
+        run(&mut drawn, "sheet.flange", json!({"edges": [[50, 0, 2.5]], "height": 20, "angle": format!("{angle} deg"), "profile_sketch": true, "name": "Lip"}));
+        assert_eq!(drawn.undo.len(), undo + 1, "one undo step");
+        assert!(drawn.doc.find_feature("Lip Profile").is_some());
+        let (a, b) = (volume(&mut plain), volume(&mut drawn));
+        assert!(rel(b, a) < 1e-9, "{angle}°: {b} for {a}");
+        assert_eq!(flat(&mut drawn)["flat_size_mm"], flat(&mut plain)["flat_size_mm"]);
+        // The sketch is four joined lines with no constraints or dimensions: its four corners free.
+        let sketch = run(&mut drawn, "sketch.inspect", json!({"sketch": "Lip Profile"}));
+        assert_eq!(sketch["dof"], 8, "{sketch}");
+        assert_eq!(sketch["curves"].as_array().map(Vec::len), Some(4), "{sketch}");
+        assert_eq!(sketch["constraints"].as_array().map(Vec::len), Some(0), "{sketch}");
+        // Undo takes the sketch and the flange away together.
+        run(&mut drawn, "edit.undo", json!({}));
+        assert!(drawn.doc.find_feature("Lip Profile").is_none());
+        assert!(rel(volume(&mut drawn), 15000.0) < 1e-9);
+    }
+}
+
+#[test]
+fn a_profile_sketch_shapes_the_flange_cuts_its_holes_and_reopens() {
+    // A tab 60 wide (x 20…80) and 20 high whose top corners are cut back 10 x 15: its sides run
+    // straight across the bend (z 0…5, the bend's (R + T)·tan 45°) and then taper.
+    let tab = [[20.0, 0.0], [80.0, 0.0], [80.0, 5.0], [70.0, 20.0], [30.0, 20.0], [20.0, 5.0]];
+    let square = [[20.0, 0.0], [80.0, 0.0], [80.0, 20.0], [20.0, 20.0]];
+    let mut a = Session::default();
+    profile_on_front(&mut a, &square, None);
+    run(&mut a, "sheet.flange", json!({"edges": [[50, 0, 2.5]], "height": 1, "profile": "Shape"}));
+    let mut b = Session::default();
+    profile_on_front(&mut b, &tab, Some(([50.0, 13.0], 3.0)));
+    run(&mut b, "sheet.flange", json!({"edges": [[50, 0, 2.5]], "height": 1, "profile": "Shape"}));
+    let (va, vb) = (volume(&mut a), volume(&mut b));
+    // Two corners of 10 x 15 / 2 and a hole of radius 3, all through 2.5 mm.
+    let want = va - (2.0 * 75.0 + PI * 9.0) * 2.5;
+    assert!((vb - want).abs() < 1e-3, "{vb} for {want}");
+    // The bend is the profile's 60 mm, the flange as high as the profile (20 mm).
+    let f = flat(&mut b);
+    assert!((f["bends"][0]["length"].as_f64().unwrap_or(0.0) - 60.0).abs() < 1e-6, "{f}");
+    let want_y = 60.0 - 5.0 + FRAC_PI_2 * (2.5 + 0.44 * 2.5) + 15.0;
+    assert!((f["flat_size_mm"][1].as_f64().unwrap_or(0.0) - want_y).abs() < 1e-6, "{f}");
+    // The hole is a true circle in the flat pattern and the DXF.
+    assert!(f["cutout_shapes"].as_array().is_some_and(|c| c.iter().any(|x| (x["circle"]["radius"].as_f64().unwrap_or(0.0) - 3.0).abs() < 1e-9)), "{f}");
+    let dxf = run(&mut b, "sheet.export_dxf", json!({}))["dxf"].as_str().unwrap_or_default().to_owned();
+    assert!(dxf_count(&dxf, |g| matches!(g, DxfShape::Circle { .. })) >= 1);
+    // It reopens as it was.
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&b.doc.to_json()).unwrap());
+    assert!((volume(&mut reopened) - vb).abs() < 1e-6);
+    assert_eq!(flat(&mut reopened), f);
+    // Moving the hole in the sketch moves it in the flange.
+    let body = &b.model.state().bodies[0].body;
+    assert!(body.validity().is_empty() && body.shell_count() == 1);
+}
+
+#[test]
+fn a_profile_sketch_that_cannot_be_a_flange_is_refused() {
+    let cases: [(&[[f64; 2]], &str); 3] = [
+        // Below the edge, into the base.
+        (&[[20.0, -3.0], [80.0, -3.0], [80.0, 20.0], [20.0, 20.0]], "below the edge"),
+        // A side that leans across the bend.
+        (&[[20.0, 0.0], [80.0, 0.0], [70.0, 20.0], [30.0, 20.0]], "straight across the bend"),
+        // Past the end of the edge.
+        (&[[-10.0, 0.0], [80.0, 0.0], [80.0, 20.0], [-10.0, 20.0]], "past the end"),
+    ];
+    for (points, why) in cases {
+        let mut s = Session::default();
+        profile_on_front(&mut s, points, None);
+        let before = s.doc.to_json();
+        let e = s.execute("sheet.flange", &json!({"edges": [[50, 0, 2.5]], "height": 1, "profile": "Shape"})).unwrap_err();
+        assert!(e.to_string().contains(why), "{why}: {e}");
+        assert_eq!(s.doc.to_json(), before);
+    }
+}
+
+#[test]
+fn deleting_a_flange_deletes_its_profile_sketch_and_undo_brings_both_back() {
+    // The profile sketch only shapes its flange, so it goes with it; one another feature also
+    // uses stays.
+    let mut s = Session::default();
+    base(&mut s, 100.0, 60.0);
+    run(&mut s, "sheet.flange", json!({"edges": [[50, 0, 2.5]], "height": 20, "profile_sketch": true, "name": "Lip"}));
+    assert!(s.doc.find_feature("Lip Profile").is_some());
+    run(&mut s, "timeline.delete", json!({"feature": "Lip"}));
+    assert!(s.doc.find_feature("Lip").is_none() && s.doc.find_feature("Lip Profile").is_none());
+    assert!(rel(volume(&mut s), 15000.0) < 1e-9);
+    run(&mut s, "edit.undo", json!({}));
+    assert!(s.doc.find_feature("Lip").is_some() && s.doc.find_feature("Lip Profile").is_some());
+    // Shared with an extrude: the sketch stays when the flange goes.
+    run(&mut s, "solid.extrude", json!({"sketch": "Lip Profile", "distance": 1, "operation": "new_body", "name": "Copy"}));
+    run(&mut s, "timeline.delete", json!({"feature": "Lip"}));
+    assert!(s.doc.find_feature("Lip").is_none() && s.doc.find_feature("Lip Profile").is_some() && s.doc.find_feature("Copy").is_some());
+}
+
+#[test]
+fn each_drawn_profile_sketch_gets_a_name_of_its_own() {
+    // Two flanges that draw their profile sketch without a name: the second sketch is
+    // "Flange Profile 2", not a clash with the first.
+    let mut s = Session::default();
+    base(&mut s, 100.0, 60.0);
+    run(&mut s, "sheet.flange", json!({"edges": [[50, 0, 2.5]], "height": 20, "profile_sketch": true}));
+    run(&mut s, "sheet.flange", json!({"edges": [[50, 60, 2.5]], "height": 20, "profile_sketch": true}));
+    assert!(s.doc.find_feature("Flange Profile").is_some());
+    assert!(s.doc.find_feature("Flange Profile 2").is_some());
+}
