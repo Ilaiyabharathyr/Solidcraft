@@ -107,6 +107,9 @@ pub enum Kind {
     Open {
         /// The solid's shells after the first are its voids.
         voids: bool,
+        /// The first shell is the solid's outer one. False where every face of the outer shell
+        /// was left out: then each shell is one of its voids, a cavity still.
+        outer: bool,
     },
 }
 
@@ -505,6 +508,34 @@ impl<'t> Assembly<'t> {
         Ok(())
     }
 
+    /// The edges and vertices of `bound` hold `deviation` (mm): how far, as their producer states
+    /// it, the curves or the surface they stand on may lie from what they stand for (a sampled
+    /// curve's chordal deflection, a fitted cache's fit tolerance), so the record keeps that
+    /// allowance instead of taking the fit for the exact geometry. More than [`MAX_TOLERANCE`]
+    /// is refused, as a gap that large is.
+    pub fn hold_deviation(&mut self, bound: &Bound, deviation: f64) -> R<()> {
+        if !(deviation <= MAX_TOLERANCE) {
+            return Err(format!("a fit stated within {deviation} mm, more than an edge's tolerance holds"));
+        }
+        let mut vertices = Vec::new();
+        match bound {
+            Bound::Edges(uses) => {
+                for &(e, _) in uses {
+                    let Some(x) = self.edges.get_mut(e as usize) else { return Err("edge reference".into()) };
+                    x.tolerance = x.tolerance.max(deviation);
+                    vertices.extend(x.vertices);
+                }
+            }
+            Bound::Vertex(v) => vertices.push(*v),
+        }
+        // A vertex's tolerance covers every edge that meets it, as in any tolerant record.
+        for v in vertices {
+            let Some(x) = self.vertices.get_mut(v as usize) else { return Err("vertex reference".into()) };
+            x.tolerance = x.tolerance.max(deviation);
+        }
+        Ok(())
+    }
+
     /// An edge's curve as the file has it may lie off a face's surface by more than the file's
     /// uncertainty states (an intersection curve written looser than its context). Each use's
     /// gap, between its pcurve on the surface and its edge's curve, is measured along the edge as
@@ -717,7 +748,7 @@ impl<'t> Assembly<'t> {
                     regions.push(Region { shells: vec![index(v)?], void: true });
                 }
             }
-            Kind::Open { voids } => {
+            Kind::Open { voids, outer } => {
                 if let Some(r) = regions.first_mut() {
                     r.shells = (0..index(shells.len())?).collect();
                 }
@@ -725,7 +756,7 @@ impl<'t> Assembly<'t> {
                 // the inside of an outer shell or a model's shell still whole.
                 for (k, c) in closed.iter().enumerate() {
                     if *c {
-                        regions.push(Region { shells: vec![index(k)?], void: voids && k > 0 });
+                        regions.push(Region { shells: vec![index(k)?], void: voids && (k > 0 || !outer) });
                     }
                 }
             }
@@ -1645,16 +1676,30 @@ pub(crate) fn face_domain(surface: &BSurface, pcs: &[Vec<Curve2>]) -> R<[[f64; 2
 /// that evaluates a periodic spline modulo its period): the curve and interval the record takes,
 /// the interval moved into the range by whole periods, and the curve restarted there (exactly:
 /// knot insertion) when the edge runs across the seam, as the STEP reader reads such an edge.
+/// An end a rounding from the seam is at the seam: an edge all the way round, start to end, is
+/// the curve as it is.
 pub fn periodic_edge(curve: BCurve, [t0, t1]: [f64; 2]) -> R<(BCurve, [f64; 2])> {
     let Natural::Range(a, b) = curve.natural() else { return Err("a periodic spline without a range".into()) };
     let period = b - a;
-    if !(period > 0.0) || !(t0 <= t1) || !(t1 - t0 <= period) {
+    // Rounding is allowed for (`eps`): an edge all the way round may be written a rounding long.
+    let eps = 1e-9 * period;
+    if !(period > 0.0) || !(t0 <= t1) || !(t1 - t0 <= period + eps) {
         return Err("an edge longer than its periodic spline's period".into());
     }
     let turns = ((t0 - a) / period).floor();
-    let (lo, hi) = (t0 - turns * period, t1 - turns * period);
-    if hi <= b {
-        return Ok((curve, [lo, hi]));
+    let (mut lo, mut hi) = (t0 - turns * period, t1 - turns * period);
+    // Moving by whole periods rounds: a start a rounding short of the range's end is the seam
+    // (the range's start), and an end a rounding past it is that end, as the STEP reader takes an
+    // end within a rounding of its seam. A restart is only ever strictly inside the range. An edge
+    // that ends before the range does (a short one a rounding short of it) stays where it is.
+    if b - lo <= eps && hi > b {
+        (lo, hi) = (a, hi - period);
+    }
+    if lo - a <= eps {
+        lo = a;
+    }
+    if hi <= b + eps {
+        return Ok((curve, [lo, hi.min(b)]));
     }
     Ok((crate::kernel::restart_curve(&curve, lo)?, [lo, hi]))
 }

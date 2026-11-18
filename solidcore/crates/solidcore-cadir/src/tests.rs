@@ -108,22 +108,31 @@ fn a_face_on_a_plane_facing_the_other_way_keeps_its_side() {
     assert!((volume(&s) - 1000.0).abs() < 1e-6, "{}", volume(&s));
 }
 
+/// A missing coedge is hostile input: no panic, and the face whose loop uses it is left out of an
+/// open surface of the others (the refusal names that face).
 #[test]
-fn a_missing_coedge_refuses_its_region_without_a_panic() {
+fn a_missing_coedge_leaves_its_face_out_without_a_panic() {
     let mut ir = cube();
     ir.model.coedges.remove(0);
     let bodies = read_bodies(&ir, None);
-    assert!(bodies.read.is_empty());
-    assert_eq!(bodies.failures.len(), 1);
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
     assert!(
-        bodies.failures[0].message.contains("missing coedge"),
+        s.sheet && s.brep.faces.len() == 5,
+        "{} faces",
+        s.brep.faces.len()
+    );
+    assert!(
+        s.notes.iter().any(|n| n.contains("missing coedge")),
         "{:?}",
-        bodies.failures
+        s.notes
     );
 }
 
+/// A vertex 5 mm from its edges: the faces the refusals name, one at a time, are left out of an
+/// open surface of the others; only faces a refusal names, and never all of them.
 #[test]
-fn a_vertex_far_from_its_edges_refuses_its_region() {
+fn a_vertex_far_from_its_edges_leaves_the_faces_at_it_out() {
     let mut ir = cube();
     let v = ir.model.vertices.first().unwrap().point.clone();
     let p = ir.model.points.iter_mut().find(|p| p.id == v).unwrap();
@@ -133,11 +142,21 @@ fn a_vertex_far_from_its_edges_refuses_its_region() {
     wire["position"]["x"] = serde_json::json!(x + 5.0);
     *p = serde_json::from_value(wire).unwrap();
     let bodies = read_bodies(&ir, None);
-    assert!(bodies.read.is_empty());
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
+    let left_out: Vec<&String> = s
+        .notes
+        .iter()
+        .filter(|n| n.starts_with("left out: "))
+        .collect();
     assert!(
-        bodies.failures[0].message.contains("off its curve"),
-        "{:?}",
-        bodies.failures
+        s.sheet && !left_out.is_empty() && s.brep.faces.len() + left_out.len() == 6,
+        "{} faces, {left_out:?}",
+        s.brep.faces.len()
+    );
+    assert!(
+        left_out.iter().all(|n| n.contains("off its curve")),
+        "{left_out:?}"
     );
 }
 
@@ -271,6 +290,168 @@ fn a_polyline_with_decreasing_parameters_keeps_its_parameters() {
     assert_eq!(
         points,
         vec![[5.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+    );
+}
+
+/// The cube's tolerances: how many edges and vertices hold more than the model's tolerance.
+fn widened(s: &Solid) -> (usize, usize) {
+    let tol = s.brep.tolerance;
+    (
+        s.brep.edges.iter().filter(|e| e.tolerance > tol).count(),
+        s.brep.vertices.iter().filter(|v| v.tolerance > tol).count(),
+    )
+}
+
+/// A polyline's chords stand within the chordal deflection its producer states of the curve
+/// they sample: the edge on it holds that allowance (and its two vertices with it), so the record
+/// does not take the chords for the curve; one past what an edge's tolerance holds is refused with
+/// why (its faces left out of an open surface), and a polyline whose chords are the curve
+/// (deflection 0) changes nothing.
+#[test]
+fn a_polylines_chordal_deflection_is_its_edges_tolerance() {
+    use cadmpeg_ir::geometry::sampled::{PolylineCurve, PolylineSamples, PolylineVertex};
+    use cadmpeg_ir::geometry::{CurveGeometry, SolvedCurveGeometry};
+    let with = |deflection: f64| {
+        let mut ir = cube();
+        let edge = ir.model.edges[0].clone();
+        let at = |v: &cadmpeg_ir::ids::VertexId| {
+            let vertex = ir.model.vertices.iter().find(|x| x.id == *v).unwrap();
+            let point = ir
+                .model
+                .points
+                .iter()
+                .find(|p| p.id == vertex.point)
+                .unwrap();
+            point.position().get()
+        };
+        let [t0, t1] = edge.param_range().unwrap().get();
+        let samples = PolylineSamples::Parameterized {
+            vertices: vec![
+                PolylineVertex {
+                    parameter: t0,
+                    point: at(&edge.start),
+                },
+                PolylineVertex {
+                    parameter: t1,
+                    point: at(&edge.end),
+                },
+            ]
+            .try_into()
+            .unwrap(),
+        };
+        let curve = edge.carrier.curve().unwrap().clone();
+        let c = ir.model.curves.iter_mut().find(|c| c.id == curve).unwrap();
+        c.geometry = CurveGeometry::Solved(SolvedCurveGeometry::Polyline(
+            PolylineCurve::new(samples, deflection).unwrap(),
+        ));
+        ir.finalize();
+        ir
+    };
+    let s = one(&with(0.05));
+    assert!((volume(&s) - 1000.0).abs() < 1e-6, "{}", volume(&s));
+    assert_eq!(widened(&s), (1, 2));
+    assert!(s.brep.edges.iter().any(|e| e.tolerance >= 0.05));
+    assert!(
+        s.brep
+            .vertices
+            .iter()
+            .filter(|v| v.tolerance >= 0.05)
+            .count()
+            == 2
+    );
+    assert_eq!(widened(&one(&with(0.0))), (0, 0));
+    // Past what an edge's tolerance holds: refused, and as the refusal names each face on the
+    // polyline, those faces are left out of an open surface of the others, the reason noted.
+    let bodies = read_bodies(&with(2.0), None);
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
+    assert!(
+        s.sheet && s.brep.faces.len() == 4,
+        "{} faces",
+        s.brep.faces.len()
+    );
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.starts_with("left out: ")
+                && n.contains("more than an edge's tolerance holds")),
+        "{:?}",
+        s.notes
+    );
+}
+
+/// A procedural surface's solved cache fitted within a tolerance its construction states is not
+/// the exact surface: read as the face's surface, the face's edges (and their vertices) hold that
+/// tolerance; a cache whose fit no edge's tolerance holds is refused, naming the face, which is
+/// left out of an open surface; a cache stated with no fit is read as before.
+#[test]
+fn a_fitted_procedural_cache_is_held_to_its_fit_not_taken_as_exact() {
+    use cadmpeg_ir::geometry::ProceduralSurfaceDefinition as D;
+    use cadmpeg_ir::geometry::surface_payloads::ExtrusionSurfaceConstruction;
+    use cadmpeg_ir::geometry::{CacheContract, LegacyCache, ProceduralSurface};
+    let with = |fit: Option<f64>| {
+        let mut ir = cube();
+        let construction: cadmpeg_ir::ids::ProceduralSurfaceId = tid("procedural", 0);
+        let cache = match fit {
+            Some(t) => CacheContract::Legacy {
+                cache: Some(LegacyCache::try_new(t).unwrap()),
+            },
+            None => CacheContract::legacy(),
+        };
+        let directrix = ir.model.curves[0].id.clone();
+        let definition = D::Extrusion(
+            ExtrusionSurfaceConstruction::try_new(
+                directrix,
+                None,
+                Vector3::new(0.0, 0.0, 1.0),
+                None,
+                cache,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            definition.cache_fit_tolerance().map(|t| t.get()),
+            fit,
+            "the construction states the fit"
+        );
+        ir.model.procedural_surfaces.push(ProceduralSurface::new(
+            construction.clone(),
+            definition,
+            None,
+        ));
+        let surface = &mut ir.model.surfaces[0];
+        let SurfaceGeometry::Solved(plane) = surface.geometry.clone() else {
+            panic!("the cube's faces are on planes")
+        };
+        surface.geometry = SurfaceGeometry::Procedural {
+            construction,
+            cache: Some(plane),
+        };
+        ir.finalize();
+        ir
+    };
+    let s = one(&with(Some(0.05)));
+    assert!((volume(&s) - 1000.0).abs() < 1e-6, "{}", volume(&s));
+    // The face's four edges, and their four corners.
+    assert_eq!(widened(&s), (4, 4));
+    assert!(s.brep.edges.iter().filter(|e| e.tolerance >= 0.05).count() == 4);
+    assert_eq!(widened(&one(&with(None))), (0, 0));
+    // Past what an edge's tolerance holds: the refusal names the face, which is left out of an
+    // open surface of the other five, the reason noted.
+    let bodies = read_bodies(&with(Some(2.0)), None);
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
+    assert!(
+        s.sheet && s.brep.faces.len() == 5,
+        "{} faces",
+        s.brep.faces.len()
+    );
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.starts_with("left out: ") && n.contains("its solved cache")),
+        "{:?}",
+        s.notes
     );
 }
 
@@ -490,10 +671,11 @@ fn an_edge_collapsed_between_two_vertices_at_one_point_keeps_its_loops_closed() 
     assert!((volume(&s) - 1000.0).abs() < 1e-6, "{}", volume(&s));
 }
 
-/// A coedge with a 3D curve of its own in place of its edge's refuses its region with the reason,
-/// rather than being built on the edge's curve.
+/// A coedge with a 3D curve of its own in place of its edge's is refused with the reason, rather
+/// than being built on the edge's curve: its face is left out of an open surface of the others
+/// (the refusal names that face).
 #[test]
-fn a_coedge_on_a_curve_of_its_own_refuses_its_region() {
+fn a_coedge_on_a_curve_of_its_own_leaves_its_face_out() {
     let mut ir = cube();
     let curve = ir.model.curves.first().unwrap().id.clone();
     let c = ir.model.coedges.first_mut().unwrap();
@@ -502,11 +684,19 @@ fn a_coedge_on_a_curve_of_its_own_refuses_its_region() {
         parameter_range: cadmpeg_ir::topology::ParameterInterval::new([0.0, 1.0]).unwrap(),
     });
     let bodies = read_bodies(&ir, None);
-    assert!(bodies.read.is_empty());
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
     assert!(
-        bodies.failures[0].message.contains("a 3D curve of its own"),
+        s.sheet && s.brep.faces.len() == 5,
+        "{} faces",
+        s.brep.faces.len()
+    );
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.starts_with("left out: ") && n.contains("a 3D curve of its own")),
         "{:?}",
-        bodies.failures
+        s.notes
     );
 }
 
@@ -865,5 +1055,82 @@ fn a_body_placed_by_a_scale_or_mirror_is_refused_and_a_rigid_one_moves_it() {
     assert_eq!(
         b.read[0].placement.map(|m| m[3]),
         Some([100.0, 0.0, 0.0, 1.0])
+    );
+}
+
+/// A solid refused for one face (its plane moved 5 mm off its edges) comes in as an open surface
+/// of its other faces, as the STEP reader brings in a solid it cannot close: the record says why
+/// it is open and which face was left out, and the face is only left out because the refusal
+/// names it.
+#[test]
+fn a_solid_refused_for_one_face_comes_in_as_an_open_surface_of_the_others() {
+    let mut ir = cube();
+    let face = ir.model.faces.first().unwrap().clone();
+    let surface = ir
+        .model
+        .surfaces
+        .iter_mut()
+        .find(|s| s.id == face.surface)
+        .unwrap();
+    let SurfaceGeometry::Solved(SolvedSurfaceGeometry::Plane(plane)) = &surface.geometry else {
+        panic!("{:?}", surface.geometry)
+    };
+    let o = plane.origin().get();
+    let (n, u) = (
+        plane.frame().axis().as_raw(),
+        plane.frame().reference().as_raw(),
+    );
+    let moved = cadmpeg_ir::geometry::analytic::PlaneSurface::try_new(
+        Point3::new(o.x + 5.0 * n.x, o.y + 5.0 * n.y, o.z + 5.0 * n.z),
+        Vector3::new(n.x, n.y, n.z),
+        Vector3::new(u.x, u.y, u.z),
+    )
+    .unwrap();
+    surface.geometry = SurfaceGeometry::Solved(SolvedSurfaceGeometry::Plane(moved));
+    let bodies = read_bodies(&ir, None);
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
+    assert!(s.sheet, "an open surface");
+    assert_eq!(s.brep.faces.len(), 5);
+    assert!(
+        !s.face_origin.contains(&0),
+        "face 0 left out: {:?}",
+        s.face_origin
+    );
+    assert!(
+        s.notes.iter().any(|n| n.starts_with("not closed")),
+        "{:?}",
+        s.notes
+    );
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.starts_with("left out: ") && n.contains("face #0")),
+        "{:?}",
+        s.notes
+    );
+}
+
+/// A refusal that names its face by the face's id in the model (as this reader names a face it
+/// cannot read: here its surface is missing) leaves that face out as one naming it by index does.
+#[test]
+fn a_face_named_by_its_model_id_is_left_out_of_an_open_surface() {
+    let mut ir = cube();
+    let surface = ir.model.faces.first().unwrap().surface.clone();
+    ir.model.surfaces.retain(|s| s.id != surface);
+    let bodies = read_bodies(&ir, None);
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
+    assert!(
+        s.sheet && s.brep.faces.len() == 5,
+        "{} faces",
+        s.brep.faces.len()
+    );
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.starts_with("left out: ") && n.contains("missing surface")),
+        "{:?}",
+        s.notes
     );
 }

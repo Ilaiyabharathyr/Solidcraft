@@ -1659,11 +1659,14 @@ mod tests {
             path: vec!["block".into()],
             instance: None,
             color: Some([0.2, 0.4, 0.6]),
+            paint: None,
             hidden: false,
             placement: None,
             face_origin: (0..brep.faces.len() as u64).collect(),
-            brep,
+            brep: Some(brep),
             sheet: false,
+            copy_of: None,
+            mesh: None,
         };
         let tree = vec![solidcraft_kernel::StepNode {
             name: "block".into(),
@@ -2423,11 +2426,14 @@ mod tests {
             path: Vec::new(),
             instance: None,
             color: None,
+            paint: None,
             hidden: false,
             placement: None,
-            brep,
+            brep: Some(brep),
             face_origin,
             sheet: false,
+            copy_of: None,
+            mesh: None,
         };
         let records =
             Arc::new(solidcraft_kernel::ImportRecords { bodies: vec![body], tree: Vec::new(), warnings: Vec::new(), system: String::new() });
