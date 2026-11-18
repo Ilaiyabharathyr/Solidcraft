@@ -1690,8 +1690,9 @@ pub fn periodic_edge(curve: BCurve, [t0, t1]: [f64; 2]) -> R<(BCurve, [f64; 2])>
     let (mut lo, mut hi) = (t0 - turns * period, t1 - turns * period);
     // Moving by whole periods rounds: a start a rounding short of the range's end is the seam
     // (the range's start), and an end a rounding past it is that end, as the STEP reader takes an
-    // end within a rounding of its seam. A restart is only ever strictly inside the range.
-    if b - lo <= eps {
+    // end within a rounding of its seam. A restart is only ever strictly inside the range. An edge
+    // that ends before the range does (a short one a rounding short of it) stays where it is.
+    if b - lo <= eps && hi > b {
         (lo, hi) = (a, hi - period);
     }
     if lo - a <= eps {

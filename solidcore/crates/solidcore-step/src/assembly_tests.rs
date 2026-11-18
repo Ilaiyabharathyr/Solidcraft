@@ -397,6 +397,10 @@ fn an_edge_a_rounding_from_the_seam_starts_at_the_seam() {
     let (c, [t0, t1]) = periodic_edge(curve.clone(), [0.0, 0.4 + 1e-16]).unwrap();
     assert_eq!(c, curve, "not restarted");
     assert_eq!([t0, t1], [0.0, 0.4]);
+    // A short edge a rounding short of the range's end, ending before it: where it is, in order.
+    let (c, [t0, t1]) = periodic_edge(curve.clone(), [0.4 - 1e-11, 0.4 - 5e-12]).unwrap();
+    assert_eq!(c, curve, "not restarted");
+    assert!(t0 < t1 && t1 <= 0.4, "{t0} {t1}");
 }
 
 /// A parabola edge is the exact spline over its interval, its ends where the parabola is at the
