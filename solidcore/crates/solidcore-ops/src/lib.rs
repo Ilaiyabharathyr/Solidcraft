@@ -56,6 +56,7 @@ pub mod export_geometry;
 pub mod extend;
 pub mod face_surface;
 pub mod file;
+pub mod frame_member;
 pub mod hatch;
 pub mod import_geometry;
 pub mod joint_turn;
@@ -79,6 +80,7 @@ pub mod surface_cvs;
 pub mod sweep;
 pub mod tangent;
 pub mod trim;
+pub mod tube_cope;
 pub mod untrim;
 pub mod vertex_meet;
 
