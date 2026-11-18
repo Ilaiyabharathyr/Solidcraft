@@ -2151,9 +2151,13 @@ pub fn world_preview(s: &Session, cmds: &[(String, Value)], colors: Colors) -> O
         .map(|(_, r)| r.clone());
     // A constraint's reply: how free its part is with the constraint the preview shows.
     let placed = cmds.iter().zip(&preview.replies).find(|((c, _), _)| c.starts_with("assembly.constraint.")).map(|(_, r)| r.clone());
+    // A Frame Member's tubes, for its dialog to pick (#15705).
+    let centrelines = crate::dialogs_frame::centrelines(&preview);
     let (before, after) = (preview.before, preview.after);
-    // A moved component looks like itself (no new surface), with its old place as the ghost.
-    let colors = Colors { added: colors.body, new_body: colors.body, ..colors };
+    // A moved component looks like itself (no new surface), with its old place as the ghost. Ghost
+    // Frame Members' new tubes keep their see-through tint (`preview::colors`).
+    let new_body = if colors.glass_new { colors.new_body } else { colors.body };
+    let colors = Colors { added: colors.body, new_body, ..colors };
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::preview::build(&before, &after, colors)));
     Some(match built {
         Ok(mut b) => {
@@ -2163,6 +2167,7 @@ pub fn world_preview(s: &Session, cmds: &[(String, Value)], colors: Colors) -> O
             b.bounds = after.bodies.iter().fold(Aabb3::EMPTY, |acc, x| acc.union(&x.mesh().bounds()));
             b.stopped = stopped;
             b.placed = placed;
+            b.centrelines = centrelines;
             Ok(b)
         }
         Err(_) => Err("the preview failed".into()),

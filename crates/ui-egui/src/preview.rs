@@ -62,6 +62,9 @@ pub struct Colors {
     /// are left out altogether, so they are fully transparent and only outlines are drawn. A
     /// combine's ghosts always show.
     pub cut_tint: bool,
+    /// Whether bodies the preview creates are drawn see-through, in `new_body` and its alpha
+    /// (Ghost Frame Members: this Frame Member's own new members, #15705).
+    pub glass_new: bool,
 }
 
 impl Colors {
@@ -85,6 +88,7 @@ impl Colors {
             ghost: true,
             tint_new: true,
             cut_tint: true,
+            glass_new: false,
         }
     }
 
@@ -139,6 +143,8 @@ pub struct Built {
     /// Bodies the preview only moves, drawn moved on the GPU instead of built where they land
     /// (a Move). `scene` is not read then.
     pub layer: Option<Layer>,
+    /// The members of a previewed Frame Member (`dialogs_frame::centrelines`).
+    pub centrelines: Vec<crate::dialogs_frame::Centreline>,
 }
 
 /// What a preview only moves, as a layer of its own ([`crate::gpu::MovingLayer`]): scenes built
@@ -220,6 +226,8 @@ pub struct PreviewState {
     /// The bodies and plane ([`mirror_key`]) the Mirror dialog last set its operation for: an
     /// operation picked by hand afterwards stays until they change.
     pub mirror_decided: Option<u64>,
+    /// The members of the previewed Frame Member, for Remove Tube in its dialog.
+    pub centrelines: Vec<crate::dialogs_frame::Centreline>,
     straight: crate::extrude_preview::StraightPreview,
     moving: crate::move_preview::MovePreview,
     /// PreviewReselect: Primary held - hide the preview and restore replaced bodies for picks.
@@ -329,6 +337,7 @@ impl PreviewState {
         self.mirror_meets = None;
         self.mirror_decided = None;
         self.points.clear();
+        self.centrelines.clear();
         self.sketches.clear();
         self.busy = false;
         self.rolled_back = false;
@@ -369,6 +378,7 @@ impl PreviewState {
                 self.tapered = b.tapered;
                 self.mirror_meets = b.mirror_meets;
                 self.points = b.points;
+                self.centrelines = b.centrelines;
                 match b.layer {
                     // The scenes of this key are up: only the motion changes, nothing is uploaded.
                     Some(Layer { key, scenes: None, motion }) if self.layer_shown() == Some(key) => self.layer = Some((key, motion)),
@@ -406,6 +416,7 @@ impl PreviewState {
                 self.mirror_meets = None;
                 self.mirror_decided = None;
                 self.points.clear();
+                self.centrelines.clear();
             }
         }
     }
@@ -561,6 +572,23 @@ fn stream_key(cmds: &[(String, Value)], revision: u64, colors: Colors) -> Option
     Some(job_key(&setup, revision, colors))
 }
 
+/// The colours the open dialog's preview is drawn in.
+pub(crate) fn colors(app: &SolveApp) -> Colors {
+    let mut colors = Colors::for_tool(&Tokens::get(), &app.ui.tab, app.tool.is_some() || app.dialog.is_some());
+    if app.dialog.as_ref().is_some_and(|d| matches!(d.kind, crate::dialogs::Kind::Assembly(crate::dialogs_assembly::Asm::Drive { .. }))) {
+        colors.ghost = app.preferences.drive_joints_ghost;
+    }
+    colors.tint_new = app.preferences.preview_tint_new_faces;
+    colors.cut_tint = app.preferences.cut_preview_tint;
+    // Ghost Frame Members: this feature's new members see-through in the new-body tint, apart
+    // from the grey other frame members are drawn in (#15705).
+    if crate::viewport::frame_ghosting(app) {
+        colors.new_body[3] = crate::viewport::frame_ghost_alpha();
+        colors.glass_new = true;
+    }
+    colors
+}
+
 /// Keep the preview in step with the open dialog: start a computation when its inputs changed,
 /// take finished results. Called once per frame.
 pub fn update(app: &mut SolveApp, ctx: &egui::Context) {
@@ -584,18 +612,15 @@ pub fn update(app: &mut SolveApp, ctx: &egui::Context) {
         _ if app.params.as_ref().and_then(|p| p.preview_commands()).is_some() => {
             app.params.as_ref().and_then(|p| p.preview_commands()).unwrap_or_default()
         }
-        // No dialog, or inputs still missing: nothing to preview.
+        // No dialog, or inputs still missing: nothing to preview, and a pick waiting for one is
+        // not checked (`settle_pick` drops it).
         _ => {
             app.preview.clear();
+            crate::dialogs_frame::settle_pick(app);
             return;
         }
     };
-    let mut colors = Colors::for_tool(&Tokens::get(), &app.ui.tab, app.tool.is_some() || app.dialog.is_some());
-    if app.dialog.as_ref().is_some_and(|d| matches!(d.kind, crate::dialogs::Kind::Assembly(crate::dialogs_assembly::Asm::Drive { .. }))) {
-        colors.ghost = app.preferences.drive_joints_ghost;
-    }
-    colors.tint_new = app.preferences.preview_tint_new_faces;
-    colors.cut_tint = app.preferences.cut_preview_tint;
+    let colors = colors(app);
     let mut key = job_key(&cmds, app.session.revision, colors);
     // A Move is drawn as a layer where the view allows it (`move_preview::layered`), and built
     // where it lands where not: when the view changes between the two, it is computed again.
@@ -635,6 +660,7 @@ pub fn update(app: &mut SolveApp, ctx: &egui::Context) {
     if app.preview.busy {
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
+    crate::dialogs_frame::settle_pick(app);
 }
 
 /// What tells one preview computation from another: its commands, the document revision they
@@ -734,6 +760,7 @@ pub fn compute(s: &Session, cmds: &[(String, Value)], colors: Colors) -> Job {
             let features = || p.replies.iter().filter_map(|r| r.get("feature").and_then(Value::as_u64));
             b.applied = features().find_map(|id| p.after.fitted_range(id));
             b.tapered = features().find_map(|id| p.after.tapered(id)).map(<[_]>::to_vec).unwrap_or_default();
+            b.centrelines = crate::dialogs_frame::centrelines(&p);
             Ok(b)
         }
     }
@@ -924,6 +951,7 @@ fn build_copies(before: &ModelState, after: &ModelState, sources: &[String], c: 
         points: Vec::new(),
         placed: None,
         layer: None,
+        centrelines: Vec::new(),
     }
 }
 
@@ -976,6 +1004,7 @@ fn build_tool(before: &ModelState, after: &ModelState, c: Colors, op: &str) -> B
         points: Vec::new(),
         placed: None,
         layer: None,
+        centrelines: Vec::new(),
     }
 }
 
@@ -1126,6 +1155,8 @@ fn build_as(before: &ModelState, after: &ModelState, c: Colors, combine: Option<
         } else {
             new_body
         };
+        // See-through (Ghost Frame Members) only where the body is drawn in the New Body colour.
+        let glass = picked.is_none() && old.is_none() && c.glass_new;
         for (t, f) in am.triangles.iter().zip(&am.tri_face) {
             let new = new_face.get(*f as usize).copied().unwrap_or(false);
             let col = if new && tint_new { added_color } else { kept };
@@ -1133,7 +1164,11 @@ fn build_as(before: &ModelState, after: &ModelState, c: Colors, combine: Option<
             for k in t {
                 let i = *k as usize;
                 if let (Some(p), Some(n)) = (am.positions.get(i), am.normals.get(i)) {
-                    sc.tri(p.to_f32(), n.to_f32(), col);
+                    if glass {
+                        sc.glass_tri(p.to_f32(), n.to_f32(), col);
+                    } else {
+                        sc.tri(p.to_f32(), n.to_f32(), col);
+                    }
                     if through {
                         sc.xray_tri(p.to_f32(), n.to_f32(), removed);
                     }
@@ -1242,6 +1277,7 @@ fn build_as(before: &ModelState, after: &ModelState, c: Colors, combine: Option<
         points,
         placed: None,
         layer: None,
+        centrelines: Vec::new(),
     }
 }
 
@@ -1510,6 +1546,7 @@ mod tests {
             ghost: true,
             tint_new: true,
             cut_tint: true,
+            glass_new: false,
         }
     }
 
@@ -1565,6 +1602,7 @@ mod tests {
             points: Vec::new(),
             placed: None,
             layer: None,
+            centrelines: Vec::new(),
         }
     }
 
