@@ -15,11 +15,15 @@
 //! in a loop (a zero-speed rib's grows by the spans it halves, to at most 1024), each
 //! Newton solve takes at most 40 steps.
 
+mod certificate;
+
+use crate::blend::fillet_section::certificate::NurbsCurve;
 use crate::blend::fillet_section::section::GnSectionFsg;
 use crate::blend::fillet_solver::p1::{FilletSolver, FilletSurfaceGeneratorType};
 use crate::curve::curve::Curve;
 use crate::error::{Result, SolidError};
 use crate::geom::global_solver::SolverOperation;
+use crate::geom::krawczyk::{inverse_of_columns3, newton, Linearised};
 use crate::geom::vector2d::Point2;
 use crate::kernel::Kernel;
 use crate::math::{Point3, Vec3, BIG_DOUBLE, EFF_ZERO, EFF_ZERO_SQRT};
@@ -204,6 +208,14 @@ pub struct TangentEndRib {
     pub fillet_uv: BSplineCurve,
     /// `rpEndUV`: its UV curve on the end surface.
     pub end_uv: BSplineCurve,
+    /// Not upstream (#17744): the largest distance, certified span by span, of each curve
+    /// from the rib of the surfaces as the kernel evaluates them, at the same parameter (the
+    /// 3D curve's point, a UV curve's point on its surface), at most the tolerance. A blend
+    /// inside a scope that answers by its net is that net; one evaluated by its definition
+    /// is the definition. `None` where a face is not enclosed (a STEP, offset,
+    /// curve-bounded or in-volume face, or a definition of contact order 2): the rib is then
+    /// built as upstream builds it, on its spans' midpoints, and makes no claim.
+    pub bound: Option<f64>,
 }
 
 /// `sm_TangentEndRib`: the end rib of a fillet at a tangent end, the fillet surface's
@@ -217,13 +229,15 @@ pub struct TangentEndRib {
 /// [`section_contact_order`]); the rib is taken in `t` with `s ~ t^2` for odd `k` and
 /// `s ~ t` for even `k`, in which `a` is analytic. The three curves (3D, on the fillet
 /// surface, on the end surface) interpolate the same exact points in `t`, the stations
-/// doubled from 8 to 1024 until each span's midpoint is within `approx_tol` of the
-/// exact point there. For odd `k` past 1 (the fork's tangency-labs/smlib@cd47efd) the
+/// doubled from 8 to 1024 until each span is certified within `approx_tol` (not upstream,
+/// #17744: upstream compares the span's midpoint with the exact point there; the certificate
+/// bounds every parameter of the span, `certificate`, and the largest bound is
+/// [`TangentEndRib::bound`]; where a face is not enclosed, the span's midpoint is compared
+/// as upstream). For odd `k` past 1 (the fork's tangency-labs/smlib@cd47efd) the
 /// curves have zero speed at the tangent end: their first derivative there is zero
 /// (the first two control points coincide) and their second the exact
 /// `2 (s1 - s0) dX/ds`, `X` the fillet surface along its section, both interpolated as
-/// end conditions; only the spans whose midpoint is off are halved, from 8 uniform
-/// ones. With `reverse` the rib runs from `other_end` to `tangent_end`.
+/// end conditions; only the spans not certified are halved, from 8 uniform ones. With `reverse` the rib runs from `other_end` to `tangent_end`.
 ///
 /// Not upstream (#10876): with `stop`, the rib is the piece from the tangent end to `stop`, a
 /// point of the fillet surface and the end surface between the rails (where the rib passes
@@ -235,8 +249,11 @@ pub struct TangentEndRib {
 /// # Errors
 ///
 /// `SM_ERR` when an end is off either surface, the ends are not on the fillet surface's
-/// two rails or lie on one section, the rib does not reach its other end, or no station
-/// count gives the rib within tolerance; for a zero-speed rib, when the end surface is
+/// two rails or lie on one section, the rib does not reach its other end, a station
+/// has no exact point, or (where a face is not enclosed) no station count gives the rib's
+/// midpoints within tolerance; [`crate::error::blend::BlendFailure::NotCertified`] (#17744)
+/// where both faces are enclosed and no station count certifies the rib within tolerance;
+/// for a zero-speed rib, when the end surface is
 /// singular at the tangent end, the fillet surface's section leaves its tangent plane
 /// there, or an interpolation's second control point leaves its end; a stage failure
 /// ([`crate::error::blend::BlendFailure::StageFailed`], a defect) for a `stop` off either
@@ -430,17 +447,67 @@ pub fn tangent_end_rib(
     };
 
     // the exact rib point at t, from a guess; on the other end's side of the tangent end
+    // Not upstream (#17744): the point's Newton steps go on until they settle
+    // (`geom::krawczyk::newton`). Its residual stop leaves alpha off by the residual over
+    // the Jacobian's least singular value, which vanishes toward the tangent end: on a G3
+    // round's rib 4e-5 along the rail, which the certificate sees at the stations.
+    let settle = |sigma: f64, y: [f64; 3]| -> Result<Linearised<3>> {
+        let [a, u, v] = y;
+        let fil_uv = if section == 0 {
+            Point2::new(sigma, a)
+        } else {
+            Point2::new(a, sigma)
+        };
+        let (Ok((f, f_u, f_v)), Ok((x, e_u, e_v))) = (
+            first_derivs(k, fillet, fil_uv),
+            first_derivs(k, end, Point2::new(u, v)),
+        ) else {
+            return Ok(None);
+        };
+        let f_a = if section == 0 { f_v } else { f_u };
+        let r = f - x;
+        let col = |c: Vec3| [c.x, c.y, c.z];
+        Ok(Some(([r.x, r.y, r.z], [col(f_a), col(-e_u), col(-e_v)])))
+    };
     let solve = |t: f64, alpha: f64, uv: Point2| -> Result<Option<(f64, Point2, Point3)>> {
-        let found = tangent_end_rib_point(k, fillet, end, section, sigma_at(t), alpha, uv)?;
+        let sigma = sigma_at(t);
+        let Some((a, e, x)) = tangent_end_rib_point(k, fillet, end, section, sigma, alpha, uv)?
+        else {
+            return Ok(None);
+        };
+        let start = [a, e.x, e.y];
+        let settled = newton(start, &|y| settle(sigma, y), &inverse_of_columns3)?;
+        let found = match settled {
+            Some([a1, u, v]) if [a1, u, v] != start => {
+                let e1 = Point2::new(u, v);
+                let x1 = first_derivs(k, end, e1).ok().map(|(x1, _, _)| x1);
+                x1.map_or((a, e, x), |x1| (a1, e1, x1))
+            }
+            _ => (a, e, x),
+        };
         // (`<= 0.0` fails the point; a NaN product keeps it, as upstream's test)
         #[allow(clippy::neg_cmp_op_on_partial_ord)]
-        Ok(found.filter(|&(a, _, _)| !((a - alpha0) * (alpha1 - alpha0) <= 0.0)))
+        Ok(Some(found).filter(|&(a, _, _)| !((a - alpha0) * (alpha1 - alpha0) <= 0.0)))
+    };
+    let rib_newton = |t: f64, y: [f64; 3]| -> Result<Option<[f64; 3]>> {
+        let [a, u, v] = y;
+        Ok(solve(t, a, Point2::new(u, v))?.map(|(a, e, _)| [a, e.x, e.y]))
+    };
+    // the faces as the certificate encloses them (#17744): the surfaces the kernel
+    // evaluates; where one is not enclosed, the rib is built as upstream builds it, its
+    // spans' midpoints against the exact points there, with no bound
+    let faces = match (
+        certificate::Face::of(k, fillet)?,
+        certificate::Face::of(k, end)?,
+    ) {
+        (Some(f), Some(e)) => Some((f, e)),
+        _ => None,
     };
 
     // The stations, and the exact points there. A regular rib's stations are
     // t = j / spans, the spans doubled until the curves are within the tolerance. A
-    // zero-speed rib's are refined where they are not: only the spans whose midpoint is
-    // off are halved, at that exact midpoint, so the stations follow the rib's own
+    // zero-speed rib's are refined where they are not: only the spans not certified
+    // (#17744; upstream: whose midpoint is off) are halved, at their exact midpoint, so the stations follow the rib's own
     // smoothness in t, the tangent end costing none.
     let mut ts: Vec<f64> = Vec::new();
     let mut alphas: Vec<f64> = Vec::new();
@@ -449,6 +516,7 @@ pub fn tangent_end_rib(
     let max_spans: usize = 1024;
     let mut spans: usize = 8;
     let mut stations = false;
+    let mut halvings = 0;
     while spans <= max_spans {
         if !stations {
             // stations t = j / spans, solved from the tangent end outward
@@ -534,10 +602,29 @@ pub fn tangent_end_rib(
         let mut c_fil = interpolate(&fil_pts, &ts, d2_fil)?;
         let mut c_end = interpolate(&end_pts, &ts, d2_end)?;
 
-        // each span's midpoint against the exact rib point there; the spans off it, with
-        // that point
+        // each span's certified bound (#17744); the spans not bounded within the tolerance,
+        // with the exact rib point at their midpoint
+        let rib = match &faces {
+            Some((fillet, end)) => Some(certificate::Rib {
+                kernel: k,
+                fillet,
+                end,
+                section,
+                sigma0,
+                d_sigma: sigma1 - sigma0,
+                odd,
+                order,
+                curves: [
+                    NurbsCurve::of(&c3d)?,
+                    NurbsCurve::of(&c_fil)?,
+                    NurbsCurve::of(&c_end)?,
+                ],
+            }),
+            None => None,
+        };
         let mut solved = true;
         let mut off: Vec<(usize, f64, Point2, Point3)> = Vec::new();
+        let mut bound = 0.0_f64;
         for jj in 0..spans {
             if !(zero_speed || off.is_empty()) {
                 break;
@@ -555,21 +642,39 @@ pub fn tangent_end_rib(
             let t = 0.5 * (t0 + t1);
             let alpha = 0.5 * (a0 + a1);
             let uv = Point2::new(0.5 * (e0.x + e1.x), 0.5 * (e0.y + e1.y));
+            if let Some(rib) = &rib {
+                let ends = ((t0, [a0, e0.x, e0.y]), (t1, [a1, e1.x, e1.y]));
+                let within = if jj == 0 {
+                    // the span at the tangent end, on pieces graded toward it
+                    rib.first_span_bound(&rib_newton, ends.0 .1, ends.1, approx_tol)?
+                } else {
+                    rib.span_bound(&rib_newton, ends.0, ends.1, approx_tol)?
+                };
+                if let Some(d) = within.filter(|&d| d <= approx_tol) {
+                    bound = bound.max(d);
+                    continue;
+                }
+            }
             let Some((alpha, uv, exact)) = solve(t, alpha, uv)? else {
                 solved = false;
                 break;
             };
-            let on_3d = c3d.evaluate_point(t)?;
-            let on_fil_uv = c_fil.evaluate_point(t)?;
-            let on_end_uv = c_end.evaluate_point(t)?;
-            let on_fil = fillet.evaluate_point(k, Point2::new(on_fil_uv.x, on_fil_uv.y))?;
-            let on_end = end.evaluate_point(k, Point2::new(on_end_uv.x, on_end_uv.y))?;
-            if on_3d.distance(exact) > approx_tol
-                || on_fil.distance(exact) > approx_tol
-                || on_end.distance(exact) > approx_tol
-            {
-                off.push((jj, alpha, uv, exact));
+            // a face not enclosed: upstream's check, the span's midpoint against the
+            // exact rib point there
+            if rib.is_none() {
+                let on_3d = c3d.evaluate_point(t)?;
+                let on_fil_uv = c_fil.evaluate_point(t)?;
+                let on_end_uv = c_end.evaluate_point(t)?;
+                let on_fil = fillet.evaluate_point(k, Point2::new(on_fil_uv.x, on_fil_uv.y))?;
+                let on_end = end.evaluate_point(k, Point2::new(on_end_uv.x, on_end_uv.y))?;
+                let off_mid = on_3d.distance(exact) > approx_tol
+                    || on_fil.distance(exact) > approx_tol
+                    || on_end.distance(exact) > approx_tol;
+                if !off_mid {
+                    continue;
+                }
             }
+            off.push((jj, alpha, uv, exact));
         }
 
         if solved && off.is_empty() {
@@ -585,10 +690,12 @@ pub fn tangent_end_rib(
                 curve_3d: c3d,
                 fillet_uv: c_fil,
                 end_uv: c_end,
+                bound: rib.is_some().then_some(bound),
             });
         }
 
         if !zero_speed {
+            halvings += spans;
             spans *= 2;
             stations = false;
             continue;
@@ -596,7 +703,7 @@ pub fn tangent_end_rib(
 
         // the zero-speed rib: each span off the rib halved at its exact midpoint
         if !solved {
-            break;
+            return Err(fail("no stations give the rib within the tolerance"));
         }
         for &(jj, alpha, uv, exact) in off.iter().rev() {
             let at = jj + 1;
@@ -608,10 +715,21 @@ pub fn tangent_end_rib(
             es.insert(at, uv);
             xs.insert(at, exact);
         }
+        halvings += off.len();
         spans += off.len();
     }
 
+    // no station count certifies the rib within the tolerance (#17744); upstream's check:
     // no stations give the rib within tolerance
+    if faces.is_some() {
+        return Err(SolidError::blend(
+            OP_RIB,
+            crate::error::blend::BlendFailure::NotCertified {
+                halvings,
+                stations: ts.len(),
+            },
+        ));
+    }
     Err(fail("no stations give the rib within the tolerance"))
 }
 
@@ -620,6 +738,10 @@ mod tests {
     use super::*;
     use crate::error::blend::BlendFailure;
     use crate::error::SM_ERR_NULL_POINTER;
+    use crate::nurbs::b_spline_curve::KnotType;
+    use crate::nurbs::b_spline_surface::{
+        BSplineSurface, BSplineSurfaceForm, CanonicalSurfaceData,
+    };
 
     /// A solver without a surface generator has no contact order: a typed blend failure
     /// that keeps the bare `Upstream`'s status (#13790).
@@ -635,5 +757,170 @@ mod tests {
                 Some(SM_ERR_NULL_POINTER)
             )
         );
+    }
+
+    /// The fillet surface `S(u, v) = (2v − 1, u, 0)` (its section along u, its rails at
+    /// u = 0 and 1) and an end surface `E(u, v) = (u − 1/2 + b(u), u, 2v − 1)` that holds the
+    /// rib `x = y − 1/2 + b(y)`: `b` is one cubic B-spline of height `bump` on
+    /// `[0.38, 0.42]`, between the station t = 3/8 and its span's midpoint 7/16, zero at
+    /// every station and midpoint of 8 spans.
+    fn bumped_rib_surfaces(bump: f64) -> (Surface, Surface) {
+        let p = Point3::new;
+        let fillet = BSplineSurface::create_bilinear_surface(
+            p(-1.0, 0.0, 0.0),
+            p(-1.0, 1.0, 0.0),
+            p(1.0, 0.0, 0.0),
+            p(1.0, 1.0, 0.0),
+        )
+        .unwrap();
+        let knots = [0.0, 0.25, 0.38, 0.39, 0.4, 0.41, 0.42, 0.5, 0.75, 1.0];
+        let mult = [4, 1, 1, 1, 1, 1, 1, 1, 1, 4];
+        let full: Vec<f64> = knots
+            .iter()
+            .zip(mult)
+            .flat_map(|(&x, m)| std::iter::repeat_n(x, m))
+            .collect();
+        let mut pts = Vec::new();
+        for i in 0..full.len() - 4 {
+            // the Greville abscissa: y = u exactly, and x = y − 1/2 off the bump
+            let y = (full[i + 1] + full[i + 2] + full[i + 3]) / 3.0;
+            let x = y - 0.5 + if i == 5 { bump } else { 0.0 };
+            pts.push(p(x, y, -1.0));
+            pts.push(p(x, y, 1.0));
+        }
+        let end = BSplineSurface::create_canonical(&CanonicalSurfaceData {
+            u_degree: 3,
+            v_degree: 1,
+            control_points: &pts,
+            form: BSplineSurfaceForm::Unspecified,
+            u_multiplicities: &mult,
+            v_multiplicities: &[2, 2],
+            u_knots: &knots,
+            v_knots: &[0.0, 1.0],
+            knot_type: KnotType::Unspecified,
+            weights: None,
+            uv_domain: None,
+        })
+        .unwrap();
+        (Surface::from(fillet), Surface::from(end))
+    }
+
+    /// A rib that passes every span's midpoint but leaves the end surface between the
+    /// stations (#17744): the bump of 1e-3 on the end surface lies between a station and
+    /// the next midpoint of 8 spans. On `main` it is returned 4.7e-4 off the end surface;
+    /// the certificate refines it until it follows the bump, its three curves within its
+    /// bound and the bound within the tolerance.
+    #[test]
+    fn a_rib_off_the_end_surface_between_its_stations_is_refined() {
+        let k = Kernel::default();
+        let tol = 1e-5;
+        let (fillet, end) = bumped_rib_surfaces(1e-3);
+        let rib = tangent_end_rib(
+            &k,
+            &fillet,
+            &end,
+            2,
+            Point3::new(-0.5, 0.0, 0.0),
+            Point3::new(0.5, 1.0, 0.0),
+            None,
+            false,
+            tol,
+        )
+        .unwrap();
+        let worst = farthest_off(&k, &rib, &fillet, &end);
+        assert!(
+            worst <= tol,
+            "the rib is {worst:e} off a surface (tolerance {tol:e})"
+        );
+        let bound = rib.bound.unwrap();
+        assert!(bound <= tol, "{bound:e}");
+        assert!(worst <= bound + 1e-12, "{worst:e} > {bound:e}");
+    }
+
+    /// The farthest the rib's curves are from the surfaces, at 1001 parameters: the 3D
+    /// curve from either surface, the fillet UV curve's point from the end surface, the end
+    /// UV curve's point from the fillet surface. Each is at most the curve's distance from
+    /// the rib point at the same parameter, which lies on both.
+    fn farthest_off(k: &Kernel, rib: &TangentEndRib, fillet: &Surface, end: &Surface) -> f64 {
+        let opts = DropPointOptions::default();
+        let ivl = rib.curve_3d.natural_interval();
+        let on = |c: &BSplineCurve, s: &Surface, t: f64| {
+            let p = c.evaluate_point(t).unwrap();
+            s.evaluate_point(k, Point2::new(p.x, p.y)).unwrap()
+        };
+        let mut worst: f64 = 0.0;
+        for i in 0..=1000 {
+            let t = ivl.min() + (ivl.max() - ivl.min()) * f64::from(i) / 1000.0;
+            let x = rib.curve_3d.evaluate_point(t).unwrap();
+            let points = [
+                (x, fillet),
+                (x, end),
+                (on(&rib.fillet_uv, fillet, t), end),
+                (on(&rib.end_uv, end, t), fillet),
+            ];
+            for (x, s) in points {
+                let dom = s.natural_uv_domain_with_nurb(k).unwrap();
+                let d = s
+                    .drop_point::<crate::surface::surface::p4::NoObject>(k, x, &dom, &opts)
+                    .unwrap();
+                assert!(d.success);
+                worst = worst.max(d.gap);
+            }
+        }
+        worst
+    }
+
+    /// A face the certificate does not enclose (#17744): the clean rib's fillet plane as an
+    /// offset surface (0.1 off, the plane `z = c`), the rib the line `x = y − 1/2` there.
+    /// It is built as `main` builds it, on its spans' midpoints, and claims no bound.
+    #[test]
+    fn a_rib_on_a_face_not_enclosed_is_built_without_a_bound() {
+        let k = Kernel::default();
+        let (plane, end) = bumped_rib_surfaces(0.0);
+        let fillet = Surface::from(
+            crate::surface::offset_surface::OffsetSurface::new(
+                &k,
+                0.1,
+                plane,
+                true,
+                crate::surface::offset_surface::SS_UNKNOWN,
+            )
+            .unwrap(),
+        );
+        let c = fillet.evaluate_point(&k, Point2::new(0.5, 0.5)).unwrap().z;
+        let (p, q) = (Point3::new(-0.5, 0.0, c), Point3::new(0.5, 1.0, c));
+        let tol = 1e-5;
+        let rib = tangent_end_rib(&k, &fillet, &end, 2, p, q, None, false, tol).unwrap();
+        assert_eq!(rib.bound, None);
+        let worst = farthest_off(&k, &rib, &fillet, &end);
+        assert!(worst <= tol, "{worst:e}");
+    }
+
+    /// The same surfaces without the bump: the rib is the line `x = y − 1/2` on `z = 0`. It
+    /// is certified, the tangent end's span included ([`certificate`]'s graded pieces and
+    /// its bound near the end), with a stored bound within the tolerance that holds the
+    /// sampled distances (the rib lies on both surfaces, so a curve point's distance from
+    /// one is at most its distance from the rib point; 1e-12 for the projection's rounding).
+    #[test]
+    fn a_rib_on_its_surfaces_is_certified_within_the_tolerance() {
+        let k = Kernel::default();
+        let tol = 1e-5;
+        let (fillet, end) = bumped_rib_surfaces(0.0);
+        let rib = tangent_end_rib(
+            &k,
+            &fillet,
+            &end,
+            2,
+            Point3::new(-0.5, 0.0, 0.0),
+            Point3::new(0.5, 1.0, 0.0),
+            None,
+            false,
+            tol,
+        )
+        .unwrap();
+        let bound = rib.bound.unwrap();
+        assert!(bound <= tol, "{bound:e}");
+        let worst = farthest_off(&k, &rib, &fillet, &end);
+        assert!(worst <= bound + 1e-12, "{worst:e} > {bound:e}");
     }
 }
