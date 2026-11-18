@@ -969,6 +969,19 @@ impl Sketch {
     /// sketch's own curves and constraints on it move to the new entities that match the old
     /// ones (`rebuild_link`). Returns `true` when it was rebuilt.
     pub fn update_link(&mut self, id: &str, geom: &[LinkGeom]) -> Result<bool> {
+        self.update_link_read(id, geom, false)
+    }
+
+    /// [`Sketch::update_link`] for a face boundary read in the order of its edges' persistent
+    /// names, every edge named exactly and no two alike: read again in the same order with the
+    /// same curves, each curve is the same edge wherever the face went, so the points it moved
+    /// need no nearness to where they were to keep their ids (#18711). They must still lie on
+    /// the same loops of the face (an outer rim is never taken for a hole).
+    pub fn update_link_in_name_order(&mut self, id: &str, geom: &[LinkGeom]) -> Result<bool> {
+        self.update_link_read(id, geom, true)
+    }
+
+    fn update_link_read(&mut self, id: &str, geom: &[LinkGeom], in_name_order: bool) -> Result<bool> {
         let Some(kind) = self.link(id).map(|l| l.kind) else {
             return Err(SketchError::Unknown(id.into()));
         };
@@ -1303,9 +1316,18 @@ impl Sketch {
             // it was. The two end corners of a thin arm have the same lines; the lines leave them
             // in opposite senses, which tells them apart when the box the points are compared in
             // shrinks with the face (#12086).
-            same_order_agrees = same
+            // Read in the order of the edges' names, the same reading is the same edges: each
+            // point is where the same edges meet, so it need only be on the same loops.
+            let named_order_agrees = in_name_order
+                && same
                 && loop_roles.as_ref().is_some_and(|roles| {
-                    (0..points.len()).all(|k| {
+                    (0..points.len())
+                        .all(|k| order.get(k).is_some_and(|fresh_i| roles.old.get(k).is_some_and(|old| roles.fresh.get(*fresh_i) == Some(old))))
+                });
+            same_order_agrees = named_order_agrees
+                || same
+                    && loop_roles.as_ref().is_some_and(|roles| {
+                        (0..points.len()).all(|k| {
                         let (Some(&fresh_i), Some(p)) = (order.get(k), a.get(k)) else { return false };
                         let mut candidates: Vec<(usize, f64)> = b
                             .iter()
@@ -1321,7 +1343,7 @@ impl Sketch {
                         candidates.sort_by(|x, y| x.1.total_cmp(&y.1));
                         matches!(candidates.first(), Some((i, d)) if *i == fresh_i && candidates.get(1).is_none_or(|(_, second)| *d < *second * 0.75))
                     })
-                });
+                    });
         }
         // Equal topology alone does not identify a face boundary: an outer rim and a
         // hole can have identical point graphs. Never move saved curve ids between them

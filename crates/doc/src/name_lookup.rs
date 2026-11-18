@@ -85,6 +85,11 @@ impl BodyEdges {
         self.names.get(i).map(String::as_str)
     }
 
+    /// Every edge's persistent name, by edge index.
+    pub(crate) fn into_names(self) -> Vec<String> {
+        self.names
+    }
+
     pub(crate) fn verified(&self, i: usize) -> bool {
         self.mesh.edge_faces.get(i).is_some_and(|fs| fs.iter().all(|f| self.faces.verified(*f as usize)))
             && self.names.get(i).is_some_and(|n| strip_edge_number(n).len() == n.len())
