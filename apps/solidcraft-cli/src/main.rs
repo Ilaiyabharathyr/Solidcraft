@@ -164,7 +164,7 @@ fn main() -> ExitCode {
     let profiling = match profiling {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("error: {e}");
+            solidcraft_engine::note!("error: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -173,7 +173,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if let Err(e) = plugin_limits(&mut args) {
-        eprintln!("error: {e}");
+        solidcraft_engine::note!("error: {e}");
         return ExitCode::FAILURE;
     }
     if let Err(e) = plugins_dir(&mut args) {
@@ -439,7 +439,7 @@ fn load_with(path: &str, check: solidcraft_engine::schema::ParamCheck, validatio
     let s = read_session(path, check, validation)?;
     // A newer SolidCraft's file opens all the same; stderr says so, stdout stays the caller's.
     for warning in s.doc.newer_file.iter().flat_map(|file| file.warnings()) {
-        eprintln!("{path}: warning: {warning}");
+        solidcraft_engine::note!("{path}: warning: {warning}");
     }
     Ok(s)
 }
@@ -479,9 +479,11 @@ fn read_session(
 fn warn_if_open_elsewhere(path: &str) {
     use solidcraft_engine::io::design_lock;
     if let Some(lock) = design_lock::held_elsewhere(std::path::Path::new(path), design_lock::now_secs()) {
-        eprintln!(
+        solidcraft_engine::note!(
             "{path}: warning: open in SolidCraft {} by {} on {}; saved all the same, and that window still shows the design it opened",
-            lock.app, lock.user, lock.host
+            lock.app,
+            lock.user,
+            lock.host
         );
     }
 }
@@ -1026,7 +1028,7 @@ fn cmd_mcp(args: &[String]) -> Result<(), String> {
     install_renderer();
     let options = solidcraft_mcp::Options::from_args_and_env(args).map_err(|e| format!("mcp: {e}"))?;
     if options.compact {
-        eprintln!("solidcraft mcp: compact output (inspect_design summarises sketches; tool JSON is not pretty-printed)");
+        solidcraft_engine::note!("solidcraft mcp: compact output (inspect_design summarises sketches; tool JSON is not pretty-printed)");
     }
     let allowed: Vec<std::path::PathBuf> = flags(args, "--allow-path").into_iter().map(std::path::PathBuf::from).collect();
     let scope = (!args.iter().any(|a| a == "--allow-any-path")).then(|| solidcraft_mcp::agent_scope(allowed.iter().cloned()));
@@ -1035,7 +1037,7 @@ fn cmd_mcp(args: &[String]) -> Result<(), String> {
         // agent with nothing it asked for stops the start rather than serving a scope it didn't mean.
         let ignored: Vec<&solidcraft_engine::io::vfs::RejectedRoot> = s.rejected().iter().filter(|r| allowed.contains(&r.path)).collect();
         for r in &ignored {
-            eprintln!("solidcraft mcp: allow-path {} ignored: {}", r.path.display(), r.reason);
+            solidcraft_engine::note!("solidcraft mcp: allow-path {} ignored: {}", r.path.display(), r.reason);
         }
         if !allowed.is_empty()
             && args.iter().any(|a| a == "--require-allow-path")
