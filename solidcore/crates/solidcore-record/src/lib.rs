@@ -21,6 +21,7 @@ pub mod brep;
 pub mod cell_grid;
 #[allow(missing_docs)]
 pub mod hatch;
+pub mod living_hinge;
 pub mod native;
 pub mod plane;
 // Profiles are SolidCraft's sketch wire format, carried over as it is: each variant says what it

@@ -55,6 +55,7 @@ pub mod geom;
 pub mod hatch;
 pub mod heal;
 pub mod intersect;
+pub mod living_hinge;
 pub mod mass;
 pub mod nurbs;
 pub mod offset;
