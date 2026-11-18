@@ -90,6 +90,35 @@ fn the_board_stands_with_its_lower_left_corner_at_the_origin() {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
+/// KiCad 10's 3D library has each model only as a zipped `….stpZ`, while a board drawn with older
+/// footprints names `….wrl` or `….step`: the reference is answered by the `….stpZ` beside it.
+#[test]
+fn a_model_named_in_another_format_is_read_from_the_stpz_beside_it() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!("solidcraft-kicad-stpz-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(dir.join("part.stpZ")).unwrap());
+    zip.start_file("part.step", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)).unwrap();
+    zip.write_all(include_bytes!("../../../../tests/step-conformance/cylinder.step")).unwrap();
+    zip.finish().unwrap();
+    let path = dir.join("board.kicad_pcb");
+    std::fs::write(
+        &path,
+        r#"(kicad_pcb (general (thickness 1.6))
+  (gr_rect (start 0 0) (end 20 10) (layer "Edge.Cuts"))
+  (footprint "part" (at 5 5) (layer "F.Cu") (property "Reference" "U1")
+    (model "${KIPRJMOD}/part.wrl")))"#,
+    )
+    .unwrap();
+    let mut s = Session::default();
+    let r = run(&mut s, "doc.open", json!({"path": path.to_string_lossy()}));
+    assert_eq!(r["subcomponents"], json!(1), "{r}");
+    let warnings = r["warnings"].as_array().cloned().unwrap_or_default();
+    assert!(warnings.iter().all(|w| !w.as_str().unwrap_or("").contains("part.")), "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_bad_option_is_refused_before_the_board_is_read() {
     let path = board_file("bad", 2.0);

@@ -1114,7 +1114,7 @@ fn read_kicad_model(path: &str) -> std::io::Result<solidcraft_io::KicadModelFile
     let Some(stem) = named.file_stem() else { return Err(missing) };
     let Some(dir) = named.parent() else { return Err(missing) };
     let format = named.extension().and_then(|e| e.to_str()).unwrap_or("");
-    for other in ["step", "stp", "wrl"] {
+    for other in ["step", "stp", "stpZ", "wrl"] {
         if other.eq_ignore_ascii_case(format) {
             continue;
         }
