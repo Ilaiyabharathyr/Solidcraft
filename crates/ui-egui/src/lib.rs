@@ -521,7 +521,9 @@ pub struct Services {
     pub pick_file: Option<Box<dyn Fn(&str, &[&str]) -> FilePickerFuture>>,
     /// Open a dialog asking for a program (a slicer); `None` when the host has no such dialog.
     pub pick_program: Option<Box<dyn Fn() -> FilePickerFuture>>,
-    /// Select the local document library root; unavailable in browser hosts.
+    /// Open a dialog asking for a folder. `None` on the web build: a plugin field's Browse
+    /// does nothing and the text field still accepts a pasted path, and the document library
+    /// cannot choose a folder.
     pub pick_folder: Option<Box<dyn Fn() -> FilePickerFuture>>,
     pub show_in_folder: Option<Box<dyn Fn(&str)>>,
     /// Where the host reads the anti-aliasing preference at start (a small JSON file).
