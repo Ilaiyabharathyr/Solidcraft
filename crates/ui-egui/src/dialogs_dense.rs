@@ -497,6 +497,7 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
             to_offset,
             start,
             offset_start,
+            symmetric_offset,
             all,
             thin,
             wall,
@@ -604,6 +605,9 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
                 });
                 if st != 0 {
                     enter |= expr_row(ui, "Offset", start);
+                    if *direction == 2 && st == 1 {
+                        form_row(ui, "Symmetric Offset", |ui| check(ui, symmetric_offset));
+                    }
                 }
                 if *direction < 2 {
                     form_row(ui, "Taper Angle", |ui| {
