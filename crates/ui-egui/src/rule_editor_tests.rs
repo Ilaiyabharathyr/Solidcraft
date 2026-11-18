@@ -8,6 +8,7 @@ const SHEET_ROWS: &[&str] = &[
     "Thickness",
     "K Factor",
     "Bend Radius",
+    "Bend Relief Shape",
     "Relief Width",
     "Relief Depth",
     "Corner Relief Shape",

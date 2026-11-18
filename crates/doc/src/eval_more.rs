@@ -775,7 +775,19 @@ pub(super) fn sheet_eval(
             st.sheets.push(sh);
             Ok(())
         }
-        FeatureKind::SheetFlange { edges, height, angle, radius, position, flip, body, corner_relief_shape, corner_relief, height_from } => {
+        FeatureKind::SheetFlange {
+            edges,
+            height,
+            angle,
+            radius,
+            position,
+            flip,
+            body,
+            corner_relief_shape,
+            corner_relief,
+            height_from,
+            bend_relief_shape,
+        } => {
             let i = sheet_for(st, body, edges.first().map(|e| e.point.0))?;
             let (h, a) = (val(vals, height, Kind::Length)?, val(vals, angle, Kind::Angle)?);
             // Each edge's own height and angle, else the feature's.
@@ -806,6 +818,13 @@ pub(super) fn sheet_eval(
                 },
                 size: match corner_relief {
                     Some(e) => Some(val(vals, e, Kind::Length)?),
+                    None => None,
+                },
+                bend_shape: match bend_relief_shape {
+                    Some(name) => Some(
+                        sheet::BendReliefShape::parse(name)
+                            .ok_or_else(|| DocError::Invalid(format!("unknown bend relief shape `{name}` (rectangular, obround or tear)")))?,
+                    ),
                     None => None,
                 },
             };
