@@ -745,7 +745,7 @@ pub(super) fn sheet_eval(
             }
             Ok(())
         }
-        FeatureKind::SheetContour { sketch, curves, distance, rule, flip, reverse } => {
+        FeatureKind::SheetContour { sketch, curves, distance, radius, rule, orientation, symmetric, flip, reverse } => {
             let ss = st.sketch(sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {sketch}")))?.clone();
             let segs = chain_segs(&ss, &ss.chain_order(curves)?)?;
             let w = val(vals, distance, Kind::Length)?;
@@ -753,7 +753,15 @@ pub(super) fn sheet_eval(
                 return Err(DocError::Invalid("the contour flange distance must be positive".into()));
             }
             let r = doc.sheet_rule(rule.as_deref());
-            let rv = doc.rule_values(vals, &r)?;
+            let mut rv = doc.rule_values(vals, &r)?;
+            if let Some(radius) = radius {
+                rv.bend_radius = val(vals, radius, Kind::Length)?;
+                if !(rv.bend_radius >= 0.0 && rv.bend_radius < 1e4) {
+                    return Err(DocError::Invalid("the contour flange bend radius must be non-negative".into()));
+                }
+            }
+            // `reverse` (Other side) mirrors the sketch, taking the width to the other side of
+            // its plane, with an orientation saved or not.
             let plane = if *reverse { Plane { origin: ss.plane.origin, x: ss.plane.x, y: ss.plane.y * -1.0 } } else { ss.plane };
             let segs: Vec<Seg2> = if *reverse {
                 segs.iter()
@@ -767,9 +775,10 @@ pub(super) fn sheet_eval(
             } else {
                 segs
             };
+            let orientation = orientation.as_deref().unwrap_or("side1");
             // Mirroring the sketch swaps the material side too.
             let name = new_name(st, f, 0);
-            let sh = sheet::contour_flange_path(&name, &r.name, &rv, &plane, &segs, w, *flip != *reverse)?;
+            let sh = sheet::contour_flange_path(&name, &r.name, &rv, &plane, &segs, w, orientation, *symmetric, *flip != *reverse)?;
             let solid = sh.solid()?;
             st.bodies.push(ModelBody::new(name, solid, f.id));
             st.sheets.push(sh);
