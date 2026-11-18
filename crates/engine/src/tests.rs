@@ -5136,6 +5136,139 @@ fn extrude_to_a_slanted_face_reaches_its_plane_and_stops_at_material_first() {
     assert!((lo - 2.5).abs() < 1e-6 && (hi - 40.0).abs() < 1e-6 && rel(v, 4050.0) < 1e-9, "{lo} {hi} {v}");
 }
 
+/// A 20 mm block, z 0 to 10, with a slot 2 mm wide cut through it whose walls slant across X:
+/// x = 4 (y + 11) / 7 and 2 mm further along x, from the block's side at y -10 to y -4, where
+/// the slot ends. Its volume is 4000 - 6 * 2 * 10 = 3880 mm3. Ends in an open sketch on the
+/// plane x 3, whose x and y run along world Y and Z.
+fn slanted_slot_block(s: &mut Session) {
+    run(s, "solid.box", json!({"corner": [-10, -10, 0], "length": 20, "width": 20, "height": 10, "body_name": "Block", "name": "Block"}));
+    run(s, "sketch.create", json!({"plane": "XY", "name": "SlotSketch"}));
+    run(s, "sketch.line", json!({"closed": true, "points": [[0, -11], [2, -11], [6, -4], [4, -4]]}));
+    run(s, "sketch.finish", json!({}));
+    run(s, "solid.extrude", json!({"sketch": "SlotSketch", "distance": 20, "operation": "cut", "name": "Slot"}));
+    run(s, "sketch.create", json!({"plane": "YZ", "offset": 3, "name": "Across"}));
+}
+
+/// From one slanted wall of a slot To the other runs between the two walls' planes (#18825).
+/// The walls lie 2 mm apart along the extrusion everywhere, so the prism over a square 2 mm
+/// across, y -5 to -3 and z 4 to 6, holds 8 mm3: a new body over x 4 (6 / 7) to 2 + 4 (8 / 7).
+/// As a cut it removes only the half past the slot's end, y -4 to -3, 4 mm3. The same square
+/// moved to y -7 to -5 lies wholly in the slot, so its cut removes nothing and says so. From the
+/// slanted wall To the block's flat side at x 10, the square at y -3 to -1 starts on the wall's
+/// plane, x 4 (8 / 7) at y -3, and holds 2 (2 * 10 - 4 * 18 / 7) = 136 / 7 mm3.
+#[test]
+fn extrude_from_a_slanted_face_to_another_runs_between_their_planes() {
+    let square = |s: &mut Session, y: f64| {
+        run(s, "sketch.rectangle.two_point", json!({"p0": [y, 4], "p1": [y + 2.0, 6]}));
+        run(s, "sketch.finish", json!({}));
+    };
+    let walls = json!({"sketch": "Across", "from": [20.0 / 7.0, -6, 5], "to": [2.0 + 20.0 / 7.0, -6, 5]});
+    let with = |base: &Value, extra: Value| {
+        let mut p = base.clone();
+        for (k, v) in extra.as_object().into_iter().flatten() {
+            p[k] = v.clone();
+        }
+        p
+    };
+    let x_span_and_volume = |s: &mut Session, body: &str| {
+        let m = run(s, "inspect.measure", json!({"bodies": [body]}));
+        let b = &m["bodies"][0];
+        let f = |v: &Value| v.as_f64().unwrap_or(f64::NAN);
+        (f(&b["bbox"]["min"][0]), f(&b["bbox"]["max"][0]), f(&b["volume_mm3"]))
+    };
+    let warning = |s: &Session| s.model.results.last().and_then(|r| r.warning.clone()).unwrap_or_default();
+
+    let mut s = Session::default();
+    slanted_slot_block(&mut s);
+    assert!(rel(volume(&mut s), 3880.0) < 1e-9, "{}", volume(&mut s));
+    square(&mut s, -5.0);
+    run(&mut s, "solid.extrude", with(&walls, json!({"operation": "new", "body_name": "Fill"})));
+    let (lo, hi, v) = x_span_and_volume(&mut s, "Fill");
+    assert!((lo - 24.0 / 7.0).abs() < 1e-6 && (hi - (2.0 + 32.0 / 7.0)).abs() < 1e-6 && rel(v, 8.0) < 1e-9, "{lo} {hi} {v}");
+    assert!(!warning(&s).contains("From Object starts on a plane"), "{:?}", warning(&s));
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "solid.extrude", with(&walls, json!({"operation": "cut", "name": "Notch"})));
+    assert!(rel(volume(&mut s), 3876.0) < 1e-9, "{} {:?}", volume(&mut s), warning(&s));
+    assert!(!warning(&s).contains("removes no material"), "{:?}", warning(&s));
+
+    let mut s = Session::default();
+    slanted_slot_block(&mut s);
+    square(&mut s, -7.0);
+    run(&mut s, "solid.extrude", with(&walls, json!({"operation": "cut", "name": "InTheSlot"})));
+    assert!(rel(volume(&mut s), 3880.0) < 1e-9, "{}", volume(&mut s));
+    assert!(warning(&s).contains("the cut removes no material"), "{:?}", warning(&s));
+
+    let mut s = Session::default();
+    slanted_slot_block(&mut s);
+    square(&mut s, -3.0);
+    run(&mut s, "solid.extrude", json!({"sketch": "Across", "from": [20.0 / 7.0, -6, 5], "to": [10, 5, 5], "operation": "new", "body_name": "Fill"}));
+    let (lo, hi, v) = x_span_and_volume(&mut s, "Fill");
+    assert!((lo - 32.0 / 7.0).abs() < 1e-6 && (hi - 10.0).abs() < 1e-6 && rel(v, 136.0 / 7.0) < 1e-9, "{lo} {hi} {v}");
+}
+
+/// What an extrude From a slanted wall of `slanted_slot_block` with To Object does not run
+/// between the two planes for (#18825). With a second side it starts at the From pick's level,
+/// x 20 / 7, as before, and says why: the square at y -3 to -1 runs from x 20 / 7 - 3 to the
+/// block's side at x 10, 4 (10 + 1 / 7) = 284 / 7 mm3. To the plane x 4.6, which crosses the
+/// wall's plane over the square at y -5 to -1, it is refused rather than dropping part of the
+/// profile. An extrude marked to start at the From face's level (`from_level`, as a design saved
+/// with From and To is) starts on the wall once an edit takes To off, as a new one does: x 4 (8 /
+/// 7) to 4 (10 / 7) + 3. A pin hole 1 mm across in a 1 m cube is a cut, and says nothing.
+#[test]
+fn extrude_from_a_slanted_face_with_to_and_a_second_side_crossing_planes_or_to_taken_off() {
+    let warning = |s: &Session| s.model.results.last().and_then(|r| r.warning.clone()).unwrap_or_default();
+    let x_span_and_volume = |s: &mut Session, body: &str| {
+        let m = run(s, "inspect.measure", json!({"bodies": [body]}));
+        let b = &m["bodies"][0];
+        let f = |v: &Value| v.as_f64().unwrap_or(f64::NAN);
+        (f(&b["bbox"]["min"][0]), f(&b["bbox"]["max"][0]), f(&b["volume_mm3"]))
+    };
+    let wall = json!([20.0 / 7.0, -6, 5]);
+    let square = |s: &mut Session, y0: f64, y1: f64| {
+        run(s, "sketch.rectangle.two_point", json!({"p0": [y0, 4], "p1": [y1, 6]}));
+        run(s, "sketch.finish", json!({}));
+    };
+
+    let mut s = Session::default();
+    slanted_slot_block(&mut s);
+    square(&mut s, -3.0, -1.0);
+    run(
+        &mut s,
+        "solid.extrude",
+        json!({"sketch": "Across", "from": wall, "to": [10, 5, 5], "distance2": 3, "operation": "new", "body_name": "Fill"}),
+    );
+    let (lo, hi, v) = x_span_and_volume(&mut s, "Fill");
+    assert!((lo - (20.0 / 7.0 - 3.0)).abs() < 1e-6 && (hi - 10.0).abs() < 1e-6 && rel(v, 284.0 / 7.0) < 1e-9, "{lo} {hi} {v}");
+    assert!(warning(&s).contains("second side"), "{:?}", warning(&s));
+
+    let mut s = Session::default();
+    slanted_slot_block(&mut s);
+    square(&mut s, -5.0, -1.0);
+    let crossed =
+        s.execute("solid.extrude", &json!({"sketch": "Across", "from": wall, "to": [4.6, 30, 30], "operation": "new", "body_name": "Fill"}));
+    assert!(crossed.as_ref().is_err_and(|e| e.to_string().contains("cross over the profile")), "{crossed:?}");
+
+    let mut s = Session::default();
+    slanted_slot_block(&mut s);
+    square(&mut s, -3.0, -1.0);
+    run(&mut s, "solid.extrude", json!({"sketch": "Across", "from": wall, "to": [10, 5, 5], "operation": "new", "body_name": "Fill", "name": "FT"}));
+    run(&mut s, "timeline.edit", json!({"feature": "FT", "set": {"extent": {"from_level": true}}}));
+    let (lo, _, _) = x_span_and_volume(&mut s, "Fill");
+    assert!((lo - 20.0 / 7.0).abs() < 1e-6, "{lo}");
+    run(&mut s, "timeline.edit", json!({"feature": "FT", "set": {"extent": {"to": null, "distance": "3"}}}));
+    let (lo, hi, v) = x_span_and_volume(&mut s, "Fill");
+    assert!((lo - 32.0 / 7.0).abs() < 1e-6 && (hi - (40.0 / 7.0 + 3.0)).abs() < 1e-6 && rel(v, 12.0) < 1e-9, "{lo} {hi} {v}");
+
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"corner": [0, 0, 0], "length": 1000, "width": 1000, "height": 1000, "name": "Big"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "offset": 1000, "name": "Pin"}));
+    run(&mut s, "sketch.circle.center", json!({"center": [500, 500], "radius": 0.5}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"sketch": "Pin", "distance": -1, "operation": "cut", "name": "PinHole"}));
+    assert!(rel(volume(&mut s), 1e9 - PI * 0.25) < 1e-12, "{}", volume(&mut s));
+    assert!(!warning(&s).contains("removes no material"), "{:?}", warning(&s));
+}
+
 /// Revolve Two Sides, Symmetric and To Object.
 #[test]
 fn revolve_two_sides_symmetric_and_to_object() {
