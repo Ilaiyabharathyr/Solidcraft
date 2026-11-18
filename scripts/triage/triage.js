@@ -12,15 +12,20 @@ const MAX_TOKENS = 10;
 const MAX_TEXT = 20000;
 
 // Changed paths of a PR → area. First match wins per file.
+// `crates/engine` spans every area: only its command files name one (see classifyPaths).
 const PATH_AREAS = [
   [/^crates\/sketch\//, 'area:sketch'],
-  [/^crates\/(kernel|geom)\//, 'area:kernel'],
+  [/^crates\/(kernel|geom|smlib)\//, 'area:kernel'],
   [/^solidcore\//, 'area:kernel'],
   [/^crates\/doc\//, 'area:doc'],
-  [/^crates\/io\//, 'area:io'],
-  [/^crates\/(render|gpu)\//, 'area:render'],
-  [/^(crates\/(ui-egui|space-mouse|threedx-client)|apps\/(solidcraft|solidcraft-web))\//, 'area:ui'],
-  [/^(\.github\/|xtask\/|scripts\/|tools\/|docs\/|packaging\/|[^/]+\.md$)/, 'area:infra'],
+  [/^crates\/dynamics\//, 'area:assemblies'],
+  [/^crates\/(io|format)\//, 'area:io'],
+  [/^(crates\/(render|gpu|viewport-gpu|look|color)|assets\/(render|materials|appearances))\//, 'area:render'],
+  [
+    /^(crates\/(ui-egui|ui-kit|ui-registry|ui-text|theme|display-units|viewport|viewport-egui|space-mouse|threedx-client|control|control-egui|mcp|mcp-server)|apps\/(solidcraft|solidcraft-web)|assets)\//,
+    'area:ui',
+  ],
+  [/^(\.github\/|xtask\/|scripts\/|skills\/|tools\/|docs\/|packaging\/|apps\/solidcraft-cli\/|crates\/(derive|profile|testkit)\/|[^/]+\.md$)/, 'area:infra'],
 ];
 
 // Command id prefix (the in-app reports quote it) → area.
@@ -46,6 +51,19 @@ const COMMAND_AREAS = {
   view: 'area:ui',
   browser: 'area:ui',
   selection: 'area:ui',
+};
+
+// An engine command or schema file is named after its command family (`cmd/file_import.rs` →
+// `file`, `cmd/joints.rs` → `joint`): the command table, plus families no report quotes.
+const ENGINE_FAMILIES = {
+  ...COMMAND_AREAS,
+  edit: 'area:doc',
+  face: 'area:kernel',
+  feature: 'area:kernel',
+  inspect: 'area:ui',
+  measure: 'area:ui',
+  script: 'area:doc',
+  select: 'area:ui',
 };
 
 // Words in an issue's title → area. Conservative: a miss leaves the issue for a person.
@@ -80,6 +98,22 @@ function section(body, name) {
 
 function labelNames(item) {
   return (item.labels || []).map((l) => (typeof l === 'string' ? l : l.name));
+}
+
+function hasArea(item) {
+  return labelNames(item).some((l) => l.startsWith('area:'));
+}
+
+// Whether a PR's area is settled: it carries an `area:*` label, or one was ever added (so a
+// maintainer who removed the last one is not overruled). A claim opens with no paths and no area.
+async function areaSettled(github, context, item) {
+  if (hasArea(item)) return true;
+  const events = await github.paginate(github.rest.issues.listEvents, {
+    ...repoArgs(context),
+    issue_number: item.number,
+    per_page: 100,
+  });
+  return events.some((e) => e.event === 'labeled' && e.label && e.label.name.startsWith('area:'));
 }
 
 function hasPriority(names) {
@@ -121,6 +155,12 @@ function classifyIssue(title, body) {
 function classifyPaths(paths) {
   const labels = new Set();
   for (const p of paths) {
+    const word = (/^crates\/engine\/src\/(?:cmd|schema)\/([a-z]+)/.exec(p) || [])[1];
+    const family = [word, word && word.replace(/s$/, '')].find((w) => w && Object.hasOwn(ENGINE_FAMILIES, w));
+    if (family) {
+      labels.add(ENGINE_FAMILIES[family]);
+      continue;
+    }
     for (const [re, area] of PATH_AREAS) {
       if (re.test(p)) {
         labels.add(area);
@@ -180,6 +220,8 @@ async function handleOpened({ github, context }) {
   const pull = context.payload.pull_request;
   const item = issue || (pull && { ...pull, pull_request: {} });
   if (!item || item.state !== 'open') return [];
+  // Marked ready: a claim opened with no paths. Once it has had an area, a maintainer's change stands.
+  if (context.payload.action === 'ready_for_review' && (await areaSettled(github, context, item))) return [];
   const labels = await proposal(github, context, item);
   await apply(github, context, item.number, labels);
   return labels;
@@ -283,7 +325,8 @@ async function backfill({ github, context, dryRun = true }) {
   });
   const plan = [];
   for (const item of items) {
-    if (labelNames(item).length || item.locked) continue;
+    // A PR is labelled while it has never had an area, whatever else it carries (`approved-for-ci`, ...).
+    if (item.locked || (item.pull_request ? await areaSettled(github, context, item) : labelNames(item).length)) continue;
     const labels = await proposal(github, context, item);
     plan.push({ number: item.number, pull: Boolean(item.pull_request), title: item.title, labels });
     if (!dryRun) await apply(github, context, item.number, labels);
