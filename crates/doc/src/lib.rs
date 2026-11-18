@@ -30,6 +30,7 @@ mod document;
 pub mod drawing;
 pub mod drawing_view;
 pub mod end_cap;
+mod envelope;
 mod eval;
 pub mod expr;
 pub mod face_anchor;
