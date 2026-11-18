@@ -481,6 +481,8 @@ pub struct Evaluated(solidcraft_doc::Model);
 /// ([`Session::preview`]). The session itself is not changed.
 #[derive(Clone, Debug)]
 pub struct Preview {
+    /// The scratch document, including the placements used by the displayed result.
+    pub document: Arc<Document>,
     /// The model now.
     pub before: Arc<ModelState>,
     /// The model after the commands.
@@ -3022,12 +3024,24 @@ impl Session {
         }
     }
 
+    /// Read a primary origin for the Joint dialog without modifying the session.
+    pub fn joint_origin_for_alignment(&self, params: &serde_json::Value) -> Result<doc::joints::JointOrigin> {
+        cmd::joints::origin_param(self, Some(params), "joint.create")
+    }
+
+    /// Validate a secondary selection through the command resolver without authoring it.
+    pub fn joint_alignment_frame(&self, origin: doc::joints::JointOrigin, alignment: &serde_json::Value) -> Result<doc::Mat> {
+        let origin = cmd::joints::alignment_param(self, origin, Some(alignment), "joint.create")?;
+        doc::joints::resolve_origin(&self.doc, &self.model.state(), &origin).map_err(Into::into)
+    }
+
     /// Live preview: run `commands` (id, parameters) on a scratch copy and return the model
     /// before and after. Nothing in this session changes (document, undo history, selection).
     /// A `timeline.redefine` is shown even while the timeline is rolled back to the feature
     /// being edited.
     pub fn preview(&self, commands: &[(String, Value)]) -> Result<Preview> {
         self.scratch().preview_in_place(commands, None).map(|(after, replies)| Preview {
+            document: after.doc.clone(),
             before: self.model.state(),
             after: after.model.state(),
             replies,
@@ -3037,7 +3051,7 @@ impl Session {
     /// The same evaluated preview in occurrence coordinates, including uncaptured moves.
     pub fn preview_world(&self, commands: &[(String, Value)]) -> Result<Preview> {
         let (after, replies) = self.scratch().preview_in_place(commands, None)?;
-        Ok(Preview { before: self.world_state()?, after: after.world_state()?, replies })
+        Ok(Preview { document: after.doc.clone(), before: self.world_state()?, after: after.world_state()?, replies })
     }
 
     /// World preview with each session's visibility applied, including new body placements.
@@ -3049,7 +3063,7 @@ impl Session {
             Ok(Arc::new(shown))
         };
         let (after, replies) = self.scratch().preview_in_place(commands, None)?;
-        Ok(Preview { before: visible(self)?, after: visible(&after)?, replies })
+        Ok(Preview { document: after.doc.clone(), before: visible(self)?, after: visible(&after)?, replies })
     }
 
     /// Run `commands` on a [`Session::scratch`] copy that keeps the undo and redo stacks: what
