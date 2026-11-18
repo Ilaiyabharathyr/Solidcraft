@@ -30,7 +30,7 @@ mod interface;
 mod mouse3d;
 mod navbar;
 mod navigation;
-mod panel_layout;
+pub(crate) mod panel_layout;
 mod security;
 mod sketch;
 mod theme_picker;
