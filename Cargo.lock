@@ -6468,6 +6468,7 @@ dependencies = [
  "log",
  "percent-encoding",
  "serde_json",
+ "sha2 0.10.9",
  "solidcraft-control",
  "solidcraft-engine",
  "solidcraft-look",
