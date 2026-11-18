@@ -1207,9 +1207,27 @@ pub struct ListJointsResult {
     pub origins: Vec<ListedOrigin>,
     /// Joint chains joined to nothing grounded.
     pub floating: Vec<FloatingChain>,
+    /// Every rigid group: the parts an import placed, held where they are in their parents, one
+    /// row however many parts it holds. Absent when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rigid_groups: Vec<ListedRigidGroup>,
     /// In the warn parameter-check mode: what the call's parameters got wrong.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_warnings: Vec<String>,
+}
+
+/// A rigid group as `joint.list` gives it.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ListedRigidGroup {
+    /// Its id.
+    pub id: u64,
+    /// Its name: the component's when it was made.
+    pub name: String,
+    /// The import's component; `component.unlock` on it releases the parts.
+    pub component: u64,
+    /// How many occurrences it holds.
+    pub members: usize,
 }
 
 /// List the joints, motion links and joint origins, with the solve.
