@@ -22,7 +22,7 @@ const TABS_KEPT: f32 = 124.0;
 /// The least width of a document tab before the tabs scroll behind the » list.
 const MIN_TAB: f32 = 90.0;
 /// The expanded design tab (option A): its height and corner radius.
-const DESIGN_PILL_HEIGHT: f32 = 34.0;
+const DESIGN_PILL_HEIGHT: f32 = 30.0;
 const PILL_RADIUS: u8 = 8;
 /// The room a pill keeps right of its views: the +, a separator, the close button and its padding.
 const PILL_AFTER: f32 = 63.0;
@@ -388,6 +388,18 @@ fn icon_button(ui: &mut egui::Ui, bar: Rect, at: f32, b: &BarButton, compact: bo
     b.enabled && clicked
 }
 
+/// Draws the app mark and optional title at the leading edge of a window's bar.
+/// Returns the right edge of the brand so the window can place its next control.
+pub fn paint_brand(painter: &Painter, content: Rect, mark: &dyn Fn(&Painter, Pos2), name: Option<&str>) -> f32 {
+    let left = content.left();
+    let y = content.center().y;
+    mark(painter, pos2(left + 20.0, y));
+    name.map_or(left + 32.0, |name| {
+        let t = Tokens::get();
+        painter.text(pos2(left + 36.0, y), Align2::LEFT_CENTER, name, crate::type_face::semibold(t.font_heading), t.app_bar_text).right()
+    })
+}
+
 /// Draws the bar in `bar`, its controls within `content` (the title bar's room between the
 /// window's own buttons).
 pub fn show(ui: &mut egui::Ui, data: &AppBar, bar: Rect, content: Rect) -> BarOut {
@@ -397,20 +409,13 @@ pub fn show(ui: &mut egui::Ui, data: &AppBar, bar: Rect, content: Rect) -> BarOu
     let left = content.left();
     let compact = r.right() - left < COMPACT;
     let mut actions = Vec::new();
-    (data.mark)(ui.painter(), pos2(left + 20.0, r.center().y));
+    let brand_end = paint_brand(ui.painter(), content, data.mark, (!compact).then_some(data.name));
     // Home's place: after the name as drawn, and never before HOME_MIN.
     let mut x = if compact {
         left + 56.0
     } else {
-        let name = ui.painter().text(
-            pos2(left + 36.0, r.center().y),
-            Align2::LEFT_CENTER,
-            data.name,
-            crate::type_face::semibold(t.font_heading),
-            t.app_bar_text,
-        );
         // Home's button starts 20 before its place (32 wide, centred 4 before it).
-        (left + HOME_MIN).max(name.right() + NAME_GAP + 20.0)
+        (left + HOME_MIN).max(brand_end + NAME_GAP + 20.0)
     };
     let leading = data.leading.map(|size| {
         let rect = Rect::from_center_size(pos2(x, r.center().y), size);
@@ -2051,7 +2056,7 @@ pub fn tabs_with_view_drop_zones(ui: &mut egui::Ui, strip: &mut TabStrip, r: Rec
         let plain = kind == SelectedLayout::Plain;
         let height = match kind {
             SelectedLayout::Plain => r.height() - 8.0,
-            SelectedLayout::Pill => DESIGN_PILL_HEIGHT.min(r.height() - 2.0),
+            SelectedLayout::Pill => DESIGN_PILL_HEIGHT.min(r.height() - 4.0),
             SelectedLayout::Switcher => 30.0_f32.min(r.height() - 4.0),
         };
         let tr = Rect::from_center_size(pos2(left + (w - 2.0) / 2.0, r.center().y), vec2(w - 2.0, height));
