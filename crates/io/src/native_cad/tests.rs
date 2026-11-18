@@ -368,7 +368,7 @@ fn by_step_text(ir: &cadmpeg_ir::document::CadIr) -> (Result<solidcraft_kernel::
 
 /// The route they take with the cadmpeg reader: the neutral model read into records, the records made into bodies.
 fn by_records(ir: &cadmpeg_ir::document::CadIr) -> (Result<solidcraft_kernel::StepImport, String>, Vec<String>) {
-    let records = cadir_records(ir, "compared", "test");
+    let records = cadir_records(ir, "compared", "test", true);
     let warnings = records.warnings.clone();
     (solidcraft_kernel::records_import(&records).map_err(|e| e.to_string()), warnings)
 }
@@ -447,15 +447,10 @@ fn compared_parts() -> Vec<(String, Vec<u8>)> {
 /// angle that is a plane.
 const KERNEL_CASES: [&str; 2] = ["3208-extruded-ellipse-face-over-parameter-seam", "4006-plane-written-as-cone-of-nearly-right-angle"];
 
-/// The compared parts whose bodies differ between the two routes, with why: the records do not
-/// yet follow CADIR occurrences, so a part placed in an assembly comes in once and unplaced
-/// (`docs/step-import.md`). None of the FreeCAD and Rhino fixtures has occurrences.
-const DIFFER: [(&str, &str); 2] =
-    [("cylinder_placed.step", "not yet at its assembly placement"), ("cylinder_twice.step", "one body, not one per placement")];
-
 /// Reading the neutral model into records builds the bodies the STEP route built (cadmpeg's
 /// STEP writer, then our STEP reader): the same bodies, each as whole, with as many faces, the
-/// same volume and the same box, for every part in [`compared_parts`] but those in [`DIFFER`].
+/// same volume and the same box, for every part in [`compared_parts`], an assembly's parts at
+/// each of their placements.
 #[test]
 fn records_build_the_bodies_the_step_route_built() {
     let mut differ = Vec::new();
@@ -469,7 +464,49 @@ fn records_build_the_bodies_the_step_route_built() {
             differ.push(name.clone());
         }
     }
-    assert_eq!(differ, DIFFER.map(|(n, _)| n.to_string()), "parts whose bodies differ between the two routes");
+    assert!(differ.is_empty(), "parts whose bodies differ between the two routes: {differ:?}");
+}
+
+/// An assembly read through cadmpeg's STEP decoder has the product tree SolidCraft's own STEP
+/// reader gives it: the same products nested the same way, each placed in its parent, with its
+/// bodies, and each body under its products' names and its occurrence's. A part used twice is
+/// two bodies, one at each placement.
+#[test]
+fn an_assembly_read_into_records_has_the_tree_our_step_reader_gives_it() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/step-conformance");
+    for (name, bodies) in [("cylinder_placed.step", 1), ("cylinder_twice.step", 2)] {
+        let bytes = std::fs::read(dir.join(name)).unwrap();
+        let ours = solidcraft_kernel::step_import(&String::from_utf8_lossy(&bytes)).unwrap();
+        let (theirs, warnings) = by_records(&neutral(&bytes, name));
+        let theirs = theirs.unwrap_or_else(|e| panic!("{name}: {e} {warnings:?}"));
+        assert_eq!(theirs.bodies.len(), bodies, "{name}");
+        assert_eq!(tree_of(&theirs), tree_of(&ours), "{name}");
+        assert!(same_bodies(&built(&theirs), &built(&ours)), "{name}: the bodies differ from our reader's");
+        // The same part placed twice is one part to the design, as with our reader.
+        let parts = |imp: &solidcraft_kernel::StepImport| imp.bodies.iter().map(|b| b.source_item).collect::<std::collections::BTreeSet<_>>().len();
+        assert_eq!(parts(&theirs), parts(&ours), "{name}: parts");
+    }
+}
+
+/// An import's product tree, one line a node: its depth and name, its placement in its parent
+/// (rounded to a micrometre), and each of its bodies' product path and occurrence.
+fn tree_of(imp: &solidcraft_kernel::StepImport) -> Vec<String> {
+    fn walk(nodes: &[solidcraft_kernel::StepNode], imp: &solidcraft_kernel::StepImport, depth: usize, out: &mut Vec<String>) {
+        for n in nodes {
+            let m: Vec<String> = n.transform.iter().flatten().map(|v| format!("{:.3}", v + 0.0)).collect();
+            let bodies: Vec<String> = n
+                .bodies
+                .iter()
+                .filter_map(|b| imp.bodies.get(*b))
+                .map(|b| format!("{}|{}", b.path.join("/"), b.instance.clone().unwrap_or_default()))
+                .collect();
+            out.push(format!("{depth} {} [{}] {bodies:?}", n.name, m.join(" ")));
+            walk(&n.children, imp, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&imp.tree, imp, 0, &mut out);
+    out
 }
 
 /// The import kernel cases read into records build what each case expects: one whole body, its
@@ -531,4 +568,263 @@ fn what_the_records_leave_out_the_step_route_imported_wrongly() {
     assert!(same_bodies(&built(&old.unwrap()), &round), "the STEP route imported the elliptical cone as the round one");
     let (_, warnings) = by_records(&ir);
     assert!(warnings.iter().any(|w| w.contains("an elliptical cone")), "{warnings:?}");
+}
+
+/// A component whose placement mirrors is left out with the reason, and the part's other
+/// placement still comes in.
+#[test]
+fn a_mirrored_component_is_left_out_with_why() {
+    let bytes = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/step-conformance/cylinder_twice.step")).unwrap();
+    let mut ir = neutral(&bytes, "cylinder_twice.step");
+    let mirror = cadmpeg_ir::transform::Transform::affine([[-1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]).unwrap();
+    let leaf = ir.model.occurrences.iter_mut().find(|o| !matches!(o.parent, cadmpeg_ir::products::OccurrenceParent::Root {})).unwrap();
+    leaf.transform = mirror;
+    let records = cadir_records(&ir, "mirrored", "test", true);
+    assert_eq!(records.bodies.len(), 1, "{:?}", records.warnings);
+    assert!(records.warnings.iter().any(|w| w.contains("mirrors")), "{:?}", records.warnings);
+}
+
+/// A part whose every placement is left out (each mirrored, or the assembly that holds them)
+/// does not come in at all, rather than where its file defines it, which the warning would deny.
+#[test]
+fn a_part_whose_every_placement_is_left_out_does_not_come_in() {
+    use cadmpeg_ir::products::{Occurrence, OccurrenceParent};
+    let bytes = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/step-conformance/cylinder_twice.step")).unwrap();
+    let mirror = cadmpeg_ir::transform::Transform::affine([[-1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]).unwrap();
+    let leaves = |o: &Occurrence| !matches!(o.parent, OccurrenceParent::Root {});
+    let root = |o: &Occurrence| matches!(o.parent, OccurrenceParent::Root {});
+    for (which, refused) in [("every placement", &leaves as &dyn Fn(&Occurrence) -> bool), ("the assembly", &root)] {
+        let mut ir = neutral(&bytes, "cylinder_twice.step");
+        for o in ir.model.occurrences.iter_mut().filter(|o| refused(o)) {
+            o.transform = mirror;
+        }
+        let (imp, warnings) = by_records(&ir);
+        let imp = imp.unwrap();
+        assert!(imp.bodies.is_empty(), "{which} mirrored: {} bodies", imp.bodies.len());
+        assert!(warnings.iter().any(|w| w.contains("mirrors")), "{which} mirrored: {warnings:?}");
+    }
+}
+
+/// Occurrences that contain each other end the walk with a warning, never a hang or a panic.
+#[test]
+fn occurrences_in_a_cycle_end_with_a_warning() {
+    let bytes = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/step-conformance/cylinder_twice.step")).unwrap();
+    let mut ir = neutral(&bytes, "cylinder_twice.step");
+    let ids: Vec<_> = ir.model.occurrences.iter().map(|o| o.id.clone()).collect();
+    // Each occurrence's parent the next: a cycle with no root, and one with the root kept.
+    for (k, o) in ir.model.occurrences.iter_mut().enumerate() {
+        o.parent = cadmpeg_ir::products::OccurrenceParent::Occurrence { occurrence: ids[(k + 1) % ids.len()].clone() };
+    }
+    let records = cadir_records(&ir, "cycle", "test", true);
+    assert!(solidcraft_kernel::records_import(&records).is_ok());
+    if let Some(first) = ir.model.occurrences.first_mut() {
+        first.parent = cadmpeg_ir::products::OccurrenceParent::Root {};
+    }
+    let records = cadir_records(&ir, "cycle", "test", true);
+    assert!(solidcraft_kernel::records_import(&records).is_ok(), "{:?}", records.warnings);
+}
+
+/// The washer with a named colour on the solid, a see-through named colour on one face, and a
+/// pre-defined colour (`red`) on another: the see-through one's
+/// transparency in a SURFACE_STYLE_RENDERING_WITH_PROPERTIES, as the CAx-IF recommended practice
+/// for colours writes it.
+fn coloured_washer() -> String {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/step-conformance");
+    let text = std::fs::read_to_string(dir.join("washer.step")).unwrap();
+    let style = |id: u64, item: &str, colour: &str, extra: &str| {
+        let n = |k: u64| id + k;
+        format!(
+            "#{}=STYLED_ITEM('',(#{}),{item});\n#{}=PRESENTATION_STYLE_ASSIGNMENT((#{}));\n#{}=SURFACE_STYLE_USAGE(.BOTH.,#{});\n#{}=SURFACE_SIDE_STYLE('',(#{}{extra}));\n#{}=SURFACE_STYLE_FILL_AREA(#{});\n#{}=FILL_AREA_STYLE('',(#{}));\n#{}=FILL_AREA_STYLE_COLOUR('',#{});\n#{}={colour};\n",
+            n(0),
+            n(1),
+            n(1),
+            n(2),
+            n(2),
+            n(3),
+            n(3),
+            n(4),
+            n(4),
+            n(5),
+            n(5),
+            n(6),
+            n(6),
+            n(7),
+            n(7)
+        )
+    };
+    let styles = style(200, "#99", "COLOUR_RGB('Body grey',0.5,0.5,0.5)", "")
+        + &style(220, "#73", "COLOUR_RGB('Accent',0.,0.,1.)", ",#240")
+        + &style(250, "#85", "DRAUGHTING_PRE_DEFINED_COLOUR('red')", "")
+        + "#240=SURFACE_STYLE_RENDERING_WITH_PROPERTIES(.NORMAL_SHADING.,#227,(#242));\n#242=SURFACE_STYLE_TRANSPARENT(0.25);\n#241=MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION('',(#200,#220,#250),#5);\n";
+    let at = text.rfind("ENDSEC;").unwrap();
+    format!("{}{styles}{}", &text[..at], &text[at..])
+}
+
+/// A STEP file's colours read through cadmpeg come in as SolidCraft's reader brings them in: the
+/// body's colour and its name, and each face's own colour, opacity and name, a pre-defined
+/// colour's name being its own.
+#[test]
+fn colours_read_into_records_are_the_ones_our_step_reader_reads() {
+    let text = coloured_washer();
+    let ours = solidcraft_kernel::step_import(&text).unwrap();
+    let (theirs, warnings) = by_records(&neutral(text.as_bytes(), "washer.step"));
+    let theirs = theirs.unwrap_or_else(|e| panic!("{e} {warnings:?}"));
+    let look = |imp: &solidcraft_kernel::StepImport| {
+        let b = &imp.bodies[0].body;
+        let p = b.paint().cloned().unwrap_or(solidcraft_kernel::Paint { opacity: 1.0, faces: Vec::new(), name: None });
+        let mut faces: Vec<String> = p.faces.iter().map(|f| format!("{:?} {:.3} {:?}", f.color, f.opacity, f.name)).collect();
+        faces.sort();
+        (b.color(), p.name, format!("{:.3}", p.opacity), faces)
+    };
+    let (o, t) = (look(&ours), look(&theirs));
+    assert_eq!(o.0, Some([0.5, 0.5, 0.5]), "our reader: {o:?}");
+    assert_eq!(o.3.len(), 2, "our reader: {o:?}");
+    assert_eq!(t, o);
+}
+
+/// A part whose body was not imported (its conversion refused) is not compared with the figures
+/// its file states, as if what did import were the whole part: the warning says it was not checked.
+#[test]
+fn a_part_whose_body_was_not_imported_is_said_not_checked() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/step-conformance");
+    let ours = solidcraft_kernel::step_import(&std::fs::read_to_string(dir.join("washer.step")).unwrap()).unwrap();
+    let m = solidcraft_kernel::measure(&ours.bodies[0].body).unwrap();
+    let text = washer_stating(m.volume, [m.centroid.x, m.centroid.y, m.centroid.z]);
+    let mut ir = neutral(text.as_bytes(), "washer.step");
+    assert!(!ir.model.declared_measures.is_empty());
+    // Every region refused: a coedge missing from each.
+    ir.model.coedges.clear();
+    let (records, origins) = traced_records(&ir, "washer", "", true);
+    assert!(records.bodies.is_empty(), "{:?}", records.warnings);
+    let imp = solidcraft_kernel::records_import(&records).unwrap();
+    let notes = validation::check(&ir, &records, &origins, &imp);
+    assert!(!notes.is_empty() && notes.iter().all(|n| n.contains("was not checked")), "{notes:?}");
+}
+
+/// A part of two bodies, one imported and one whose region the reader refused, is said not
+/// checked against the figures its file states for both: the imported body alone measures what
+/// the file states here, so a comparison without the other would pass, unsaid.
+#[test]
+fn a_part_with_one_body_imported_and_one_not_is_said_not_checked() {
+    use cadmpeg_ir::declared_measures::DeclaredTarget;
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/step-conformance");
+    let ours = solidcraft_kernel::step_import(&std::fs::read_to_string(dir.join("washer.step")).unwrap()).unwrap();
+    let m = solidcraft_kernel::measure(&ours.bodies[0].body).unwrap();
+    let text = washer_stating(m.volume, [m.centroid.x, m.centroid.y, m.centroid.z]);
+    let mut ir = neutral(text.as_bytes(), "washer.step");
+    assert!(!ir.model.declared_measures.is_empty());
+    // A second body of the part, on a region the model does not have: refused.
+    let mut refused = ir.model.bodies[0].clone();
+    refused.id = cadmpeg_ir::ids::BodyId::try_from("test:refused:body#0".to_string()).unwrap();
+    refused.regions = vec![cadmpeg_ir::ids::RegionId::try_from("test:refused:region#0".to_string()).unwrap()];
+    let model = &mut ir.model;
+    for stated in &mut model.declared_measures {
+        match &mut stated.target {
+            DeclaredTarget::Definition { definition } => {
+                if let Some(d) = model.product_definitions.iter_mut().find(|d| d.id == *definition) {
+                    d.bodies.push(refused.id.clone());
+                }
+            }
+            DeclaredTarget::Bodies { bodies } => bodies.push(refused.id.clone()),
+            DeclaredTarget::Unresolved {} => {}
+        }
+    }
+    model.bodies.push(refused);
+    let (records, origins) = traced_records(&ir, "washer", "", true);
+    assert!(!records.bodies.is_empty(), "the washer itself comes in: {:?}", records.warnings);
+    let imp = solidcraft_kernel::records_import(&records).unwrap();
+    let notes = validation::check(&ir, &records, &origins, &imp);
+    assert!(!notes.is_empty() && notes.iter().all(|n| n.contains("was not checked")), "{notes:?}");
+}
+
+/// The washer with the CAx-IF validation properties a CAD system writes for it: its volume and its
+/// centre, as `volume` and `centre` give them.
+fn washer_stating(volume: f64, centre: [f64; 3]) -> String {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/step-conformance");
+    let text = std::fs::read_to_string(dir.join("washer.step")).unwrap();
+    let [x, y, z] = centre;
+    let props = format!(
+        "#300=PROPERTY_DEFINITION('geometric validation property','volume and centre',#13);\n\
+         #301=REPRESENTATION('',(#302,#303),#5);\n\
+         #302=MEASURE_REPRESENTATION_ITEM('volume measure',VOLUME_MEASURE({volume:?}),#304);\n\
+         #303=CARTESIAN_POINT('centre point',({x:?},{y:?},{z:?}));\n\
+         #304=DERIVED_UNIT((#305));\n#305=DERIVED_UNIT_ELEMENT(#1,3.);\n\
+         #306=PROPERTY_DEFINITION_REPRESENTATION(#300,#301);\n"
+    );
+    let at = text.rfind("ENDSEC;").unwrap();
+    format!("{}{props}{}", &text[..at], &text[at..])
+}
+
+/// A part whose bodies measure what its file states imports with no warning about it; one whose
+/// file states another volume or centre is named, with both figures, as an issue about the file in
+/// the import's report (what the History tooltip, the status line and Copy Warning Message show)
+/// and once among the open's warnings.
+#[test]
+fn a_part_that_measures_other_than_its_file_says_is_named() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/step-conformance");
+    let ours = solidcraft_kernel::step_import(&std::fs::read_to_string(dir.join("washer.step")).unwrap()).unwrap();
+    let m = solidcraft_kernel::measure(&ours.bodies[0].body).unwrap();
+    let (v, c) = (m.volume, [m.centroid.x, m.centroid.y, m.centroid.z]);
+    let checked = |text: String| {
+        let f = crate::step_import_feature_read(text.as_bytes(), "washer.step", crate::StepNames::default(), crate::StepReader::Cadmpeg).unwrap();
+        let issues: Vec<String> = f
+            .import
+            .report
+            .issues
+            .iter()
+            .filter(|i| i.kind == solidcraft_kernel::IssueKind::File && i.detail.contains("the file states"))
+            .map(|i| i.detail.clone())
+            .collect();
+        let warned: Vec<&String> = f.warnings.iter().filter(|w| w.contains("the file states")).collect();
+        assert_eq!(warned, issues.iter().collect::<Vec<_>>(), "the open's warnings say each once");
+        // The design keeps it with its records: an evaluation of them reports it too.
+        let solidcraft_doc::FeatureKind::Import { records: Some(records), .. } = &f.kind else { panic!("an import kept as records") };
+        assert_eq!(solidcraft_kernel::records_import(records).unwrap().report, f.import.report);
+        issues
+    };
+    assert_eq!(checked(washer_stating(v, c)), Vec::<String>::new(), "the washer as its file states it");
+    let volume = checked(washer_stating(v * 1.1, c));
+    assert!(volume.len() == 1 && volume[0].contains("volume") && volume[0].contains("9.091% off"), "{volume:?}");
+    let centre = checked(washer_stating(v, [c[0] + 5.0, c[1], c[2]]));
+    assert!(centre.len() == 1 && centre[0].contains("centre") && centre[0].contains("5.0000 mm away"), "{centre:?}");
+}
+
+/// In an assembly the file states a part's centre in the part's own coordinates: a part placed
+/// turned and moved is checked there, not where the assembly puts it.
+#[test]
+fn a_placed_parts_centre_is_checked_in_its_own_coordinates() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/step-conformance");
+    let text = std::fs::read_to_string(dir.join("cylinder_placed.step")).unwrap();
+    // Our reader's world centre, taken back through our reader's placement of the part.
+    let ours = solidcraft_kernel::step_import(&text).unwrap();
+    let m = solidcraft_kernel::measure(&ours.bodies[0].body).unwrap();
+    let t = ours.tree[0].children[0].transform;
+    let p = [m.centroid.x - t[3][0], m.centroid.y - t[3][1], m.centroid.z - t[3][2]];
+    let own: [f64; 3] = std::array::from_fn(|i| (0..3).map(|j| t[i][j] * p[j]).sum());
+    let world = [m.centroid.x, m.centroid.y, m.centroid.z];
+    assert!((0..3).map(|i| (own[i] - world[i]).powi(2)).sum::<f64>().sqrt() > 1.0, "the part is placed away from where it is defined");
+    let stating = |c: [f64; 3]| {
+        let [x, y, z] = c;
+        let props = format!(
+            "#300=PROPERTY_DEFINITION('geometric validation property','centre',#21);\n\
+             #301=REPRESENTATION('',(#303),#5);\n\
+             #303=CARTESIAN_POINT('centre point',({x:?},{y:?},{z:?}));\n\
+             #306=PROPERTY_DEFINITION_REPRESENTATION(#300,#301);\n"
+        );
+        let at = text.rfind("ENDSEC;").unwrap();
+        let (records, _, _) = cadmpeg_step_records(format!("{}{props}{}", &text[..at], &text[at..]).as_bytes(), "cylinder_placed.step").unwrap();
+        records.warnings.into_iter().filter(|w| w.contains("the file states")).collect::<Vec<_>>()
+    };
+    assert_eq!(stating(own), Vec::<String>::new());
+    assert_eq!(stating(world).len(), 1, "the world centre is not the part's own");
+    // A figure on the assembly (#13) is a total over its placed parts, which the neutral model does
+    // not compose: it is not compared, rather than against the assembly's own bodies (none).
+    let props = "#300=PROPERTY_DEFINITION('geometric validation property','volume',#13);\n\
+         #301=REPRESENTATION('',(#302),#5);\n\
+         #302=MEASURE_REPRESENTATION_ITEM('volume measure',VOLUME_MEASURE(1.),#304);\n\
+         #304=DERIVED_UNIT((#305));\n#305=DERIVED_UNIT_ELEMENT(#1,3.);\n\
+         #306=PROPERTY_DEFINITION_REPRESENTATION(#300,#301);\n";
+    let at = text.rfind("ENDSEC;").unwrap();
+    let (records, warnings, _) = cadmpeg_step_records(format!("{}{props}{}", &text[..at], &text[at..]).as_bytes(), "cylinder_placed.step").unwrap();
+    assert!(!records.warnings.iter().chain(&warnings).any(|w| w.contains("the file states")), "{warnings:?}");
 }
