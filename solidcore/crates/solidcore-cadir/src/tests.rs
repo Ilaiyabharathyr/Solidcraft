@@ -651,10 +651,11 @@ fn an_edge_collapsed_between_two_vertices_at_one_point_keeps_its_loops_closed() 
     assert!((volume(&s) - 1000.0).abs() < 1e-6, "{}", volume(&s));
 }
 
-/// A coedge with a 3D curve of its own in place of its edge's refuses its region with the reason,
-/// rather than being built on the edge's curve.
+/// A coedge with a 3D curve of its own in place of its edge's is refused with the reason, rather
+/// than being built on the edge's curve: its face is left out of an open surface of the others
+/// (the refusal names that face).
 #[test]
-fn a_coedge_on_a_curve_of_its_own_refuses_its_region() {
+fn a_coedge_on_a_curve_of_its_own_leaves_its_face_out() {
     let mut ir = cube();
     let curve = ir.model.curves.first().unwrap().id.clone();
     let c = ir.model.coedges.first_mut().unwrap();
@@ -663,11 +664,19 @@ fn a_coedge_on_a_curve_of_its_own_refuses_its_region() {
         parameter_range: cadmpeg_ir::topology::ParameterInterval::new([0.0, 1.0]).unwrap(),
     });
     let bodies = read_bodies(&ir, None);
-    assert!(bodies.read.is_empty());
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
     assert!(
-        bodies.failures[0].message.contains("a 3D curve of its own"),
+        s.sheet && s.brep.faces.len() == 5,
+        "{} faces",
+        s.brep.faces.len()
+    );
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.starts_with("left out: ") && n.contains("a 3D curve of its own")),
         "{:?}",
-        bodies.failures
+        s.notes
     );
 }
 
