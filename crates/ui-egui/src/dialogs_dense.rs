@@ -315,29 +315,85 @@ fn count_row_to(ui: &mut egui::Ui, doc: &solidcraft_engine::doc::Document, label
 }
 
 /// One rectangular pattern direction (`index` 0 or 1) as its own titled group: the direction's
-/// pick, then its Quantity, Spacing and (for features) Alignment, in the same order for both
-/// directions, so a direction's settings sit together (#9634).
+/// pick, then its quantity and distribution, in the same order for both directions (#9634).
 fn pattern_direction_group(app: &SolveApp, d: &mut Dialog, ui: &mut egui::Ui, index: usize) -> bool {
-    let (key, title, quantity_label, spacing_label) = if index == 0 {
-        ("pattern_direction1", "Direction 1", "Quantity", "Spacing")
+    let (key, title, quantity_label, spacing_label, condition_label, offset_label) = if index == 0 {
+        ("pattern_direction1", "Direction 1", "Quantity", "Spacing", "ui.pattern_end_condition", "ui.pattern_offset_from")
     } else {
-        ("pattern_direction2", "Direction 2", "Quantity 2", "Spacing 2")
+        ("pattern_direction2", "Direction 2", "Quantity 2", "Spacing 2", "ui.pattern_end_condition_2", "ui.pattern_offset_from_2")
     };
     let features = d.inputs.first().is_some_and(|i| i.accept == selection::FEATURES);
     ui_kit::section(ui, key, title, true, |ui| {
         let mut enter = false;
         input_rows_range(d, ui, &app.session, app.preferences.origin_plane_names, index + 1..index + 2);
+        let mut condition = usize::from(d.pattern_reference_input(index).is_some());
+        let previous = condition;
         if let Kind::PatternRect { count, spacing, count2, spacing2 } = &mut d.kind {
             let (count, spacing) = if index == 0 { (count, spacing) } else { (count2, spacing2) };
             enter |= quantity_row(ui, &app.session.doc, quantity_label, count);
-            enter |= expr_row(ui, spacing_label, spacing);
+            choice_row(ui, condition_label, condition_label, &mut condition, &["ui.spacing", "ui.pattern_up_to_reference"]);
+            if condition == 0 {
+                enter |= expr_row(ui, spacing_label, spacing);
+            }
         }
-        if features {
+        if previous != condition {
+            set_pattern_reference(d, index, condition == 1);
+            if condition == 1 {
+                surrender_keyboard_focus(ui);
+            }
+        }
+        if let Some(input) = d.pattern_reference_input(index) {
+            input_rows_range(d, ui, &app.session, app.preferences.origin_plane_names, input..input + 1);
+            let key = PATTERN_OFFSETS[index];
+            let mut offset = d.extra.get(key).and_then(Value::as_str).unwrap_or("0").to_owned();
+            enter |= expr_row_positive(ui, offset_label, &mut offset);
+            d.extra.insert(key.into(), json!(offset));
+        } else if features {
             feature_pattern_alignment_row(ui, &mut d.extra, index);
         }
         enter
     })
     .unwrap_or(false)
+}
+
+fn pattern_skip_group(app: &SolveApp, d: &mut Dialog, ui: &mut egui::Ui) {
+    let selecting = d.pattern_skip_selecting;
+    ui_kit::checkbox_grid(ui, &mut [("ui.pattern_skip", &mut d.pattern_skip_selecting)], 1);
+    if d.pattern_skip_selecting && !selecting {
+        d.awaiting_pick = false;
+        d.pick_refused = None;
+        surrender_keyboard_focus(ui);
+    }
+    if d.pattern_skip_selecting {
+        let mut shape = usize::from(d.pattern_skip_lasso_mode);
+        choice_row(ui, "ui.pattern_skip_selection", "pattern_skip_selection", &mut shape, &["ui.pattern_skip_box", "ui.pattern_skip_lasso"]);
+        d.pattern_skip_lasso_mode = shape == 1;
+        ui_kit::text(ui, tr("ui.pattern_skip_hint"), ui_kit::Text::Hint("pattern_skip"));
+    }
+    if d.pattern_skip_selecting || d.has_pattern_skips() {
+        let skipped = crate::pattern_skip::skipped_numbers(app, d);
+        let list = format!("{skipped:?}");
+        form_row(ui, "ui.pattern_skip_list", |ui| {
+            ui_kit::text(ui, &list, ui_kit::Text::MonoCell);
+        });
+        if !skipped.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                for number in skipped {
+                    let label = solidcraft_ui_text::format("ui.pattern_skip_restore", &[("number", &number.to_string())]);
+                    let button = ui_kit::button(ui, label, ui_kit::Button::Small);
+                    if ui.is_rect_visible(button.rect) {
+                        crate::scenario::publish_handle(&format!("pattern:restore:{number}"), button.rect.center());
+                    }
+                    if button.clicked() {
+                        crate::pattern_skip::restore(app, d, number);
+                    }
+                }
+            });
+        }
+        if d.has_pattern_skips() && ui_kit::button(ui, tr("ui.pattern_skip_clear"), ui_kit::Button::Normal).clicked() {
+            d.set_pattern_skipped(Vec::new(), Vec::new());
+        }
+    }
 }
 
 fn fillet_type(extra: &serde_json::Map<String, Value>) -> usize {
@@ -719,6 +775,7 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
         Kind::PatternRect { .. } => {
             enter |= pattern_direction_group(app, d, ui, 0);
             enter |= pattern_direction_group(app, d, ui, 1);
+            pattern_skip_group(app, d, ui);
         }
         Kind::PatternCirc { count, angle } => {
             enter |= quantity_row(ui, &app.session.doc, "Quantity", count);
@@ -726,6 +783,7 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
             if d.inputs.first().is_some_and(|i| i.accept == selection::FEATURES) {
                 feature_pattern_alignment_row(ui, &mut d.extra, 0);
             }
+            pattern_skip_group(app, d, ui);
         }
         Kind::Hole { kind, opts, cb_diameter, cb_depth, .. } => {
             let doc = &app.session.doc;
@@ -1088,6 +1146,7 @@ fn additional_rows(app: &mut SolveApp, d: &mut Dialog, ui: &mut egui::Ui) -> boo
         Kind::PathPattern { count, spacing } => {
             enter |= quantity_row(ui, &app.session.doc, "Quantity", count);
             enter |= expr_row(ui, if d.extra.contains_key("distance") { "Distance" } else { "Spacing" }, spacing);
+            pattern_skip_group(app, d, ui);
         }
         Kind::Pipe { diameter, wall, operation } => {
             enter |= expr_row(ui, "Diameter", diameter);

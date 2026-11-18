@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 use solidcore_record::{Vec2, Vec3};
-use solidcraft_doc::Expr;
+use solidcraft_doc::{Expr, FeatureId, PatternAddress, PatternMember, PatternStep};
 
 use crate::{EngineError, Result, kernel};
 
@@ -99,6 +99,81 @@ pub fn expr_problem(v: Option<&Value>) -> &'static str {
 
 pub fn req_expr(cmd: &str, p: &Value, k: &str) -> Result<Expr> {
     expr(p, k).ok_or_else(|| bad(cmd, format!("`{k}` {}", expr_problem(p.get(k)))))
+}
+
+/// A rectangular pattern can place at most this many instances.
+pub(crate) const MAX_PATTERN_SKIP: usize = solidcraft_doc::MAX_PATTERN_INSTANCES;
+pub(crate) const MAX_PATTERN_MEMBERS: usize = 100_000;
+pub(crate) const MAX_PATTERN_STEPS: usize = 9;
+pub(crate) const MAX_PATTERN_REPLAY_ORDINAL: usize = 8 * MAX_PATTERN_SKIP;
+
+/// The numbered copies a rectangular pattern leaves out, sorted with duplicates removed.
+pub(crate) fn pattern_skip(v: &Value) -> std::result::Result<Vec<usize>, &'static str> {
+    let items = v.as_array().ok_or("`skip` must list instance numbers, such as [2, 5]")?;
+    if items.len() > MAX_PATTERN_SKIP {
+        return Err("`skip` must contain at most 10000 entries");
+    }
+    let mut skip = Vec::with_capacity(items.len());
+    for item in items {
+        let number = item
+            .as_u64()
+            .and_then(|number| usize::try_from(number).ok())
+            .filter(|number| (2..=MAX_PATTERN_SKIP).contains(number))
+            .ok_or("`skip` must list whole instance numbers from 2 to 10000. Instance 1 is the original and always stays")?;
+        skip.push(number);
+    }
+    skip.sort_unstable();
+    skip.dedup();
+    Ok(skip)
+}
+
+pub(crate) fn pattern_skip_width(v: &Value) -> std::result::Result<usize, &'static str> {
+    v.as_u64()
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|n| (1..=MAX_PATTERN_SKIP).contains(n))
+        .ok_or("`skip_width` must be a whole number from 1 to 10000")
+}
+
+fn pattern_address(v: &Value) -> Option<PatternAddress> {
+    if let Some(ordinal) = v.as_u64() {
+        let ordinal = usize::try_from(ordinal).ok()?;
+        return (1..=MAX_PATTERN_REPLAY_ORDINAL).contains(&ordinal).then_some(PatternAddress::Ordinal(ordinal));
+    }
+    let entries = v.as_array()?;
+    if !(1..=MAX_PATTERN_STEPS).contains(&entries.len()) {
+        return None;
+    }
+    let coordinate = |v: &Value| usize::try_from(v.as_u64()?).ok().filter(|&n| n < MAX_PATTERN_SKIP);
+    let mut steps = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let [feature, row, column] = entry.as_array()?.as_slice() else { return None };
+        let feature = FeatureId(feature.as_u64()?);
+        let (row, column) = (coordinate(row)?, coordinate(column)?);
+        if (index == 0) != (feature == FeatureId::DANGLING) || (row == 0 && column == 0) {
+            return None;
+        }
+        steps.push(PatternStep(feature, row, column));
+    }
+    Some(PatternAddress::Steps(steps))
+}
+
+pub(crate) fn pattern_skip_members(v: &Value) -> std::result::Result<Vec<PatternMember>, &'static str> {
+    const WRONG: &str = "`skip_members` must list [placement, feature ID, member] triples with a positive copy number or valid placement steps";
+    let entries = v.as_array().ok_or(WRONG)?;
+    if entries.len() > MAX_PATTERN_MEMBERS {
+        return Err("`skip_members` lists too many copies");
+    }
+    let mut skipped = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let [address, feature, member] = entry.as_array().ok_or(WRONG)?.as_slice() else { return Err(WRONG) };
+        let address = pattern_address(address).ok_or(WRONG)?;
+        let feature = FeatureId(feature.as_u64().ok_or(WRONG)?);
+        let member = member.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or(WRONG)?;
+        skipped.push(PatternMember(address, feature, member));
+    }
+    skipped.sort_unstable();
+    skipped.dedup();
+    Ok(skipped)
 }
 
 /// The most names a list parameter may carry.

@@ -18,6 +18,7 @@ Repeat a hole, a boss or a whole body around an axis: the bolt circle on a flang
 | Quantity | How many in total, counting the original. | 6 for a 6-hole bolt circle. |
 | Total angle | The angle the pattern covers. At 360 deg the copies are spaced evenly all the way round. Under 360 deg, the first and last copies sit at the two ends of the angle. | 360 deg for a full bolt circle. 90 deg with Quantity 4 puts holes at 0, 30, 60 and 90 deg. |
 | Alignment (Features only) | Flip direction turns the pattern the other way. Center puts copies on both sides of the original: an odd Quantity splits evenly, an even Quantity puts one extra copy on one side, and Flip moves the extra copy to the other side. Quantity 4 over 90 deg with Center gives −30, 0, 30 and 60 deg. | Flip a partial pattern that went the wrong way around. |
+| Instances to skip | Pick individual copies by marker. Green copies stay and red copies are left out. | Skip one hole at an angle even when the source feature cuts several holes there. |
 
 #### Try it: a 6-hole bolt circle
 

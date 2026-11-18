@@ -41,6 +41,28 @@ impl Walk for u64 {}
 impl Walk for i8 {}
 impl Walk for f64 {}
 impl Walk for usize {}
+impl Walk for crate::PatternMember {
+    fn walk_refs<'a>(&'a self, visit: &mut dyn FnMut(RefItem<'a>)) {
+        if self.1 != FeatureId::DANGLING {
+            self.1.walk_refs(visit);
+        }
+        if let crate::PatternAddress::Steps(steps) = &self.0 {
+            for step in steps.iter().skip(1) {
+                step.0.walk_refs(visit);
+            }
+        }
+    }
+    fn walk_refs_mut<'a>(&'a mut self, visit: &mut dyn FnMut(RefItemMut<'a>)) {
+        if self.1 != FeatureId::DANGLING {
+            self.1.walk_refs_mut(visit);
+        }
+        if let crate::PatternAddress::Steps(steps) = &mut self.0 {
+            for step in steps.iter_mut().skip(1) {
+                step.0.walk_refs_mut(visit);
+            }
+        }
+    }
+}
 impl Walk for u32 {}
 impl Walk for crate::newer_file::RawFeature {}
 impl Walk for ProfileSel {}
@@ -77,7 +99,7 @@ impl Walk for crate::thread_forms::ThreadHand {}
 impl Walk for crate::thread_forms::ThreadTip {}
 impl Walk for crate::thread_forms::SteepFlank {}
 // An Align frame's joint origin: picks in its component's coordinates, found by their names.
-impl Walk for Box<crate::joints::JointOrigin> {}
+impl Walk for crate::joints::JointOrigin {}
 
 /// A reference walks itself: a sketch, a feature or a body.
 macro_rules! reference {
@@ -165,6 +187,27 @@ macro_rules! walk_each {
 }
 
 walk_each!([T: Walk] Option<T>, [T: Walk] Vec<T>, [T: Walk, const N: usize] [T; N]);
+
+impl<T: Walk> Walk for Box<T> {
+    fn walk_exprs<'a>(&'a self, f: &mut dyn FnMut(ExprItem<'a>)) {
+        self.as_ref().walk_exprs(f);
+    }
+    fn walk_exprs_mut<'a>(&'a mut self, f: &mut dyn FnMut(ExprItemMut<'a>)) {
+        self.as_mut().walk_exprs_mut(f);
+    }
+    fn walk_refs<'a>(&'a self, f: &mut dyn FnMut(RefItem<'a>)) {
+        self.as_ref().walk_refs(f);
+    }
+    fn walk_refs_mut<'a>(&'a mut self, f: &mut dyn FnMut(RefItemMut<'a>)) {
+        self.as_mut().walk_refs_mut(f);
+    }
+    fn walk_geometry<'a>(&'a self, f: &mut dyn FnMut(GeoItem<'a>)) {
+        self.as_ref().walk_geometry(f);
+    }
+    fn walk_geometry_mut<'a>(&'a mut self, f: &mut dyn FnMut(GeoItemMut<'a>)) {
+        self.as_mut().walk_geometry_mut(f);
+    }
+}
 
 /// The values of a field with a role (`T`, an optional one or a list), in order.
 pub(crate) trait Each<T> {
@@ -591,14 +634,19 @@ impl Walk for AxisDef {
     construct_geometry!();
 }
 
-/// A feature's own reference to the model (a revolve's or circular pattern's axis on an edge or
-/// round face): walked like a construction axis's.
+/// A feature's own reference to the model, walked like a construction axis's.
 impl Walk for GeoRef {
     fn walk_exprs<'a>(&'a self, f: &mut dyn FnMut(ExprItem<'a>)) {
         plane_exprs(vec![self], f)
     }
     fn walk_exprs_mut<'a>(&'a mut self, f: &mut dyn FnMut(ExprItemMut<'a>)) {
         plane_exprs_mut(vec![self], f)
+    }
+    fn walk_refs<'a>(&'a self, f: &mut dyn FnMut(RefItem<'a>)) {
+        self.walk_feature_refs(f, 0);
+    }
+    fn walk_refs_mut<'a>(&'a mut self, f: &mut dyn FnMut(RefItemMut<'a>)) {
+        self.walk_feature_refs_mut(f, 0);
     }
     fn walk_geometry<'a>(&'a self, f: &mut dyn FnMut(GeoItem<'a>)) {
         f(Geo::Construct(self))

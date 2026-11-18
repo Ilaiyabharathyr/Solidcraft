@@ -67,6 +67,7 @@ pub enum NavMode {
 pub struct ViewportState {
     /// Touchscreen gesture ownership and contacts for the shared camera handler.
     pub(crate) touch: crate::navigation::TouchNavigation,
+    pub(crate) pattern_skip_cache: Option<crate::pattern_skip::Cache>,
     /// The faces the modelling kernel refuses that the window points at (a failed operation's
     /// message, a "needs repair" row under the pointer): ringed in the error colour. What this
     /// frame asks for ([`crate::refused_part::ring`]) is drawn from the next one on, so the ring
@@ -6487,6 +6488,8 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         app.preview.rolled_back = preview_should_roll_back(app, held, busy_dragging);
     }
     let proj = projection(app, rect);
+    let skip_picking = crate::pattern_skip::active(app);
+    let skip_markers = crate::pattern_skip::project(app, &proj);
     if let Ok(mut cache) = app.viewport.display.lock() {
         cache.prepare(crate::open_meshing::shown_world(app), &proj, app.viewport.pixels_per_point());
     }
@@ -6555,7 +6558,8 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     // it. A preset's modifier binding (Maya Alt, Alias Shift+Alt) or Ctrl+left orbit is a
     // gesture to navigate from the press on, so it still cancels the hold at once.
     let navigating_from_press = mode.is_some() || app.viewport.primary_nav.is_some() || joint_handle_pointer;
-    let held = crate::select_other::track_hold(app, ui.ctx(), &proj, inside, primary_pressed, primary_down, hover, navigating_from_press);
+    let held =
+        crate::select_other::track_hold(app, ui.ctx(), &proj, inside && !skip_picking, primary_pressed, primary_down, hover, navigating_from_press);
     crate::select_other::hover_override(app);
     list_hover(app);
     let still = inside
@@ -6876,7 +6880,9 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             dialog.restore_value_focus = true;
         }
         if resp.clicked() && !held && !reference_pick && !joint_handle_pointer && !app.viewport.draw_drag_handled {
-            if crate::browser_canvas::click(app, &proj, p) {
+            if skip_picking {
+                crate::pattern_skip::click(app, &skip_markers, p, mods);
+            } else if crate::browser_canvas::click(app, &proj, p) {
                 // Calibrate Canvas: the click sets Point A or B on the image (#9108).
             } else if app.tool.is_some() {
                 crate::tools::on_click(app, &proj, p, mods.shift);
@@ -7318,9 +7324,11 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             && !axes.contains(a)
         {
             // The lasso (#4376) follows the pointer from the press; the rectangle spans it.
+            let lasso_mode =
+                if skip_picking { app.dialog.as_ref().is_some_and(crate::dialogs::Dialog::pattern_skip_lasso) } else { app.ui.lasso_select };
             match &mut app.viewport.boxsel {
-                Some(lasso) if app.ui.lasso_select && lasso.is_lasso() => lasso.extend(b),
-                _ if app.ui.lasso_select => app.viewport.boxsel = Some(BoxSel::lasso(&[a, b])),
+                Some(lasso) if lasso_mode && lasso.is_lasso() => lasso.extend(b),
+                _ if lasso_mode => app.viewport.boxsel = Some(BoxSel::lasso(&[a, b])),
                 _ => app.viewport.boxsel = Some(BoxSel::from_drag(a, b)),
             }
         }
@@ -7332,7 +7340,11 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         if resp.drag_stopped()
             && let Some(bx) = app.viewport.boxsel.take()
         {
-            box_select(app, &proj, bx, add);
+            if skip_picking {
+                crate::pattern_skip::window(app, &skip_markers, bx, mods);
+            } else {
+                box_select(app, &proj, bx, add);
+            }
         }
     } else {
         app.viewport.boxsel = None;
@@ -7382,7 +7394,11 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     if let Some(tl) = app.tool.as_ref() {
         crate::tools::preview(app, tl, &painter, &proj);
     }
-    crate::canvas::show(app, ui, &painter, &proj);
+    if skip_picking {
+        crate::pattern_skip::paint(app, &painter, &skip_markers);
+    } else {
+        crate::canvas::show(app, ui, &painter, &proj);
+    }
     crate::sketch_tools::show(app, ui, &painter, &proj);
     crate::sketch_line_arc::paint_mode(app, ui, &painter, &proj);
     crate::design_properties::overlay(app, &painter, &proj);

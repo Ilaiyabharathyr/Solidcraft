@@ -104,6 +104,30 @@ fn cancel_while_computing_applies_nothing() {
 }
 
 #[test]
+fn a_pattern_marker_cannot_change_the_copies_after_ok() {
+    let mut h = Harness::new();
+    h.app.home.open = false;
+    h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Seed"})).unwrap();
+    h.app.run("solid.pattern.rectangular", json!({"bodies": ["Seed"], "dir1": [1, 0, 0], "count1": 3, "spacing1": 20, "name": "Copies"})).unwrap();
+    h.call("ui.editFeature", json!({"feature": "Copies"}));
+    h.frames(2);
+    h.app.dialog.as_mut().unwrap().set_pattern_skipped(vec![3], Vec::new());
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+    let proj = crate::viewport::projection(&h.app, rect);
+    crate::pattern_skip::project(&mut h.app, &proj);
+    assert_eq!(crate::pattern_skip::skipped_numbers(&h.app, h.app.dialog.as_ref().unwrap()), [3]);
+
+    let _finish = hold_result(&mut h, false);
+    let at = egui::pos2(100.0, 100.0);
+    crate::pattern_skip::click(&mut h.app, &[(2, at)], at, egui::Modifiers::NONE);
+    assert_eq!(crate::pattern_skip::skipped_numbers(&h.app, h.app.dialog.as_ref().unwrap()), [3]);
+
+    h.app.applying = None;
+    crate::pattern_skip::click(&mut h.app, &[(2, at)], at, egui::Modifiers::NONE);
+    assert_eq!(crate::pattern_skip::skipped_numbers(&h.app, h.app.dialog.as_ref().unwrap()), [2, 3]);
+}
+
+#[test]
 fn removing_the_edited_feature_discards_its_pending_result() {
     let mut h = Harness::new();
     h.app.home.open = false;

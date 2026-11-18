@@ -1,0 +1,98 @@
+{
+  "en": {
+    "ui.pattern_end_condition": "End condition",
+    "ui.pattern_end_condition_2": "End condition",
+    "ui.pattern_offset_from": "Offset from",
+    "ui.pattern_offset_from_2": "Offset from",
+    "ui.pattern_reference_1": "Reference",
+    "ui.pattern_reference_2": "Reference",
+    "ui.pattern_reference_direction_2": "Select Direction 2 for the second reference.",
+    "ui.pattern_reference_tip": "Select a straight edge perpendicular to this direction, a planar face, or a plane.",
+    "ui.pattern_saved_reference": "Saved reference",
+    "ui.pattern_up_to_reference": "Up to reference"
+  },
+  "ar": {
+    "ui.pattern_end_condition": "شرط النهاية",
+    "ui.pattern_end_condition_2": "شرط النهاية",
+    "ui.pattern_offset_from": "الإزاحة عن المرجع",
+    "ui.pattern_offset_from_2": "الإزاحة عن المرجع",
+    "ui.pattern_reference_1": "المرجع",
+    "ui.pattern_reference_2": "المرجع",
+    "ui.pattern_reference_direction_2": "حدد الاتجاه 2 للمرجع الثاني.",
+    "ui.pattern_reference_tip": "حدد حافة مستقيمة عمودية على هذا الاتجاه، أو وجهًا مسطحًا، أو مستوى.",
+    "ui.pattern_saved_reference": "المرجع المحفوظ",
+    "ui.pattern_up_to_reference": "حتى المرجع"
+  },
+  "de": {
+    "ui.pattern_end_condition": "Endbedingung",
+    "ui.pattern_end_condition_2": "Endbedingung",
+    "ui.pattern_offset_from": "Abstand zur Referenz",
+    "ui.pattern_offset_from_2": "Abstand zur Referenz",
+    "ui.pattern_reference_1": "Referenz",
+    "ui.pattern_reference_2": "Referenz",
+    "ui.pattern_reference_direction_2": "Wählen Sie Richtung 2 für die zweite Referenz.",
+    "ui.pattern_reference_tip": "Wählen Sie eine gerade Kante senkrecht zu dieser Richtung, eine ebene Fläche oder eine Ebene.",
+    "ui.pattern_saved_reference": "Gespeicherte Referenz",
+    "ui.pattern_up_to_reference": "Bis zur Referenz"
+  },
+  "he": {
+    "ui.pattern_end_condition": "תנאי סיום",
+    "ui.pattern_end_condition_2": "תנאי סיום",
+    "ui.pattern_offset_from": "היסט מהייחוס",
+    "ui.pattern_offset_from_2": "היסט מהייחוס",
+    "ui.pattern_reference_1": "ייחוס",
+    "ui.pattern_reference_2": "ייחוס",
+    "ui.pattern_reference_direction_2": "יש לבחור את כיוון 2 עבור הייחוס השני.",
+    "ui.pattern_reference_tip": "יש לבחור צלע ישרה שניצבת לכיוון זה, פאה מישורית או מישור.",
+    "ui.pattern_saved_reference": "ייחוס שמור",
+    "ui.pattern_up_to_reference": "עד הייחוס"
+  },
+  "ja": {
+    "ui.pattern_end_condition": "終端条件",
+    "ui.pattern_end_condition_2": "終端条件",
+    "ui.pattern_offset_from": "参照からのオフセット",
+    "ui.pattern_offset_from_2": "参照からのオフセット",
+    "ui.pattern_reference_1": "参照",
+    "ui.pattern_reference_2": "参照",
+    "ui.pattern_reference_direction_2": "2 番目の参照に方向 2 を選択します。",
+    "ui.pattern_reference_tip": "この方向に直交する直線エッジ、平坦な面、または平面を選択します。",
+    "ui.pattern_saved_reference": "保存された参照",
+    "ui.pattern_up_to_reference": "参照まで"
+  },
+  "ko": {
+    "ui.pattern_end_condition": "끝 조건",
+    "ui.pattern_end_condition_2": "끝 조건",
+    "ui.pattern_offset_from": "참조에서 오프셋",
+    "ui.pattern_offset_from_2": "참조에서 오프셋",
+    "ui.pattern_reference_1": "참조",
+    "ui.pattern_reference_2": "참조",
+    "ui.pattern_reference_direction_2": "두 번째 참조에 사용할 방향 2를 선택합니다.",
+    "ui.pattern_reference_tip": "이 방향에 수직인 직선 모서리, 평평한 면 또는 평면을 선택합니다.",
+    "ui.pattern_saved_reference": "저장된 참조",
+    "ui.pattern_up_to_reference": "참조까지"
+  },
+  "vi": {
+    "ui.pattern_end_condition": "Điều kiện kết thúc",
+    "ui.pattern_end_condition_2": "Điều kiện kết thúc",
+    "ui.pattern_offset_from": "Khoảng lệch từ tham chiếu",
+    "ui.pattern_offset_from_2": "Khoảng lệch từ tham chiếu",
+    "ui.pattern_reference_1": "Tham chiếu",
+    "ui.pattern_reference_2": "Tham chiếu",
+    "ui.pattern_reference_direction_2": "Chọn Hướng 2 cho tham chiếu thứ hai.",
+    "ui.pattern_reference_tip": "Chọn một cạnh thẳng vuông góc với hướng này, một mặt phẳng hoặc một mặt phẳng tham chiếu.",
+    "ui.pattern_saved_reference": "Tham chiếu đã lưu",
+    "ui.pattern_up_to_reference": "Đến tham chiếu"
+  },
+  "zh": {
+    "ui.pattern_end_condition": "终止条件",
+    "ui.pattern_end_condition_2": "终止条件",
+    "ui.pattern_offset_from": "距参照的偏移",
+    "ui.pattern_offset_from_2": "距参照的偏移",
+    "ui.pattern_reference_1": "参照",
+    "ui.pattern_reference_2": "参照",
+    "ui.pattern_reference_direction_2": "为第二个参照选择方向 2。",
+    "ui.pattern_reference_tip": "选择与此方向垂直的直边、平坦面或基准平面。",
+    "ui.pattern_saved_reference": "已保存的参照",
+    "ui.pattern_up_to_reference": "直到参照"
+  }
+}

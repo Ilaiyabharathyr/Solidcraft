@@ -1466,6 +1466,46 @@ fn a_hole_is_patterned_as_a_feature() {
     assert_eq!(e.inputs[0].items, vec![Sel::Feature { id: hole }]);
 }
 
+#[test]
+fn a_preselected_hole_starts_a_rectangular_feature_pattern() {
+    let mut app = app_with(json!([
+        {"command": "solid.box", "params": {"length": 200, "width": 40, "height": 10}},
+        {"command": "solid.hole", "params": {"position": [10, 15, 10], "diameter": 4}},
+        {"command": "solid.pattern.rectangular", "params": {"features": ["Hole1"], "dir1": [1, 0, 0], "count1": 7, "spacing1": 30}}
+    ]));
+    let hole = app.session.doc.find_feature("Hole1").unwrap().id;
+    let wall = thread_face(&app, "Body1");
+    let Sel::Face { index, .. } = &wall else { panic!("expected a hole face") };
+    let state = app.session.model.state();
+    let body = &state.body("Body1").unwrap().body;
+    let (index, rim) = solidcraft_engine::kernel::face_edge_indices(body, *index)
+        .into_iter()
+        .find_map(|index| {
+            let circle = solidcraft_engine::kernel::edge_circle(body, index)?;
+            ((circle.center.z - 10.0).abs() < 1e-6).then_some((index, circle))
+        })
+        .unwrap();
+    let rim_edge = Sel::Edge { body: "Body1".into(), index, point: rim.start };
+    let rim_vertex = Sel::Vertex { body: "Body1".into(), point: rim.start };
+    let plate_face = face(&app, Vec3::new(0.0, 20.0, 5.0));
+    let plate_vertex = Sel::Vertex { body: "Body1".into(), point: Vec3::new(0.0, 0.0, 10.0) };
+
+    for pick in [wall, rim_edge, rim_vertex] {
+        let mut dialog = start(&mut app, vec![pick], "solid.pattern.rectangular");
+        assert_eq!(dialog.inputs[0].accept, crate::selection::FEATURES);
+        assert_eq!(dialog.inputs[0].items, [Sel::Feature { id: hole }]);
+        dialog.inputs[1].items = vec![Sel::Axis { name: "X".into() }];
+        let commands = apply_commands(&app, &dialog).unwrap();
+        assert_eq!(commands[0].1["features"], json!(["Hole1"]));
+    }
+
+    for pick in [plate_face, plate_vertex, Sel::Body { name: "Body1".into() }] {
+        let dialog = start(&mut app, vec![pick], "solid.pattern.rectangular");
+        assert_eq!(dialog.inputs[0].accept, crate::selection::BODIES);
+        assert_eq!(dialog.inputs[0].items, [Sel::Body { name: "Body1".into() }]);
+    }
+}
+
 fn path_pattern_editor(params: serde_json::Value) -> crate::scenario::Harness {
     let mut h = crate::scenario::Harness::new();
     h.app.run("solid.box", json!({"length":4,"width":4,"height":4,"name":"Seed","body_name":"Pin"})).unwrap();

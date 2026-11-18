@@ -17,10 +17,13 @@ Repeat a hole, a pocket or a whole body in a row or a grid: a row of tapped hole
 | Direction | The way the first row runs. | The X axis, or the long edge of the plate. |
 | Quantity | How many along the first direction, counting the original. | 5 holes in the row. |
 | Spacing | Centre-to-centre distance between neighbours in the first direction. | 1 in pitch. |
+| Up to reference | Space the instances evenly between the seed and a selected edge, planar face or construction plane. | Keep a row of holes tied to the far edge of the plate. |
+| Offset from | Leave this distance before the reference along the pattern direction. | Stop the last hole centre 10 mm short of the edge. |
 | Direction 2 | The way the second row runs. Leave it empty for a single row. | The Y axis for a grid. |
 | Quantity 2 | How many along the second direction, counting the original. 1 means a single row. | 3 rows. |
 | Spacing 2 | Centre-to-centre distance in the second direction. | 0.75 in. |
 | Alignment and Alignment 2 (Features only) | Flip direction runs the copies the other way. Center puts copies on both sides of the original: an odd Quantity splits evenly, an even Quantity puts one extra copy on one side, and Flip moves the extra copy to the other side. Quantity 4 with Center gives copies at 0, +1, −1 and +2 spacings. | Flip when the row runs off the end of the part. |
+| Instances to skip | Pick copies by marker. Each hole in a copied multi-hole feature has its own marker. | Skip one hole while keeping the others at that placement. |
 
 #### Try it: a 5 × 3 grid of holes
 

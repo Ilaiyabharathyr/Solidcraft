@@ -1029,12 +1029,13 @@ impl Session {
     pub(crate) fn saved_model(doc: &Arc<Document>, saved: Option<&solidcraft_doc::SavedModel>) -> Option<Model> {
         saved
             .filter(|_| solidcraft_geom::env::var_os("NO_MODEL_CACHE").is_none())
+            .filter(|_| !doc.features.iter().any(solidcraft_doc::Feature::legacy_feature_pattern_names))
             .and_then(|saved| Model::adopt(doc, saved).map_err(|e| log::info!("the saved model is not used: {e}")).ok())
     }
 
     /// A session on `doc` evaluated as `model`, with what it hides.
     pub(crate) fn with_model(doc: Arc<Document>, visibility: Visibility, model: Model) -> Self {
-        Session {
+        let mut session = Session {
             stop: Default::default(),
             is_copy: false,
             saved: doc.clone(),
@@ -1123,7 +1124,12 @@ impl Session {
             motion_traces: Default::default(),
             command_check: None,
             crash_journal: false,
+        };
+        if session.doc.features.iter().any(solidcraft_doc::Feature::legacy_feature_pattern_names) {
+            session.pin_body_names_matching(true);
+            session.saved = session.doc.clone();
         }
+        session
     }
 
     /// Become `fresh` (another design opened, recovered or started), keeping the settings that
@@ -1874,6 +1880,10 @@ impl Session {
     /// names it has after that command (a delete, reorder, suppress or rollback renumbers the
     /// later counted bodies once).
     fn pin_body_names(&mut self) {
+        self.pin_body_names_matching(false);
+    }
+
+    fn pin_body_names_matching(&mut self, legacy_only: bool) {
         if self.model.is_stale() {
             return;
         }
@@ -1886,12 +1896,16 @@ impl Session {
         let mut known = std::mem::take(&mut self.made_bodies);
         let mut made_bodies = MadeBodies::with_capacity(known.len());
         for (i, f) in self.doc.features.iter().enumerate() {
-            if matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. }) {
+            if matches!(f.kind, solidcraft_doc::FeatureKind::FrameMember { .. }) || legacy_only && !f.legacy_feature_pattern_names() {
                 continue;
             }
             // Results are in timeline order: the feature's own index first, the search only when not.
             let r = self.model.results.get(i).filter(|r| r.id == f.id).or_else(|| self.model.result(f.id));
             let Some(r) = r.filter(|r| r.error.is_none() && !r.skipped && !r.stale) else { continue };
+            let layout = r.state.pattern_body_layout(f.id);
+            if legacy_only && layout.is_none() {
+                continue;
+            }
             let made = match known.remove(&f.id).filter(|(state, _)| std::sync::Weak::as_ptr(state) == Arc::as_ptr(&r.state)) {
                 Some(entry) => made_bodies.entry(f.id).or_insert(entry),
                 None => made_bodies.entry(f.id).or_insert_with(|| {
@@ -1910,9 +1924,10 @@ impl Session {
             // mean the same copies read source by source. The copies of a source the pattern
             // left out keep the names stored for them, in their places.
             let left_out = r.state.pattern_left_out(f.id);
-            if f.pins_every_body_name() && (f.pattern_names_in_order || made.len() != f.body_names.len() || !left_out.is_empty()) {
+            if layout.is_some() || f.pins_every_body_name() && (f.pattern_names_in_order || made.len() != f.body_names.len() || !left_out.is_empty())
+            {
                 let made: Vec<String> = made.iter().map(|n| n.to_string()).collect();
-                let names = f.pattern_pins(&made, left_out).map_or(made, |(names, _)| names);
+                let names = f.pattern_pins(&made, left_out, layout).map_or(made, |(names, _)| names);
                 if f.pattern_names_in_order || names != f.body_names {
                     pins.push((f.id, names));
                 }

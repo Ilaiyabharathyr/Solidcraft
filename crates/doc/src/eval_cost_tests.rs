@@ -1242,6 +1242,25 @@ fn saved_named_face_points_refuse_missing_malformed_and_excessive_records() {
     });
 }
 
+#[test]
+fn saved_pattern_slots_count_toward_the_state_budget() {
+    use serde_json::json;
+    let mut doc = Document::new("Pattern layout");
+    doc.add_feature(FeatureKind::ConstructionPlane { plane: PlaneRef::Origin { name: "XY".into() } }, None).unwrap();
+    let feature = doc.features[0].id;
+    let mut model = Model::new();
+    model.evaluate(&doc);
+    let mut saved = model.saved(&doc).unwrap();
+    let state = &mut saved.records["states"][0];
+    state["pattern_body_layouts"] = json!({(feature.to_string()): {"copies_per_source": 2, "made_slots": [0, 1]}});
+    assert_eq!(saved.final_state().unwrap().pattern_body_layout(feature).unwrap().sources().collect::<Vec<_>>(), [0, 0]);
+
+    // A compressed body run leaves room for two entries. The pattern map adds one entry
+    // and two slots, so preflight must refuse the state before expanding the body run.
+    saved.records["states"][0]["bodies"] = json!([[0, 49_999_998]]);
+    assert!(matches!(saved.final_state(), Err(DocError::Invalid(message)) if message == "saved model: states"));
+}
+
 /// The dirty check and autosave compare the whole document after every edit; a scanned
 /// part's shared triangles must not be read for that. A coordinate that equals nothing (not a
 /// number) shows whether the shared arrays were read: only reading them makes a mesh differ
@@ -1695,6 +1714,11 @@ fn a_pattern_replays_every_grouped_thread_pick_on_its_named_body() {
                     dir2: None,
                     count2: None,
                     spacing2: None,
+                    reference1: None,
+                    reference2: None,
+                    skip: Vec::new(),
+                    skip_width: None,
+                    skip_members: Vec::new(),
                     alignment: solidcraft_sketch::PatternAlignment::Right,
                     alignment2: Default::default(),
                     reversed: false,
@@ -1743,6 +1767,11 @@ fn a_patterned_modelled_thread_reuses_its_final_check() {
                     dir2: None,
                     count2: None,
                     spacing2: None,
+                    reference1: None,
+                    reference2: None,
+                    skip: Vec::new(),
+                    skip_width: None,
+                    skip_members: Vec::new(),
                     alignment: solidcraft_sketch::PatternAlignment::Right,
                     alignment2: Default::default(),
                     reversed: false,
