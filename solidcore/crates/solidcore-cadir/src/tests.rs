@@ -304,8 +304,9 @@ fn widened(s: &Solid) -> (usize, usize) {
 
 /// A polyline's chords stand within the chordal deflection its producer states of the curve
 /// they sample: the edge on it holds that allowance (and its two vertices with it), so the record
-/// does not take the chords for the curve; one past what an edge's tolerance holds refuses its
-/// region with why, and a polyline whose chords are the curve (deflection 0) changes nothing.
+/// does not take the chords for the curve; one past what an edge's tolerance holds is refused with
+/// why (its faces left out of an open surface), and a polyline whose chords are the curve
+/// (deflection 0) changes nothing.
 #[test]
 fn a_polylines_chordal_deflection_is_its_edges_tolerance() {
     use cadmpeg_ir::geometry::sampled::{PolylineCurve, PolylineSamples, PolylineVertex};
@@ -359,21 +360,30 @@ fn a_polylines_chordal_deflection_is_its_edges_tolerance() {
             == 2
     );
     assert_eq!(widened(&one(&with(0.0))), (0, 0));
+    // Past what an edge's tolerance holds: refused, and as the refusal names each face on the
+    // polyline, those faces are left out of an open surface of the others, the reason noted.
     let bodies = read_bodies(&with(2.0), None);
-    assert!(bodies.read.is_empty());
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
     assert!(
-        bodies.failures[0]
-            .message
-            .contains("more than an edge's tolerance holds"),
+        s.sheet && s.brep.faces.len() == 4,
+        "{} faces",
+        s.brep.faces.len()
+    );
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.starts_with("left out: ")
+                && n.contains("more than an edge's tolerance holds")),
         "{:?}",
-        bodies.failures
+        s.notes
     );
 }
 
 /// A procedural surface's solved cache fitted within a tolerance its construction states is not
 /// the exact surface: read as the face's surface, the face's edges (and their vertices) hold that
-/// tolerance; a cache whose fit no edge's tolerance holds refuses the region, naming the face;
-/// a cache stated with no fit is read as before.
+/// tolerance; a cache whose fit no edge's tolerance holds is refused, naming the face, which is
+/// left out of an open surface; a cache stated with no fit is read as before.
 #[test]
 fn a_fitted_procedural_cache_is_held_to_its_fit_not_taken_as_exact() {
     use cadmpeg_ir::geometry::ProceduralSurfaceDefinition as D;
@@ -426,12 +436,22 @@ fn a_fitted_procedural_cache_is_held_to_its_fit_not_taken_as_exact() {
     assert_eq!(widened(&s), (4, 4));
     assert!(s.brep.edges.iter().filter(|e| e.tolerance >= 0.05).count() == 4);
     assert_eq!(widened(&one(&with(None))), (0, 0));
+    // Past what an edge's tolerance holds: the refusal names the face, which is left out of an
+    // open surface of the other five, the reason noted.
     let bodies = read_bodies(&with(Some(2.0)), None);
-    assert!(bodies.read.is_empty());
-    let why = &bodies.failures[0].message;
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
     assert!(
-        why.contains("face") && why.contains("its solved cache"),
-        "{why}"
+        s.sheet && s.brep.faces.len() == 5,
+        "{} faces",
+        s.brep.faces.len()
+    );
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.starts_with("left out: ") && n.contains("its solved cache")),
+        "{:?}",
+        s.notes
     );
 }
 
