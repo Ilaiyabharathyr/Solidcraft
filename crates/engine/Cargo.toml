@@ -73,6 +73,8 @@ solidcraft-profile = { workspace = true, features = ["enabled"] }
 solidcraft-io = { workspace = true, features = ["dxf-legacy-baseline-tests", "trust-unknown-source"] }
 # Normal CI exercises profiling assertions without enabling the production feature.
 solidcraft-sketch = { workspace = true, features = ["solver-profiling"] }
+# Writes a KiCad `.stpZ` (a zipped STEP) for the board-import tests.
+zip = { workspace = true }
 
 [[example]]
 name = "render_resource_workflow"
