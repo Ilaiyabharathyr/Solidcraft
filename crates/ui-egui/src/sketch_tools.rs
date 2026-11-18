@@ -377,8 +377,9 @@ pub fn start_hook(app: &mut SolveApp, id: &str) -> bool {
         return true;
     }
     let command = id.to_string();
-    // Offer the image types first: the default Open filter lists only designs and meshes.
-    app.pick_open_for(&["png", "jpg", "jpeg"], move |app, path| {
+    // Offer the image types first: the default Open filter lists only designs and meshes. An SVG
+    // is drawn into a PNG as the command inserts it.
+    app.pick_open_for(&["png", "jpg", "jpeg", "svg"], move |app, path| {
         if let Some(path) = path {
             start_image_placement(app, &command, path);
         }
@@ -1303,15 +1304,23 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, proj: &Proj, pos: Pos2) {
                 ))
             });
             let Some((plane, at)) = target else { return };
-            let p = if decal {
+            // On the plane of the sketch being edited, the image follows a construction rectangle
+            // drawn around it in that sketch (#18405), when the preference asks for it. The engine
+            // decides whether the image lies on that plane ("auto"); off it, the image is free.
+            let frame = app.preferences.frame_images_in_sketch && app.session.active_sketch.is_some();
+            let mut p = if decal {
                 json!({"path": path, "face": if plane.get("face").is_some() { plane } else { Value::Null }})
             } else {
                 json!({"path": path, "plane": plane, "at": [at.x, at.y, at.z]})
             };
+            if let (true, Some(o)) = (frame, p.as_object_mut()) {
+                o.insert("frame".into(), json!("auto"));
+            }
             if let Ok(v) = app.run(cmd, p) {
                 IMAGE.with(|i| *i.borrow_mut() = None);
                 app.tool = None;
-                if let Some(id) = v["canvas"].as_u64() {
+                // A framed image is placed and sized by its rectangle's constraints, not the card.
+                if let Some(id) = v["canvas"].as_u64().filter(|_| v.get("frame").is_none()) {
                     app.tree.canvas_panel = Some(crate::browser::CanvasPanel::new(app, id, false));
                 }
             }
