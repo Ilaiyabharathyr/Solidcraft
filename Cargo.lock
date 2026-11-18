@@ -6040,6 +6040,7 @@ version = "0.45.0-rc.2"
 name = "solidcraft-doc"
 version = "0.45.0-rc.2"
 dependencies = [
+ "base64 0.23.1",
  "log",
  "serde",
  "serde_json",
@@ -6251,6 +6252,7 @@ dependencies = [
 name = "solidcraft-mcp-server"
 version = "0.45.0-rc.2"
 dependencies = [
+ "base64 0.23.1",
  "serde_json",
 ]
 
