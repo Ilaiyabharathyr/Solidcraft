@@ -6582,6 +6582,32 @@ impl SessionObjects<'_> {
             extended_surfaces,
             ..
         } = self;
+        // Not upstream (solidcraft#13156): a side edge that leaves the vertex along the
+        // filleted edge's own tangent means the face between them comes to a point there, so
+        // the blend's band can run off that face before the vertex. Where the corner's topology
+        // then cannot be made (upstream fails with "Unable to Make Topology"), the failure is
+        // given as no room, the rail leaving its face, at the vertex. Read before the topology
+        // is made; used only when it fails, so a corner that builds is never refused.
+        let cusp = {
+            let corner = corners
+                .get(id.0 as usize)
+                .ok_or_else(|| invalid("corner is not live"))?;
+            // Infallible: a lookup that fails here only means no cusp note, never a refusal.
+            if crate::blend::fillet_corner::topology::cusp_side_edge(k, target, corner)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                let vertex = corner.vertex;
+                let location = vertex.and_then(|v| crate::topology::vertex::point(target, v).ok());
+                let edge = crate::topology::edgeuse::p1::edge(target, edgeuse)
+                    .ok()
+                    .flatten();
+                Some((vertex, location, edge))
+            } else {
+                None
+            }
+        };
         let solver = solvers
             .get_mut(solver.0 as usize)
             .and_then(Option::as_mut)
@@ -6599,9 +6625,38 @@ impl SessionObjects<'_> {
             extended_surfaces,
             topo_edges: &mut executive.topo_edges,
         };
-        match corner.make_nx1_corner_topology(env)? {
-            Some(gaps) => self.nx1_end_gap_checks(k, id, gaps, executive),
-            None => Ok(()),
+        // On a cusp corner, a failure of the topology or of its end-gap checks (where the
+        // cusp case fails) is given as the cusp.
+        let made = match corner.make_nx1_corner_topology(env) {
+            Ok(Some(gaps)) => self.nx1_end_gap_checks(k, id, gaps, executive),
+            Ok(None) => Ok(()),
+            Err(e) => Err(e),
+        };
+        match (made, cusp) {
+            (Err(_), Some((vertex, location, edge))) => {
+                executive.error.note_vertex_error(
+                    vertex
+                        .map(|v| FilletObject::Topology(FilletBody::Target, EntityRef::Vertex(v))),
+                    location,
+                    crate::blend::fillet_geom::p1::FilStatus::Failure,
+                    crate::blend::fillet_geom::p1::FilletErrorType::NoRoom,
+                    Some(NX1_CUSP_SIDE_EDGE),
+                );
+                executive.error.no_room =
+                    Some(crate::blend::fillet_executive::NoRoomReason::RailLeavesFace);
+                executive.note_fit_radius(
+                    0.0,
+                    edge.map(|e| FilletObject::Topology(FilletBody::Target, EntityRef::Edge(e))),
+                    crate::blend::fillet_executive::p3::FitKind::Radius,
+                );
+                Err(SolidError::blend(
+                    "SmFilletNx1Corner::MakeCornerTopology",
+                    crate::error::blend::BlendFailure::NoRoom(
+                        crate::blend::fillet_executive::NoRoomReason::RailLeavesFace,
+                    ),
+                ))
+            }
+            (made, _) => made,
         }
     }
 
@@ -7498,6 +7553,9 @@ impl SessionObjects<'_> {
             .ok_or_else(|| invalid("corner is not live"))
     }
 }
+
+/// The Nx1 corner refused at a cusp (solidcraft#13156).
+const NX1_CUSP_SIDE_EDGE: &str = "Fillet Error: the blend's band runs off its face, which comes to a point at the vertex (a side edge leaves it along the blended edge)";
 
 impl CornerVertexAccess<FilletObject> for SessionObjects<'_> {
     fn vertices_make_topology(
