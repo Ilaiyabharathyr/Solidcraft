@@ -1240,9 +1240,14 @@ impl Dialog {
             }
         };
         recall(app, &mut d);
-        // Patterns of features picked in the timeline: the objects are features.
+        // A hole picked in the viewport is the source feature of a rectangular pattern.
+        let rectangular_selection = matches!(d.kind, Kind::PatternRect { .. }).then(|| {
+            s.selection.iter().map(|sel| selected_pattern_hole(app, sel).map_or_else(|| sel.clone(), |id| Sel::Feature { id })).collect::<Vec<_>>()
+        });
+        let preselection = rectangular_selection.as_deref().unwrap_or(&s.selection);
+        // Patterns of picked features use the feature input.
         if is_pattern(&d.kind)
-            && s.selection.iter().any(|x| matches!(x, Sel::Feature { .. }))
+            && preselection.iter().any(|x| matches!(x, Sel::Feature { .. }))
             && let Some(inp) = d.inputs.first_mut()
         {
             inp.accept = selection::FEATURES;
@@ -1251,7 +1256,7 @@ impl Dialog {
         // Pre-selection: what is selected now becomes the input (first input that takes it); a
         // face or edge stands for its body where bodies are wanted. (Edit Text's selection is the
         // text it edits, not its path.)
-        let preselection: &[Sel] = if matches!(d.kind, Kind::Text(_)) { &[] } else { &s.selection };
+        let preselection = if matches!(d.kind, Kind::Text(_)) { &[] } else { preselection };
         for sel in preselection {
             if !matches!(d.kind, Kind::OffsetPlane { .. } | Kind::Construct { .. }) && is_wire_point(s, sel) {
                 continue;
@@ -6021,6 +6026,39 @@ pub fn preview_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value
     Ok(cmds)
 }
 
+fn selected_pattern_hole(app: &SolveApp, sel: &Sel) -> Option<u64> {
+    let hole_on_face = |body: &str, face| {
+        let id = crate::context_menu::face_feature(app, body, face)?;
+        app.session.doc.feature(id).filter(|f| matches!(f.kind, FeatureKind::Hole { .. })).map(|f| f.id)
+    };
+    let body = match sel {
+        Sel::Face { body, index, .. } => return hole_on_face(body, *index),
+        Sel::Edge { body, .. } | Sel::Vertex { body, .. } => body,
+        _ => return None,
+    };
+    let world = crate::open_meshing::session_world(&app.session);
+    let record = world.body(body)?.body.record();
+    let mut holes = record
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(index, edge)| match sel {
+            Sel::Edge { index: picked, .. } => index == picked,
+            // The viewport can snap to the vertex at the seam of a circular rim.
+            Sel::Vertex { point, .. } => edge.vertices.iter().any(|&index| {
+                record
+                    .vertices
+                    .get(index as usize)
+                    .is_some_and(|vertex| Vec3::from(vertex.point).dist(*point) <= vertex.tolerance.max(edge.tolerance).max(1e-8))
+            }),
+            _ => false,
+        })
+        .flat_map(|(_, edge)| &edge.uses)
+        .filter_map(|edge_use| hole_on_face(body, edge_use.face as usize));
+    let first = holes.next()?;
+    holes.all(|id| id == first).then_some(first)
+}
+
 /// The unwrapped pattern command, with every member enabled for viewport picking.
 pub(crate) fn pattern_skip_params(app: &SolveApp, d: &Dialog) -> Option<(&'static str, Value)> {
     let pattern = d.pattern_skip_command()?;
@@ -6030,10 +6068,37 @@ pub(crate) fn pattern_skip_params(app: &SolveApp, d: &Dialog) -> Option<(&'stati
     } else if cmd != pattern {
         return None;
     }
-    let fields = params.as_object_mut()?;
-    fields.remove("skip");
-    fields.remove("skip_members");
+    clear_pattern_exclusions(&mut params);
     Some((pattern, params))
+}
+
+fn clear_pattern_exclusions(params: &mut Value) {
+    if let Some(fields) = params.as_object_mut() {
+        for key in ["skip", "skip_members", "skip_width"] {
+            fields.remove(key);
+        }
+    }
+}
+
+/// Preview all the editable copies, keeping the original command for OK and for a fallback
+/// when a skipped copy would make the full pattern fail.
+pub(crate) fn pattern_edit_all_copies(commands: &[(String, Value)]) -> Option<[(String, Value); 1]> {
+    let [(command, params)] = commands else { return None };
+    if command != "timeline.redefine"
+        || !matches!(
+            params.get("command").and_then(Value::as_str),
+            Some("solid.pattern.rectangular" | "solid.pattern.circular" | "solid.pattern.path")
+        )
+    {
+        return None;
+    }
+    let fields = params.get("params")?.as_object()?;
+    if !["skip", "skip_members"].iter().any(|key| fields.get(*key).and_then(Value::as_array).is_some_and(|items| !items.is_empty())) {
+        return None;
+    }
+    let mut all = params.clone();
+    clear_pattern_exclusions(all.get_mut("params")?);
+    Some([(command.clone(), all)])
 }
 
 /// A wrapped Emboss edit keeps its profile guide in the saved author occurrence.
@@ -8717,6 +8782,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                     d
                 }
             };
+            d.pattern_skip_selecting = d.has_pattern_skips();
             // Replay references stay features, including features that created a body.
             let as_features = !features.is_empty();
             if let Some(inp) = d.inputs.first_mut() {

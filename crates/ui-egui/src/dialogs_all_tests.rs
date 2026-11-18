@@ -1499,6 +1499,28 @@ fn rectangular_pattern_groups_each_direction_in_the_same_order() {
 }
 
 #[test]
+fn editing_a_rectangular_pattern_previews_skipped_copies_and_keeps_them_omitted_on_ok() {
+    let mut h = Harness::new();
+    h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Seed"})).unwrap();
+    let result =
+        h.app.run("solid.pattern.rectangular", json!({"bodies": ["Seed"], "dir1": [1, 0, 0], "count1": 3, "spacing1": 20, "skip": [3]})).unwrap();
+    let pattern = result["feature"].as_u64().unwrap();
+    assert_eq!(h.app.session.model.state().bodies.len(), 2);
+
+    h.app.edit_feature(pattern);
+    let dialog = h.app.dialog.as_ref().unwrap();
+    assert!(dialog.pattern_skip_active(), "the saved exclusion is immediately available to restore");
+    let commands = preview_commands(&h.app, dialog).unwrap();
+    let colors = crate::preview::Colors::from_tokens(&solidcraft_theme::Tokens::get());
+    let preview = crate::preview::compute(&h.app.session, &commands, colors).unwrap();
+    assert!((preview.bounds.max.x - 50.0).abs() < 1.0e-8, "the preview reaches the skipped last copy");
+
+    let apply = apply_commands(&h.app, dialog).unwrap();
+    assert_eq!(apply[0].1["params"]["skip"], json!([3]));
+    assert_eq!(h.app.session.preview(&apply).unwrap().after.bodies.len(), 2);
+}
+
+#[test]
 fn rectangular_pattern_reference_keeps_its_pick_and_offset_on_edit() {
     let mut h = Harness::new();
     h.app.home.open = false;
