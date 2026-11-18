@@ -212,6 +212,10 @@ pub struct Resolved {
     /// The vertex a `Vertex` reference resolved to (its index in the body's B-rep record),
     /// whose persistent name the link keeps ([`resolved_vertex_name`]). Computed metadata only.
     pub vertex_index: Option<usize>,
+    /// A face's boundary read in the order of its edges' persistent names, every edge named
+    /// exactly and no two alike: the same reading again is the same edges, wherever a parameter
+    /// moved them ([`Sketch::update_link_in_name_order`], #18711).
+    pub in_name_order: bool,
 }
 
 /// Resolutions of body-based references, keyed by the reference, the sketch plane and the
@@ -298,6 +302,7 @@ fn resolve_uncached(
     let mut face_index = None;
     let mut edge_index = None;
     let mut vertex_index = None;
+    let mut in_name_order = false;
     let mut source = src.clone();
     let mut wires: Vec<Vec<Vec3>> = Vec::new();
     let mut exact: Vec<Vec<WireCurve>> = Vec::new();
@@ -340,7 +345,9 @@ fn resolve_uncached(
                     if target.body.is_mesh() {
                         crate::project3d::flat_outline(&mesh, q).iter().flat_map(|outline| fit_mesh_outline(plane, outline)).collect()
                     } else {
-                        let g = projected_edges(target, &mesh, plane, &projection_face_edges(target, &mesh, f, plane)?);
+                        let (edges, named) = projection_face_edges(target, &mesh, f, plane)?;
+                        in_name_order = named;
+                        let g = projected_edges(target, &mesh, plane, &edges);
                         if certified_planar_construction(target, f as usize) { merge_family_lines(g)? } else { g }
                     }
                 }
@@ -552,7 +559,7 @@ fn resolve_uncached(
     if geom.is_empty() && wires.is_empty() {
         return Err(DocError::Invalid(format!("the {} projects to nothing on this sketch plane", src.describe())));
     }
-    Ok(Resolved { geom: merge_split_circles(geom), wires, exact, source, moved, face_index, edge_index, vertex_index })
+    Ok(Resolved { geom: merge_split_circles(geom), wires, exact, source, moved, face_index, edge_index, vertex_index, in_name_order })
 }
 
 /// Whether a curve (world points) leaves the sketch plane: included, it then stays 3D.
@@ -1205,6 +1212,7 @@ fn resolve_named_edge(st: &ModelState, plane: &Plane, kind: LinkKind, body: &str
         face_index: None,
         edge_index: Some(index),
         vertex_index: None,
+        in_name_order: false,
     })
 }
 
@@ -1222,6 +1230,7 @@ fn resolve_named_vertex(plane: &Plane, body: &str, index: usize, at: Vec3) -> Re
         face_index: None,
         edge_index: None,
         vertex_index: Some(index),
+        in_name_order: false,
     })
 }
 
@@ -1233,13 +1242,16 @@ fn resolve_named_face(st: &ModelState, plane: &Plane, kind: LinkKind, body: &str
     }
     let face_index = Some(index);
     let index = u32::try_from(index).map_err(|_| DocError::Invalid("named projection face index exceeds limit".into()))?;
+    let mut in_name_order = false;
     let geom = if kind == LinkKind::Intersect {
         match axial_section(target, plane, index)? {
             Some(exact) => exact,
             None => section(plane, &mesh, Some(index)),
         }
     } else {
-        let geom = projected_edges(target, &mesh, plane, &projection_face_edges(target, &mesh, index, plane)?);
+        let (edges, named) = projection_face_edges(target, &mesh, index, plane)?;
+        in_name_order = named;
+        let geom = projected_edges(target, &mesh, plane, &edges);
         let geom = merge_split_circles(geom);
         if certified_planar_construction(target, index as usize) { merge_family_lines(geom)? } else { geom }
     };
@@ -1255,16 +1267,44 @@ fn resolve_named_face(st: &ModelState, plane: &Plane, kind: LinkKind, body: &str
         face_index,
         edge_index: None,
         vertex_index: None,
+        in_name_order,
     })
 }
 
-fn projection_face_edges(body: &crate::ModelBody, mesh: &Mesh, index: u32, plane: &Plane) -> Result<Vec<usize>> {
+/// The edges of face `index` in projection order, and whether that order is their names' (see
+/// [`Resolved::in_name_order`]).
+fn projection_face_edges(body: &crate::ModelBody, mesh: &Mesh, index: u32, plane: &Plane) -> Result<(Vec<usize>, bool)> {
     let shell_plane = body
         .body
         .face_sources()
         .and_then(|sources| sources.get(index as usize))
         .is_some_and(|source| matches!(source, Some(solidcraft_kernel::FaceSource::ShellPlanar { .. })));
-    if shell_plane { order::raw_face_edges(mesh, index, plane) } else { order::face_edges(mesh, index, plane) }
+    let (names, exact) = projection_edge_names(body);
+    let edges = if shell_plane { order::raw_face_edges(mesh, index, plane, &names)? } else { order::face_edges_named(mesh, index, plane, &names)? };
+    let named = named_reading(&names, &exact, &edges);
+    Ok((edges, named))
+}
+
+/// Whether `edges` all have a name in `names` that follows exact history (`exact`) and no two
+/// the same one: read in the order of their names, they are read in the same order wherever they
+/// lie.
+fn named_reading(names: &[String], exact: &[bool], edges: &[usize]) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    !edges.is_empty()
+        && edges.iter().all(|e| exact.get(*e).copied().unwrap_or(false) && names.get(*e).is_some_and(|n| !n.is_empty() && seen.insert(n)))
+}
+
+/// The persistent names of a body's mesh edges, which order a projected face's boundary (see
+/// `order::face_edges_named`); none for a mesh body, whose edges have no history to be named by.
+/// With each, whether its name follows exact history (the faces it separates do, and it is not
+/// one of several edges between them numbered by where they lie).
+fn projection_edge_names(body: &crate::ModelBody) -> (Vec<String>, Vec<bool>) {
+    if body.body.is_mesh() {
+        return (Vec::new(), Vec::new());
+    }
+    let edges = crate::name_lookup::BodyEdges::new(body);
+    let exact = (0..edges.mesh.edge_faces.len()).map(|i| edges.verified(i)).collect();
+    (edges.into_names(), exact)
 }
 
 fn certified_planar_construction(body: &crate::ModelBody, index: usize) -> bool {
@@ -1303,6 +1343,7 @@ pub fn resolve_face_indices(st: &ModelState, plane: &Plane, kind: LinkKind, body
     }
     let selected: std::collections::BTreeSet<_> = indices.iter().copied().collect();
     let mut geometry = Vec::new();
+    let mut in_name_order = false;
     if kind == LinkKind::Intersect {
         for index in indices {
             let index = u32::try_from(*index).map_err(|_| DocError::Invalid("anchored face index exceeds format bounds".into()))?;
@@ -1313,14 +1354,16 @@ pub fn resolve_face_indices(st: &ModelState, plane: &Plane, kind: LinkKind, body
         }
     } else {
         let edges = if let [index] = indices {
-            projection_face_edges(
+            let (edges, named) = projection_face_edges(
                 body,
                 &mesh,
                 u32::try_from(*index).map_err(|_| DocError::Invalid("face index exceeds format bounds".into()))?,
                 plane,
-            )?
+            )?;
+            in_name_order = named;
+            edges
         } else {
-            order::family_edges(&mesh, &selected, plane)?
+            order::family_edges_named(&mesh, &selected, plane, &projection_edge_names(body).0)?
         };
         geometry.extend(projected_edges(body, &mesh, plane, &edges));
     }
@@ -1345,6 +1388,7 @@ pub fn resolve_face_indices(st: &ModelState, plane: &Plane, kind: LinkKind, body
         face_index: if indices.len() == 1 { indices.first().copied() } else { None },
         edge_index: None,
         vertex_index: None,
+        in_name_order,
     })
 }
 
@@ -1575,6 +1619,7 @@ fn refresh_links_in(
                     face_index: None,
                     edge_index: None,
                     vertex_index: None,
+                    in_name_order: false,
                 })
             })
         } else if l.auto_face {
@@ -1595,6 +1640,7 @@ fn refresh_links_in(
         };
         match resolved {
             Ok(r) => {
+                let in_name_order = r.in_name_order && l.kind == LinkKind::Project;
                 // An edge or vertex link saved without a name takes the name of the geometry it was
                 // found on. A sketch that is edited stores it; evaluation leaves the design as it is.
                 if l.edge_name.is_none()
@@ -1618,7 +1664,8 @@ fn refresh_links_in(
                 let words_follow = matches!(&l.source, LinkSource::Text { exprs, .. } if exprs.text.is_some());
                 let others = |sk: &Sketch| (sk.constraints.len(), sk.curves.len().saturating_sub(sk.link_curves(&l.id).len()));
                 let before = others(sk);
-                match sk.update_link(&l.id, &r.geom) {
+                let updated = if in_name_order { sk.update_link_in_name_order(&l.id, &r.geom) } else { sk.update_link(&l.id, &r.geom) };
+                match updated {
                     Ok(true) if words_follow => {}
                     // A rebuilt projection is only worth a warning when it took something of
                     // the user's with it: a constraint, a dimension or a curve drawn on it.

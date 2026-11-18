@@ -2356,6 +2356,56 @@ fn a_thicker_angle_moves_the_projected_face_of_the_sketch_on_it() {
     check(&Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap()));
 }
 
+/// #18711: a panel leaning at the angle `A` (an 18 wide foot at the origin, sides 300 long) with
+/// a sketch on its top face and a circle on the projected top corner. Turning the panel from 95
+/// to 92, 90 or 85 degrees moves that corner past the foot: the face's edges, read in the order
+/// of where they lie, came back in another order, and the projection was rebuilt without the
+/// circle's constraint. The face's boundary is read in the order of its edges' names, so it is
+/// the same boundary moved, and the circle stays on the corner.
+#[test]
+fn a_leaning_panel_turned_keeps_what_is_on_its_projected_face() {
+    let mut s = Session::default();
+    run(&mut s, "parameters.change", json!({"name": "A", "expression": "95 deg"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [18, 0], [-8, 299], [-26, 299]], "closed": true, "ids": ["m1", "m2", "m3", "m4"]}));
+    run(&mut s, "sketch.constraint.coincident", json!({"a": "m1.start", "b": "origin"}));
+    for (line, mode) in [("m1", "horizontal"), ("m3", "horizontal")] {
+        run(&mut s, "sketch.constraint.horizontal_vertical", json!({"line": line, "mode": mode}));
+    }
+    run(&mut s, "sketch.constraint.parallel", json!({"a": "m2", "b": "m4"}));
+    run(&mut s, "sketch.dimension", json!({"entities": ["m1"], "value": 18}));
+    run(&mut s, "sketch.dimension", json!({"entities": ["m4"], "value": 300}));
+    run(&mut s, "sketch.dimension", json!({"entities": ["m1", "m4"], "value": "A"}));
+    assert_eq!(inspect(&mut s)["dof"], 0);
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 118, "body_name": "Panel"}));
+    // The top corner of the side away from the origin: the foot's end and a side of 300 at `A`.
+    let corner = |degrees: f64| {
+        let a = degrees.to_radians();
+        solidcore_record::Vec3::new(18. + 300. * a.cos(), 300. * a.sin(), 118.)
+    };
+    let sketch = run(&mut s, "sketch.create", json!({"plane": {"face": [-4, 149, 118]}}))["sketch"].as_u64().unwrap();
+    let st = s.model.state();
+    let ss = st.sketch(sketch).unwrap();
+    let on_corner = ss.sketch.points.iter().find(|p| p.link.is_some() && ss.plane.to_world(p.pos).dist(corner(95.)) < 1e-6).unwrap().id.clone();
+    let circle = ids(&run(&mut s, "sketch.circle.center", json!({"center": [-6, 290], "radius": 5}))["curves"])[0].clone();
+    run(&mut s, "sketch.constraint.coincident", json!({"a": format!("{circle}.center"), "b": on_corner}));
+    run(&mut s, "sketch.dimension", json!({"entities": [circle], "value": 10}));
+    assert_eq!(inspect(&mut s)["dof"], 0);
+    run(&mut s, "sketch.finish", json!({}));
+    for degrees in [92., 90., 85., 95.] {
+        run(&mut s, "parameters.change", json!({"name": "A", "expression": format!("{degrees} deg")}));
+        let warning = s.model.result(sketch).and_then(|r| r.warning.clone());
+        assert!(warning.is_none(), "{degrees}: {warning:?}");
+        let st = s.model.state();
+        let ss = st.sketch(sketch).unwrap();
+        assert!(ss.sketch.links.iter().all(|l| !l.lost), "{degrees}");
+        assert_eq!(ss.sketch.constraints.len(), 2, "{degrees}: the circle keeps its place and its size");
+        let center = ss.sketch.points.iter().find(|p| p.id == format!("{circle}.center")).unwrap();
+        assert!(ss.plane.to_world(center.pos).dist(corner(degrees)) < 1e-6, "{degrees}: {:?}", ss.plane.to_world(center.pos));
+    }
+}
+
 /// A sphere's outline from above is its equator: one circle and one profile. Flat triangles beside
 /// the equator can tip the other way from the sphere, and their edges must not join the outline.
 #[test]

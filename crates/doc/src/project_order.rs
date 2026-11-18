@@ -1,5 +1,7 @@
-//! Stable face projection order: outer boundary first, then holes by geometry.
-//! B-rep edge indices depend on face enumeration and must not choose sketch curve IDs.
+//! Stable face projection order: outer boundary first, then holes by geometry; within a
+//! boundary, its edges by their persistent names, then by geometry.
+//! B-rep edge indices depend on face enumeration and must not choose sketch curve IDs; where
+//! edges lie changes with the parameters, so it only orders edges whose names do not.
 
 use solidcraft_geom::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,24 +22,38 @@ pub(super) fn join_tolerance(mesh: &Mesh) -> f64 {
 
 /// Boundary of the picked face as drawn: a closed surface cut into pieces (a cylinder or a
 /// round's torus in halves) projects as the whole patch, since its seams are hidden.
+#[cfg(test)]
 pub(super) fn face_edges(mesh: &Mesh, face: u32, plane: &Plane) -> Result<Vec<usize>> {
+    face_edges_named(mesh, face, plane, &[])
+}
+
+/// [`face_edges`] with the persistent names of the mesh's edges (`names[e]`, empty where an edge
+/// has none): each boundary lists its edges in the order of their names, so a face moved or
+/// reshaped by a parameter is read again in the order it was read before (#18711).
+pub(super) fn face_edges_named(mesh: &Mesh, face: u32, plane: &Plane, names: &[String]) -> Result<Vec<usize>> {
     let patch = mesh.surface_patch(face as usize);
     if patch.len() > 1 {
-        return family_edges(mesh, &patch.into_iter().collect(), plane);
+        return family_edges_named(mesh, &patch.into_iter().collect(), plane, names);
     }
     let edges = mesh.face_edges(face).into_iter().filter(|e| !mesh.seams.get(*e).copied().unwrap_or(false)).collect();
-    boundary_edges(mesh, edges, &[face as usize].into_iter().collect(), plane)
+    boundary_edges(mesh, edges, &[face as usize].into_iter().collect(), plane, names)
 }
 
 /// Full boundary of an explicitly selected analytic planar piece. Display seams
 /// hide subdivisions for picking, but cannot remove a raw piece's closing edge.
-pub(super) fn raw_face_edges(mesh: &Mesh, face: u32, plane: &Plane) -> Result<Vec<usize>> {
-    boundary_edges(mesh, mesh.face_edges(face), &[face as usize].into_iter().collect(), plane)
+pub(super) fn raw_face_edges(mesh: &Mesh, face: u32, plane: &Plane, names: &[String]) -> Result<Vec<usize>> {
+    boundary_edges(mesh, mesh.face_edges(face), &[face as usize].into_iter().collect(), plane, names)
 }
 
 /// Exterior of an exact current face family. Shared topological edges are internal;
 /// geometric proximity never merges distinct edges or chooses a different face.
+#[cfg(test)]
 pub(super) fn family_edges(mesh: &Mesh, selected: &std::collections::BTreeSet<usize>, plane: &Plane) -> Result<Vec<usize>> {
+    family_edges_named(mesh, selected, plane, &[])
+}
+
+/// [`family_edges`] with the persistent names of the mesh's edges, as [`face_edges_named`].
+pub(super) fn family_edges_named(mesh: &Mesh, selected: &std::collections::BTreeSet<usize>, plane: &Plane, names: &[String]) -> Result<Vec<usize>> {
     let mut edges = Vec::new();
     for (index, faces) in mesh.edge_faces.iter().enumerate() {
         let count = faces.iter().filter(|face| selected.contains(&(**face as usize))).count();
@@ -51,13 +67,14 @@ pub(super) fn family_edges(mesh: &Mesh, selected: &std::collections::BTreeSet<us
             edges.push(index);
         }
     }
-    boundary_edges(mesh, edges, selected, plane)
+    boundary_edges(mesh, edges, selected, plane, names)
 }
 
 /// `faces`: the faces the edges bound. Where boundaries touch at a vertex (a pinch: an even number of
 /// boundary edges meet there), the walk stays on the face it came along, or else takes the first
 /// edge in geometric order; either way every loop closes. An odd number is a real branch.
-fn boundary_edges(mesh: &Mesh, mut edges: Vec<usize>, faces: &BTreeSet<usize>, plane: &Plane) -> Result<Vec<usize>> {
+/// Each boundary lists its edges by `names` (see [`face_edges_named`]), then by where they lie.
+fn boundary_edges(mesh: &Mesh, mut edges: Vec<usize>, faces: &BTreeSet<usize>, plane: &Plane, names: &[String]) -> Result<Vec<usize>> {
     let bounds = mesh.bounds();
     let origin = bounds.min;
     let local_origin = plane.to_local(origin);
@@ -160,7 +177,10 @@ fn boundary_edges(mesh: &Mesh, mut edges: Vec<usize>, faces: &BTreeSet<usize>, p
             let Some(next) = candidates.first() else { break };
             edge = *next;
         }
-        boundary.sort_by_key(|e| geometry_key(*e));
+        // Where the boundary's edges lie orders the boundaries; the edges' names order each one.
+        let first = boundary.iter().copied().map(geometry_key).min();
+        let name = |e: usize| names.get(e).filter(|n| !n.is_empty());
+        boundary.sort_by(|a, b| name(*a).cmp(&name(*b)).then_with(|| geometry_key(*a).cmp(&geometry_key(*b))));
         let closed = current.dist(start) <= join;
         if !closed || !twice_area.is_finite() {
             return Err(DocError::Invalid("face projection has an open or invalid boundary".into()));
@@ -168,7 +188,6 @@ fn boundary_edges(mesh: &Mesh, mut edges: Vec<usize>, faces: &BTreeSet<usize>, p
         // Equal-sized holes use their geometric key, not round-off from summing the
         // same area at different positions or walking their edges in reverse.
         let area = (twice_area.abs() / (tol * bounds.diagonal().max(tol))).round() as i64;
-        let first = boundary.first().copied().map(geometry_key);
         boundaries.push((area, first, boundary));
     }
     boundaries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
