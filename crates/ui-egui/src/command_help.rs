@@ -71,6 +71,8 @@ pub const DOCUMENTED: &[&str] = &[
     "file.send_to_slicer",
     "frame.end_cap",
     "frame.member",
+    "gear.edit",
+    "gear.insert",
     "inspect.accessibility",
     "inspect.center_of_mass",
     "inspect.colored_components",
