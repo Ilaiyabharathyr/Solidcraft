@@ -9,6 +9,7 @@
 //! spacing.
 
 use serde_json::json;
+use solidcore_record::Vec2;
 use solidcraft_engine::Sel;
 use solidcraft_engine::geom::prelude::*;
 
@@ -16,6 +17,48 @@ use crate::dialogs::{Kind, apply_commands};
 use crate::scenario::Harness;
 use crate::selection::{AXES, CURVES, POINTS, SelInput};
 use crate::sketch_modify_ui::{Mod, commands};
+
+/// A click at 50 splits at 50 by default or at 40 and 70 with the intersection preference.
+/// The selected line keeps its first piece and undo restores the entire sketch in one step.
+#[test]
+fn break_click_uses_the_line_split_preference() {
+    for (crossings, at_intersections, pick) in [(true, false, 50.0), (false, false, 50.0), (true, false, 40.0), (true, true, 50.0)] {
+        let cuts: &[f64] = if at_intersections { &[40.0, 70.0] } else { std::slice::from_ref(&pick) };
+        let mut h = Harness::new();
+        h.app.home.open = false;
+        if at_intersections {
+            h.call("ui.prefs", json!({"sketch_break_at_intersections": true}));
+        }
+        h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
+        h.app.run("sketch.line", json!({"points": [[0,0], [100,0]], "ids": ["target"], "infer": false})).unwrap();
+        if crossings {
+            for x in [20, 40, 70] {
+                h.app.run("sketch.line", json!({"points": [[x,-10], [x,10]], "infer": false})).unwrap();
+            }
+        }
+        h.call("ui.view", json!({"view": "top"}));
+        h.call("ui.view", json!({"view": "fit"}));
+        h.settle();
+        let sid = h.app.session.active_sketch.unwrap();
+        let before = h.app.session.model.state().sketch(sid).unwrap().sketch.clone();
+        h.step(&json!({"start": "sketch.break"})).unwrap();
+        h.step(&json!({"click": {"sketch": [pick,0]}})).unwrap();
+        let state = h.app.session.model.state();
+        let after = &state.sketch(sid).unwrap().sketch;
+        assert_eq!(after.curves.len(), before.curves.len() + cuts.len(), "click at {pick}, expected cuts {cuts:?}");
+        let target = after.curve_index("target").unwrap();
+        let (start, mut end) = after.curves[target].kind.ends().unwrap();
+        for (piece, &x) in after.curves[before.curves.len()..].iter().zip(cuts) {
+            let (next_start, next_end) = piece.kind.ends().unwrap();
+            assert_eq!(end, next_start);
+            assert!(after.point(end).unwrap().dist(Vec2::new(x, 0.0)) < 1e-6, "expected a split at {x}");
+            end = next_end;
+        }
+        assert_eq!((start, end), before.curves[target].kind.ends().unwrap());
+        h.app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(h.app.session.model.state().sketch(sid).unwrap().sketch, before);
+    }
+}
 
 #[test]
 fn existing_patterns_reopen_from_menu_and_badge_and_edit_without_changing_surviving_ids() {

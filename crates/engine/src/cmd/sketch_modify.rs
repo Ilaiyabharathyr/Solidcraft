@@ -130,7 +130,13 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SKETCH", "MODIFY")
         .icon("sketch_break")
         .enabled(in_sketch)
-        .params(concat!("curve: id, at: [x,y] (split at intersections; at a point where the curve ends and another curve meets, the curve gets its own end there and the two are no longer joined) | points: [[x,y]…] (1…1000 positions projected onto the curve; duplicates are merged)", created_doc!())),
+        .params(concat!(
+            "curve: id, at: [x,y], at_intersections?: bool (default true: split at surrounding crossings. ",
+            "Use false to cut at the projected position on a finite curve. At a shared end, the selected curve gets its own end there.) ",
+            "| points: [[x,y]…] (1…1000 positions projected onto the curve, with duplicates merged). ",
+            "A circle needs two distinct projected points or two distinct crossings. A single cut on a multi-span spline can return more than two curve IDs",
+            created_doc!()
+        )),
     CommandSpec::new("sketch.scale", "Sketch Scale", crate::checked!("sketch.scale", scale))
         .in_sketch_part()
         .contract(&SCALE_CONTRACT)
@@ -1060,12 +1066,28 @@ fn trim_path_reply(s: &mut Session, p: &Value) -> Result<TrimPathResult> {
 /// Cuts closer than this to a curve's end or to each other are one place (mm).
 const BREAK_GAP: f64 = 1e-6;
 
+/// The cutter at the projected pick, if a crossing is closer than the break tolerance.
+fn picked_crossing(sk: &Sketch, ci: usize, q: Vec2) -> Result<Option<(f64, usize)>> {
+    for (t, crossing, cutter) in cut_points(sk, ci) {
+        let distance =
+            solidcore_ops::point_distance([crossing.x, crossing.y, 0.0], [q.x, q.y, 0.0]).map_err(|e| bad("sketch.break", e.to_string()))?;
+        if distance.value < BREAK_GAP {
+            return Ok(Some((t, cutter)));
+        }
+    }
+    Ok(None)
+}
+
 fn break_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sketch.break";
     let points = if p.get("points").is_some() { Some(vec2_list(cmd, p, "points", MAX_BREAK_POINTS)?) } else { None };
+    let at_intersections = bool_(p, "at_intersections").unwrap_or(true);
     let model_edit = s.open_drawing.is_none();
     let (out, info) = edit(s, p, cmd, false, |sk, doc| {
         let ci = curve_arg(sk, p, cmd)?;
+        if points.is_none() && !at_intersections && sk.curves.get(ci).is_some_and(|c| c.infinite) {
+            return Err(bad(cmd, "an infinite line has no ends to split between: make it a normal line first"));
+        }
         if points.is_none()
             && let Some(end) = shared_end(sk, ci, req_vec2(cmd, p, "at")?)
         {
@@ -1078,7 +1100,11 @@ fn break_cmd(s: &mut Session, p: &Value) -> Result<Value> {
                 super::sketch_freeform::break_at_points(sk, ci, points, cmd)?
             } else {
                 let at = req_vec2(cmd, p, "at")?;
-                super::sketch_freeform::trim_or_break(sk, ci, at, false, cmd)?
+                if at_intersections {
+                    super::sketch_freeform::trim_or_break(sk, ci, at, false, cmd)?
+                } else {
+                    super::sketch_freeform::break_at_points(sk, ci, &[at], cmd)?
+                }
             };
             if model_edit {
                 doc.prune_model_params();
@@ -1090,6 +1116,7 @@ fn break_cmd(s: &mut Session, p: &Value) -> Result<Value> {
         // moved curves the break never touched.
         refuse_offset_ends(sk, ci, "break", cmd)?;
         let sh = sk.shape(ci).ok_or_else(|| bad(cmd, "curve"))?;
+        let mut isolated_midpoint = None;
         let (ts, cutters): (Vec<f64>, Vec<Option<usize>>) = if let Some(list) = &points {
             let mut v: Vec<f64> = list.iter().map(|q| sh.param(sh.project(*q))).collect();
             v.sort_by(|a, b| a.total_cmp(b));
@@ -1098,8 +1125,17 @@ fn break_cmd(s: &mut Session, p: &Value) -> Result<Value> {
             (v, vec![None; n])
         } else {
             let at = req_vec2(cmd, p, "at")?;
-            let (cuts, _) = bracket(sk, ci, sh.param(sh.project(at)));
-            (cuts.iter().map(|c| c.0).collect(), cuts.iter().map(|c| Some(c.2)).collect())
+            let q = sh.project(at);
+            let t = sh.param(q);
+            if at_intersections {
+                let (cuts, _) = bracket(sk, ci, t);
+                (cuts.iter().map(|c| c.0).collect(), cuts.iter().map(|c| Some(c.2)).collect())
+            } else if let Some((t, cutter)) = picked_crossing(sk, ci, q)? {
+                (vec![t], vec![Some(cutter)])
+            } else {
+                isolated_midpoint = held_middle(sk, q, |line| line == ci);
+                (vec![t], vec![None])
+            }
         };
         let (t0, t1) = sh.range();
         if ts.is_empty() || (!sh.is_full() && ts.iter().any(|t| *t <= t0 || *t >= t1)) {
@@ -1128,9 +1164,11 @@ fn break_cmd(s: &mut Session, p: &Value) -> Result<Value> {
         let (pieces, pts) = split_at(sk, ci, &ts, cmd)?;
         let mut welded = Vec::new();
         for (pi, c) in pts.iter().zip(&cutters) {
-            if let Some(c) = c
-                && let Some(m) = hold_cut(sk, before.as_ref(), &midpoints, *pi, *c)?
-            {
+            let join = match c {
+                Some(c) => hold_cut(sk, before.as_ref(), &midpoints, *pi, *c)?,
+                None => isolated_midpoint,
+            };
+            if let Some(m) = join {
                 for piece in &pieces {
                     if let Some(curve) = sk.curves.get_mut(*piece) {
                         curve.kind.map_points(&|p| if p == *pi { m } else { p });
@@ -1141,6 +1179,12 @@ fn break_cmd(s: &mut Session, p: &Value) -> Result<Value> {
         }
         sk.remove_points(&welded);
         tie(sk, &pieces)?;
+        if isolated_midpoint.is_some()
+            && let [a, b] = pieces.as_slice()
+        {
+            // Both pieces share the held point. Equal lengths keep it halfway along their common line.
+            add_c(sk, ConstraintKind::Equal { a: *a, b: *b })?;
+        }
         Ok(ids_of(sk, &pieces))
     })?;
     reply(cmd, BreakResult { curves: out, sketch: info, created: None, param_warnings: Vec::new() })

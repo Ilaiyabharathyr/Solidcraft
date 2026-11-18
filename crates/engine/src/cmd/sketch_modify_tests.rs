@@ -692,14 +692,15 @@ fn trimming_at_a_held_midpoint_on_an_unrelated_line_adds_no_hold_to_that_line() 
 /// centre point, which stays where the diagonals cross.
 #[test]
 fn breaking_a_center_rectangle_diagonal_at_its_centre_keeps_one_centre() {
-    for (diagonal, at) in [(0, [7.5, 4.25]), (1, [7.5, -0.25])] {
+    // A click directly on the centre must reuse the same point as a break at the surrounding intersections.
+    for (diagonal, at, at_intersections) in [(0, [7.5, 4.25], true), (1, [7.5, -0.25], true), (0, [3.0, 2.0], false), (1, [3.0, 2.0], false)] {
         let mut s = new_sketch();
         run(&mut s, "sketch.rectangle.center", json!({"center": [3, 2], "corner": [12, 6.5]}));
         let sk = sketch(&s);
         let diagonals: Vec<String> = sk.curves.iter().filter(|c| c.construction).map(|c| c.id.clone()).collect();
         assert_eq!(diagonals.len(), 2, "{diagonals:?}");
         let (cut, other) = (diagonals[diagonal].clone(), diagonals[1 - diagonal].clone());
-        run(&mut s, "sketch.break", json!({"curve": cut, "at": at}));
+        run(&mut s, "sketch.break", json!({"curve": cut, "at": at, "at_intersections": at_intersections}));
         let sk = sketch(&s);
         let at_centre = sk.points.iter().filter(|p| p.pos.dist(Vec2::new(3.0, 2.0)) < 1e-7).count();
         assert_eq!(at_centre, 1, "diagonal {cut}: {} points at the centre", at_centre);
@@ -723,6 +724,41 @@ fn breaking_a_center_rectangle_diagonal_at_its_centre_keeps_one_centre() {
             assert!(c0.dist(centre).min(c1.dist(centre)) < 1e-6, "diagonal {cut}: {c0:?} {c1:?}, centre {centre:?}");
         }
     }
+}
+
+#[test]
+fn single_point_break_keeps_an_isolated_lines_held_midpoint() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.line", json!({"points": [[0,0], [10,0]], "ids": ["side"], "connect": false, "infer": false}));
+    run(&mut s, "sketch.constraint.fix", json!({"entity": "side.start"}));
+    let mid = run(&mut s, "sketch.point", json!({"point": "mid:side"}))["point"].as_str().unwrap().to_owned();
+    let before = sketch(&s);
+    let out = run(&mut s, "sketch.break", json!({"curve": "side", "at": [5,0], "at_intersections": false}));
+    let pieces = ids(&out["curves"]);
+    assert_eq!(pieces.len(), 2);
+    let sk = sketch(&s);
+    let (start, left_end) = sk.curves[sk.curve_index(&pieces[0]).unwrap()].kind.ends().unwrap();
+    let (right_start, end) = sk.curves[sk.curve_index(&pieces[1]).unwrap()].kind.ends().unwrap();
+    assert_eq!(Some(left_end), sk.resolve_point(&mid));
+    assert_eq!(right_start, left_end);
+    assert_eq!(sk.points.len(), before.points.len());
+
+    run(&mut s, "sketch.drag", json!({"entity": sk.points[end].id, "from": [10,0], "to": [14,4]}));
+    let sk = sketch(&s);
+    let outer_end = sk.point(end).unwrap();
+    assert!(outer_end.dist(Vec2::new(14.0, 4.0)) < 1e-5);
+    assert!(sk.point(left_end).unwrap().dist((sk.point(start).unwrap() + outer_end) * 0.5) < 1e-6);
+}
+
+#[test]
+fn single_point_break_refuses_an_infinite_target_without_changing_the_sketch() {
+    let mut s = new_sketch();
+    run(&mut s, "sketch.line", json!({"points": [[0,0], [10,0]], "ids": ["axis"], "connect": false, "infer": false}));
+    run(&mut s, "sketch.infinite", json!({"curves": ["axis"]}));
+    let before = serde_json::to_value(sketch(&s)).unwrap();
+    let error = s.execute("sketch.break", &json!({"curve": "axis", "at": [5,0], "at_intersections": false})).unwrap_err().to_string();
+    assert!(error.contains("infinite"), "{error}");
+    assert_eq!(serde_json::to_value(sketch(&s)).unwrap(), before);
 }
 
 /// A line's held midpoint broken at a crossing line that only happens to have its middle there

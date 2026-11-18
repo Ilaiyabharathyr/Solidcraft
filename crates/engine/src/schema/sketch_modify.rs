@@ -368,9 +368,9 @@ impl TrimPathParams {
     }
 }
 
-/// Split a curve in two or more, at the places other curves cross it (`at`) or at given
-/// positions (`points`). At a point where the curve ends and another curve meets, the curve
-/// gets its own end there and the two are no longer joined. One undo step.
+/// Split a curve at surrounding crossings or at specified positions. A circle needs two
+/// distinct crossings or at least two distinct projected positions in `points`.
+/// At a shared endpoint, `at` detaches that end. One undo step.
 #[derive(Debug, JsonSchema)]
 #[schemars(deny_unknown_fields, transform = break_required)]
 pub struct BreakParams {
@@ -379,10 +379,14 @@ pub struct BreakParams {
     #[schemars(with = "String")]
     pub curve: Option<String>,
     /// A point near the place to break, in mm: the curve is split at the crossings either side
-    /// of it. Used when `points` is not given.
+    /// of it by default. Used when `points` is not given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Point2")]
     pub at: Option<Vec2>,
+    /// With `at`, split at the surrounding intersections (default: true). When false, use
+    /// one projected cut position. This mode requires a finite curve and cannot split a circle.
+    #[serde(default)]
+    pub at_intersections: Option<bool>,
     /// Positions to break at, 1 to 1000, in mm, projected onto the curve; duplicates are
     /// merged. When this key is there, `at` is not used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -407,7 +411,8 @@ impl BreakParams {
         let sketch = sketch_of(p)?;
         let curve = text(p, "curve", "`curve` must be a curve id")?;
         let at = if points.is_some() { None } else { point(p, "at", "`at` must be a point [x, y]")? };
-        Ok(BreakParams { curve, at, points, sketch })
+        let at_intersections = if points.is_some() { None } else { flag(p, "at_intersections")? };
+        Ok(BreakParams { curve, at, at_intersections, points, sketch })
     }
 }
 
@@ -1400,7 +1405,8 @@ pub struct TrimPathResult {
 /// What `sketch.break` returns.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BreakResult {
-    /// The curve's id and its new pieces' ids, in order along it.
+    /// The resulting curve ids in order along the original curve. One cut on a multi-span
+    /// spline can return more than two ids because each span fragment becomes a curve.
     pub curves: Vec<String>,
     /// The sketch's solve: `{solved, dof}`.
     pub sketch: Value,
