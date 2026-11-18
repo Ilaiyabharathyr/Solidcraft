@@ -515,6 +515,7 @@ fn resize_edges(ui: &mut egui::Ui, side: crate::frame::Side, scrollbar: Option<e
         if response.dragged() {
             ui.ctx().set_cursor_icon(cursor);
         }
+        paint_grip(ui, name, rect, free_left, response.hovered() || response.dragged());
         if response.double_clicked() {
             out = Resize::Reset(axes);
         } else if response.dragged() {
@@ -527,6 +528,38 @@ fn resize_edges(ui: &mut egui::Ui, side: crate::frame::Side, scrollbar: Option<e
         }
     }
     out
+}
+
+/// A visible mark on the side edge and the corner, so the card shows where it can be dragged to
+/// a new size (#18846): two short lines across the middle of the side edge and three diagonal
+/// lines in the corner, drawn stronger while the pointer is on them. The bottom edge, like the
+/// header, is found by its cursor.
+fn paint_grip(ui: &egui::Ui, name: &str, rect: egui::Rect, free_left: bool, active: bool) {
+    let t = solidcraft_theme::Tokens::get();
+    let color = if active { t.form_primary } else { t.form_dim.gamma_multiply(0.6) };
+    let stroke = egui::Stroke::new(1.0, color);
+    let painter = ui.painter();
+    match name {
+        "side" => {
+            let half = (t.space_6 * 2.0).min(rect.height() * 0.5);
+            let y = rect.center().y;
+            for dx in [-1.5, 1.5] {
+                painter.vline(rect.center().x + dx, y - half..=y + half, stroke);
+            }
+        }
+        "corner" => {
+            // The corner's outer point is the card's bottom corner on the free side.
+            let corner = if free_left { rect.left_bottom() } else { rect.right_bottom() };
+            let toward_x = if free_left { 1.0 } else { -1.0 };
+            let inset = 2.0;
+            let tip = corner + egui::vec2(inset * toward_x, -inset);
+            for step in 1..=3 {
+                let d = step as f32 * t.space_6 * 0.5;
+                painter.line_segment([tip + egui::vec2(d * toward_x, 0.0), tip + egui::vec2(0.0, -d)], stroke);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The dialog's sections, each in the chosen order.
@@ -680,13 +713,15 @@ impl ui_kit::GridSource for ParamGrid<'_> {
         let units = UNITS.iter().map(|u| unit_label(u).to_owned()).collect();
         // Name keeps a larger share and a shared content floor so long identifiers stay readable
         // and every section's columns line up (#8533, #8551 review).
+        // Name, Expression and Value stop at about their width in the default card, so a wider
+        // window goes to Comment. Comment has no divider: the window sizes it (#18846).
         vec![
             GridColumn::new("favorite", "", 0.0, CellKind::Custom).min_content_width(t.space_24 * 3.0),
-            GridColumn::new("name", "Name", 2.0, CellKind::Text).flex().min_content_width(self.name_floor),
+            GridColumn::new("name", "Name", 2.0, CellKind::Text).flex().min_content_width(self.name_floor).max_width(t.form_card_width * 0.75),
             GridColumn::new("unit", "Unit", 0.65, CellKind::Choice(units)).min_content_width(self.unit_width),
-            GridColumn::new("expression", "Expression", 1.5, CellKind::Expression).flex().edit_on_click(),
-            GridColumn::new("value", "Value", 1.1, CellKind::ReadOnly).flex(),
-            GridColumn::new("comment", "Comment", 1.0, CellKind::Text).flex().edit_on_click(),
+            GridColumn::new("expression", "Expression", 1.5, CellKind::Expression).flex().edit_on_click().max_width(t.form_card_width * 0.75),
+            GridColumn::new("value", "Value", 1.1, CellKind::ReadOnly).flex().max_width(t.form_card_width * 0.5),
+            GridColumn::new("comment", "Comment", 1.0, CellKind::Text).flex().fills().edit_on_click(),
             GridColumn::new("actions", "Actions", 0.0, CellKind::Custom).icon_only().min_content_width(ui_kit::table_row_height()),
         ]
     }
