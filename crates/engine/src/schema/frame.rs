@@ -347,6 +347,211 @@ pub struct ProfilePropertiesResult {
 }
 
 // ---------------------------------------------------------------------------------------------
+// frame.remove_member
+// ---------------------------------------------------------------------------------------------
+
+/// `members` as `frame.remove_member` reads it (the handler and the contract both): 1 to 1000
+/// `{feature, line}`, each the Frame Member by id or name and the member's line or pair id.
+/// Whether the feature and the member exist is the handler's to check.
+pub fn removed_members(v: Option<&Value>) -> Result<Vec<(Value, String)>, String> {
+    let list = match v {
+        Some(Value::Array(a)) if !a.is_empty() && a.len() <= MAX_MEMBERS => a,
+        _ => return Err(format!("`members` must list 1…{MAX_MEMBERS} tubes: [{{feature, line}}]")),
+    };
+    list.iter()
+        .enumerate()
+        .map(|(i, m)| match (m.get("feature"), m.get("line")) {
+            (Some(f @ (Value::Number(_) | Value::String(_))), Some(Value::String(line))) if m.as_object().is_some_and(|o| o.len() == 2) => {
+                Ok((f.clone(), line.clone()))
+            }
+            _ => Err(format!("`members[{i}]` must be {{feature, line}}: the Frame Member (id or name) and the tube's line or pair id")),
+        })
+        .collect()
+}
+
+/// `members`: the tubes to take out, read by [`removed_members`].
+#[derive(Debug)]
+pub struct RemovedMembers(pub Vec<(Value, String)>);
+
+impl<'de> Deserialize<'de> for RemovedMembers {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        removed_members(Some(&Value::deserialize(d)?)).map(RemovedMembers).map_err(|e| D::Error::custom(whole(e)))
+    }
+}
+
+impl JsonSchema for RemovedMembers {
+    fn schema_name() -> Cow<'static, str> {
+        "RemovedMembers".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "The tubes to take out, all of one Frame Member: the feature by id or name, and the tube's line or pair id.",
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"feature": {"type": ["integer", "string"], "minimum": 0}, "line": {"type": "string"}},
+                "required": ["feature", "line"],
+                "additionalProperties": false
+            },
+            "minItems": 1, "maxItems": MAX_MEMBERS
+        })
+    }
+}
+
+/// Take tubes out of a Frame Member, as one undo step: a pair goes from its `pairs`, a sketch
+/// line from its `lines` (the line stays in its sketch). Taking out its last tube deletes the
+/// Frame Member. Returns the edited feature, or `{deleted}` with the deleted feature's name.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields, transform = members_required)]
+pub struct RemoveMemberParams {
+    // Required in the schema (`members_required`), optional in the type.
+    /// The tubes to take out.
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "RemovedMembers")]
+    pub members: Option<RemovedMembers>,
+}
+
+fn members_required(schema: &mut Schema) {
+    require(schema, "members");
+}
+
+/// What `frame.remove_member` returns when its last tube went with the feature.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MemberFeatureDeleted {
+    /// The name of the Frame Member deleted with its last tube.
+    pub deleted: String,
+    /// In the warn parameter-check mode: what the call's parameters got wrong.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_warnings: Vec<String>,
+}
+
+/// What `frame.remove_member` returns: the edited feature, or the deleted one's name.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum RemoveMemberResult {
+    Edited(Box<super::features::FeatureResult>),
+    Deleted(MemberFeatureDeleted),
+}
+
+// ---------------------------------------------------------------------------------------------
+// frame.multi_trim
+// ---------------------------------------------------------------------------------------------
+
+/// What `frame.multi_trim`'s `members` must be.
+pub const TRIM_MEMBERS: &str = "`members` must list 2…1000 members that meet: line or pair ids, or {feature?, line}";
+
+/// `members` as `frame.multi_trim` reads it (the handler and the contract both): 2 to 1000 members, each a line or
+/// pair id or `{feature?, line}`. Whether they are the frame's and meet is the handler's to check.
+pub fn trim_members(v: Option<&Value>) -> Result<Vec<MemberRef>, String> {
+    match v {
+        Some(Value::Array(a)) if (2..=MAX_MEMBERS).contains(&a.len()) => a
+            .iter()
+            .map(|m| match m {
+                Value::String(line) => Some(MemberRef { feature: None, line: line.clone() }),
+                Value::Object(_) => serde_json::from_value(m.clone()).ok(),
+                _ => None,
+            })
+            .collect::<Option<_>>()
+            .ok_or_else(|| TRIM_MEMBERS.to_string()),
+        _ => Err(TRIM_MEMBERS.to_string()),
+    }
+}
+
+/// `members`: the members of the corner, read by [`trim_members`].
+#[derive(Debug)]
+pub struct TrimMembers(pub Vec<MemberRef>);
+
+impl<'de> Deserialize<'de> for TrimMembers {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        trim_members(Some(&Value::deserialize(d)?)).map(TrimMembers).map_err(|e| D::Error::custom(whole(e)))
+    }
+}
+
+impl JsonSchema for TrimMembers {
+    fn schema_name() -> Cow<'static, str> {
+        "TrimMembers".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "The members that meet at the corner, crossing or overlap, in order (the first runs through, or stays whole): line or pair ids, or {feature?, line} (`feature` only the frame's own name).",
+            "type": "array", "minItems": 2, "maxItems": MAX_MEMBERS,
+            "items": {"anyOf": [
+                {"type": "string"},
+                {"type": "object", "properties": {"feature": {"type": "string"}, "line": {"type": "string"}}, "required": ["line"]}
+            ]}
+        })
+    }
+}
+
+/// What `frame.multi_trim`'s `kind` must be.
+pub const TRIM_KIND: &str = "`kind` must be auto, none, mitre or butt";
+
+/// `kind` as `frame.multi_trim` reads it (`coped_butt` is not taken: Coped is the frame's).
+pub fn trim_kind(v: &Value) -> Option<CornerType> {
+    serde_json::from_value(v.clone()).ok().filter(|k| *k != CornerType::CopedButt)
+}
+
+/// `kind`, read by [`trim_kind`].
+#[derive(Debug)]
+pub struct TrimKind(pub CornerType);
+
+impl<'de> Deserialize<'de> for TrimKind {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        trim_kind(&Value::deserialize(d)?).map(TrimKind).ok_or_else(|| D::Error::custom(whole(TRIM_KIND)))
+    }
+}
+
+impl JsonSchema for TrimKind {
+    fn schema_name() -> Cow<'static, str> {
+        "TrimKind".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "The corner's type: auto (the frame's own type, with this order), none, mitre or butt.",
+            "type": "string",
+            "enum": ["auto", "none", "mitre", "butt"]
+        })
+    }
+}
+
+/// Set, change or remove one corner override of a Frame Member, as one undo step: the corner, crossing or overlap
+/// `members` meet at finished its own way. Replaces the override of the same members, or adds one. Returns the
+/// edited feature as `frame.member` does.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields, transform = trim_required)]
+pub struct MultiTrimParams {
+    // `feature` and `members` are required in the schema (`trim_required`), optional in the type.
+    /// The Frame Member, by id or name.
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "super::edit::FeatureRef")]
+    pub feature: Option<super::edit::FeatureRef>,
+    /// The members that meet there, in order.
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "TrimMembers")]
+    pub members: Option<TrimMembers>,
+    /// The corner's type. Default: auto.
+    #[serde(default)]
+    pub kind: Option<TrimKind>,
+    /// The first two members as today's rules order them, swapped: the other one runs through. Without it the
+    /// members are saved in the order given.
+    #[serde(default)]
+    pub flip: Option<bool>,
+    /// The corner's own weld gap (0 to 1000 mm, a length or an expression). Default: the frame's. An overlap takes
+    /// none.
+    #[serde(default)]
+    pub gap: Option<MemberGap>,
+    /// Take the override of these members away (the corner goes back to the frame's own rules); no `kind`, `flip`
+    /// or `gap` with it.
+    #[serde(default)]
+    pub remove: Option<bool>,
+}
+
+fn trim_required(schema: &mut Schema) {
+    require(schema, "feature");
+    require(schema, "members");
+}
+
+// ---------------------------------------------------------------------------------------------
 // frame.profile.insert
 // ---------------------------------------------------------------------------------------------
 
@@ -963,211 +1168,6 @@ impl JsonSchema for FrameMemberParams {
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         FrameMemberKeys::json_schema(generator)
     }
-}
-
-// ---------------------------------------------------------------------------------------------
-// frame.remove_member
-// ---------------------------------------------------------------------------------------------
-
-/// `members` as `frame.remove_member` reads it (the handler and the contract both): 1 to 1000
-/// `{feature, line}`, each the Frame Member by id or name and the member's line or pair id.
-/// Whether the feature and the member exist is the handler's to check.
-pub fn removed_members(v: Option<&Value>) -> Result<Vec<(Value, String)>, String> {
-    let list = match v {
-        Some(Value::Array(a)) if !a.is_empty() && a.len() <= MAX_MEMBERS => a,
-        _ => return Err(format!("`members` must list 1…{MAX_MEMBERS} tubes: [{{feature, line}}]")),
-    };
-    list.iter()
-        .enumerate()
-        .map(|(i, m)| match (m.get("feature"), m.get("line")) {
-            (Some(f @ (Value::Number(_) | Value::String(_))), Some(Value::String(line))) if m.as_object().is_some_and(|o| o.len() == 2) => {
-                Ok((f.clone(), line.clone()))
-            }
-            _ => Err(format!("`members[{i}]` must be {{feature, line}}: the Frame Member (id or name) and the tube's line or pair id")),
-        })
-        .collect()
-}
-
-/// `members`: the tubes to take out, read by [`removed_members`].
-#[derive(Debug)]
-pub struct RemovedMembers(pub Vec<(Value, String)>);
-
-impl<'de> Deserialize<'de> for RemovedMembers {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        removed_members(Some(&Value::deserialize(d)?)).map(RemovedMembers).map_err(|e| D::Error::custom(whole(e)))
-    }
-}
-
-impl JsonSchema for RemovedMembers {
-    fn schema_name() -> Cow<'static, str> {
-        "RemovedMembers".into()
-    }
-    fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({
-            "description": "The tubes to take out, all of one Frame Member: the feature by id or name, and the tube's line or pair id.",
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"feature": {"type": ["integer", "string"], "minimum": 0}, "line": {"type": "string"}},
-                "required": ["feature", "line"],
-                "additionalProperties": false
-            },
-            "minItems": 1, "maxItems": MAX_MEMBERS
-        })
-    }
-}
-
-/// Take tubes out of a Frame Member, as one undo step: a pair goes from its `pairs`, a sketch
-/// line from its `lines` (the line stays in its sketch). Taking out its last tube deletes the
-/// Frame Member. Returns the edited feature, or `{deleted}` with the deleted feature's name.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[schemars(deny_unknown_fields, transform = members_required)]
-pub struct RemoveMemberParams {
-    // Required in the schema (`members_required`), optional in the type.
-    /// The tubes to take out.
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "RemovedMembers")]
-    pub members: Option<RemovedMembers>,
-}
-
-fn members_required(schema: &mut Schema) {
-    require(schema, "members");
-}
-
-/// What `frame.remove_member` returns when its last tube went with the feature.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MemberFeatureDeleted {
-    /// The name of the Frame Member deleted with its last tube.
-    pub deleted: String,
-    /// In the warn parameter-check mode: what the call's parameters got wrong.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub param_warnings: Vec<String>,
-}
-
-/// What `frame.remove_member` returns: the edited feature, or the deleted one's name.
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-pub enum RemoveMemberResult {
-    Edited(Box<super::features::FeatureResult>),
-    Deleted(MemberFeatureDeleted),
-}
-
-// ---------------------------------------------------------------------------------------------
-// frame.multi_trim
-// ---------------------------------------------------------------------------------------------
-
-/// What `frame.multi_trim`'s `members` must be.
-pub const TRIM_MEMBERS: &str = "`members` must list 2…1000 members that meet: line or pair ids, or {feature?, line}";
-
-/// `members` as `frame.multi_trim` reads it (the handler and the contract both): 2 to 1000 members, each a line or
-/// pair id or `{feature?, line}`. Whether they are the frame's and meet is the handler's to check.
-pub fn trim_members(v: Option<&Value>) -> Result<Vec<MemberRef>, String> {
-    match v {
-        Some(Value::Array(a)) if (2..=MAX_MEMBERS).contains(&a.len()) => a
-            .iter()
-            .map(|m| match m {
-                Value::String(line) => Some(MemberRef { feature: None, line: line.clone() }),
-                Value::Object(_) => serde_json::from_value(m.clone()).ok(),
-                _ => None,
-            })
-            .collect::<Option<_>>()
-            .ok_or_else(|| TRIM_MEMBERS.to_string()),
-        _ => Err(TRIM_MEMBERS.to_string()),
-    }
-}
-
-/// `members`: the members of the corner, read by [`trim_members`].
-#[derive(Debug)]
-pub struct TrimMembers(pub Vec<MemberRef>);
-
-impl<'de> Deserialize<'de> for TrimMembers {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        trim_members(Some(&Value::deserialize(d)?)).map(TrimMembers).map_err(|e| D::Error::custom(whole(e)))
-    }
-}
-
-impl JsonSchema for TrimMembers {
-    fn schema_name() -> Cow<'static, str> {
-        "TrimMembers".into()
-    }
-    fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({
-            "description": "The members that meet at the corner, crossing or overlap, in order (the first runs through, or stays whole): line or pair ids, or {feature?, line} (`feature` only the frame's own name).",
-            "type": "array", "minItems": 2, "maxItems": MAX_MEMBERS,
-            "items": {"anyOf": [
-                {"type": "string"},
-                {"type": "object", "properties": {"feature": {"type": "string"}, "line": {"type": "string"}}, "required": ["line"]}
-            ]}
-        })
-    }
-}
-
-/// What `frame.multi_trim`'s `kind` must be.
-pub const TRIM_KIND: &str = "`kind` must be auto, none, mitre or butt";
-
-/// `kind` as `frame.multi_trim` reads it (`coped_butt` is not taken: Coped is the frame's).
-pub fn trim_kind(v: &Value) -> Option<CornerType> {
-    serde_json::from_value(v.clone()).ok().filter(|k| *k != CornerType::CopedButt)
-}
-
-/// `kind`, read by [`trim_kind`].
-#[derive(Debug)]
-pub struct TrimKind(pub CornerType);
-
-impl<'de> Deserialize<'de> for TrimKind {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        trim_kind(&Value::deserialize(d)?).map(TrimKind).ok_or_else(|| D::Error::custom(whole(TRIM_KIND)))
-    }
-}
-
-impl JsonSchema for TrimKind {
-    fn schema_name() -> Cow<'static, str> {
-        "TrimKind".into()
-    }
-    fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        json_schema!({
-            "description": "The corner's type: auto (the frame's own type, with this order), none, mitre or butt.",
-            "type": "string",
-            "enum": ["auto", "none", "mitre", "butt"]
-        })
-    }
-}
-
-/// Set, change or remove one corner override of a Frame Member, as one undo step: the corner, crossing or overlap
-/// `members` meet at finished its own way. Replaces the override of the same members, or adds one. Returns the
-/// edited feature as `frame.member` does.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[schemars(deny_unknown_fields, transform = trim_required)]
-pub struct MultiTrimParams {
-    // `feature` and `members` are required in the schema (`trim_required`), optional in the type.
-    /// The Frame Member, by id or name.
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "super::edit::FeatureRef")]
-    pub feature: Option<super::edit::FeatureRef>,
-    /// The members that meet there, in order.
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "TrimMembers")]
-    pub members: Option<TrimMembers>,
-    /// The corner's type. Default: auto.
-    #[serde(default)]
-    pub kind: Option<TrimKind>,
-    /// The first two members as today's rules order them, swapped: the other one runs through. Without it the
-    /// members are saved in the order given.
-    #[serde(default)]
-    pub flip: Option<bool>,
-    /// The corner's own weld gap (0 to 1000 mm, a length or an expression). Default: the frame's. An overlap takes
-    /// none.
-    #[serde(default)]
-    pub gap: Option<MemberGap>,
-    /// Take the override of these members away (the corner goes back to the frame's own rules); no `kind`, `flip`
-    /// or `gap` with it.
-    #[serde(default)]
-    pub remove: Option<bool>,
-}
-
-fn trim_required(schema: &mut Schema) {
-    require(schema, "feature");
-    require(schema, "members");
 }
 
 #[cfg(test)]
