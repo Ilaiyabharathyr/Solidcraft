@@ -293,9 +293,12 @@ constrain and dimension the sketch's own geometry to it. The constraint tools an
 take a model edge or vertex directly. Turn on **Projection display and picking** in
 Preferences > Sketch to also pick another sketch's curve directly: the click projects it into
 the sketch first (the status line says so) and uses the projection. This option also gives
-projected points their projection or lost colors and groups Break Link with the projection's
-actions. It is off by default, preserving the previous colors, menu and picking. A constraint only between
-projections is refused (it could change nothing), a dimension on projected geometry alone can
+projected points their projection or lost colors, groups Break Link with the projection's
+actions, and lists projections under their sketch in the browser and history.
+It is off by default, preserving the previous colors, menu, picking and row layout.
+A consistent constraint only between projections is kept and reported as redundant, as on
+other fixed geometry. Commands can request `if_redundant: "refuse"` to refuse it instead.
+A conflicting constraint is always refused. A dimension on projected geometry alone can
 only be driven, and Fix says projected geometry is fixed already. When a source changes shape
 (a fillet or chamfer added before the sketch), the projection is made again and its curves and
 points keep their ids wherever the new geometry continues the old (a shortened edge on the same
@@ -324,9 +327,10 @@ once is read from the placement its `path` names, as body geometry is.
 Body geometry from a part placed only once keeps following uncaptured moves while its
 projection is refreshed, as before. Projections from repeated placements follow captured
 positions: a move kept pending (`occurrence.move` with `capture: false`) is not followed until
-it is captured. Each projection is listed under its
-sketch in the browser, with the placement it reads and its state (lost, frozen, pending). Its
-eye hides it without changing the sketch (it still bounds profiles), and its menu offers:
+it is captured. With **Projection display and picking** enabled, each projection is listed
+under its sketch in the browser and history, with the placement it reads and its state (lost,
+frozen, pending). Its eye hides it without changing the sketch (it still bounds profiles), and
+its menu offers:
 
 - **Update References** (`sketch.update_references {sketch?, capture?, files?}`) reads every
   projection where its source is now, solves and stores the sketch and rebuilds what follows,

@@ -2564,7 +2564,9 @@ fn constrain(s: &mut Session, p: &Value, cmd: &str, f: impl FnOnce(&mut Sketch) 
     let mut residual = None;
     let (id, info) = edit(s, p, cmd, true, |sk, _| {
         let k = f(sk)?;
-        if only_projections(sk, &k) {
+        // Ordinary calls keep consistent redundant constraints, as on other fixed geometry.
+        // Callers can explicitly request the stricter policy without changing that default.
+        if str_(p, "if_redundant").is_some_and(|m| m.eq_ignore_ascii_case("refuse")) && only_projections(sk, &k) {
             return Err(bad(cmd, PROJECTED_ONLY));
         }
         let rep = solve(&mut sk.clone());

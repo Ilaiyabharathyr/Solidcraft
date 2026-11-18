@@ -100,6 +100,7 @@ pub(super) struct Cache {
     model: Weak<ModelState>,
     sketch: Option<u64>,
     colors: [Color32; 2],
+    projection_workflow_ui: bool,
     components: BTreeMap<u64, Component>,
     ids: BTreeMap<u64, usize>,
     scheduled: usize,
@@ -117,6 +118,7 @@ impl Cache {
             && std::ptr::eq(self.model.as_ptr(), Arc::as_ptr(&state))
             && self.sketch == app.session.active_sketch
             && self.colors == colors
+            && self.projection_workflow_ui == app.preferences.projection_workflow_ui
         {
             // A Save As can move the design to a new file without changing the document;
             // the top row follows the file's name (#7267).
@@ -149,6 +151,7 @@ impl Cache {
         self.model = Arc::downgrade(&state);
         self.sketch = app.session.active_sketch;
         self.colors = colors;
+        self.projection_workflow_ui = app.preferences.projection_workflow_ui;
     }
 
     fn children(&self, app: &SolveApp, component: u64, path: &[u64], remaining: usize) -> Vec<Vec<u64>> {

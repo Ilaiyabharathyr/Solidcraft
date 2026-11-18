@@ -3042,7 +3042,102 @@ fn constraints_on_a_projection_survive_a_rebuild_of_its_source() {
 }
 
 #[test]
-fn constraints_only_between_projections_are_explained_not_stored() {
+fn consistent_projection_constraints_keep_main_default_and_allow_explicit_refusal() {
+    for coincident in [false, true] {
+        for policy in [None, Some("keep"), Some("refuse")] {
+            let (mut s, id, edge, corner) = projected_top();
+            let mut params = if coincident { json!({"a":corner,"b":edge}) } else { json!({"line":edge,"mode":"horizontal"}) };
+            if let Some(policy) = policy {
+                params["if_redundant"] = json!(policy);
+            }
+            let cmd = if coincident { "sketch.constraint.coincident" } else { "sketch.constraint.horizontal_vertical" };
+            let before = serde_json::to_value(s.doc.sketch(id).unwrap()).unwrap();
+            let count = s.doc.sketch(id).unwrap().constraints.len();
+            let result = s.execute(cmd, &params);
+            if policy == Some("refuse") {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("only between projections"), "{cmd}: {error}");
+                assert_eq!(serde_json::to_value(s.doc.sketch(id).unwrap()).unwrap(), before, "refusal leaves the sketch unchanged");
+            } else {
+                let result = result.unwrap_or_else(|e| panic!("{cmd} {params}: {e}"));
+                assert_eq!(result["redundant"], true, "{cmd}: {result}");
+                assert_eq!(s.doc.sketch(id).unwrap().constraints.len(), count + 1);
+                assert!(s.doc.sketch(id).unwrap().constraints.iter().any(|c| c.id == result["constraint"].as_str().unwrap()));
+                let after = serde_json::to_value(s.doc.sketch(id).unwrap()).unwrap();
+                assert_eq!(after["points"], before["points"], "redundancy does not move projected points");
+                assert_eq!(after["curves"], before["curves"], "redundancy does not alter projected curves");
+                assert_eq!(after["links"], before["links"]);
+            }
+        }
+    }
+}
+
+#[test]
+fn conflicting_projection_constraints_are_refused_with_default_keep_and_explicit_refuse() {
+    for coincident in [false, true] {
+        for policy in [None, Some("keep"), Some("refuse")] {
+            let (mut s, id, edge, corner) = projected_top();
+            let other = s
+                .doc
+                .sketch(id)
+                .unwrap()
+                .points
+                .iter()
+                .find(|p| p.link.is_some() && p.pos.x.abs() < 1e-9 && (p.pos.y - 30.0).abs() < 1e-9)
+                .unwrap()
+                .id
+                .clone();
+            let mut params = if coincident { json!({"a":corner,"b":other}) } else { json!({"line":edge,"mode":"vertical"}) };
+            if let Some(policy) = policy {
+                params["if_redundant"] = json!(policy);
+            }
+            let cmd = if coincident { "sketch.constraint.coincident" } else { "sketch.constraint.horizontal_vertical" };
+            let before = serde_json::to_value(s.doc.sketch(id).unwrap()).unwrap();
+            let error = s.execute(cmd, &params).unwrap_err().to_string();
+            if policy == Some("refuse") {
+                assert!(error.contains("only between projections"), "{cmd}: {error}");
+            } else {
+                assert!(error.contains("conflict"), "{cmd}: {error}");
+            }
+            assert_eq!(serde_json::to_value(s.doc.sketch(id).unwrap()).unwrap(), before, "conflict leaves geometry, links and constraints unchanged");
+        }
+    }
+}
+
+#[test]
+fn projection_and_fixed_point_coincidence_preserves_default_keep_but_refuses_conflicts() {
+    for conflict in [false, true] {
+        for refuse in [false, true] {
+            let (mut s, id, _, corner) = projected_top();
+            run(&mut s, "sketch.point", json!({"point":if conflict { [5,5] } else { [40,0] },"id":"fixed","connect":false}));
+            run(&mut s, "sketch.constraint.fix", json!({"entity":"fixed"}));
+            let before = serde_json::to_value(s.doc.sketch(id).unwrap()).unwrap();
+            let count = s.doc.sketch(id).unwrap().constraints.len();
+            let mut params = json!({"a":corner,"b":"fixed"});
+            if refuse {
+                params["if_redundant"] = json!("refuse");
+            }
+            let result = s.execute("sketch.constraint.coincident", &params);
+            if conflict || refuse {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains(if refuse { "only between projections" } else { "conflict" }), "{error}");
+                assert_eq!(serde_json::to_value(s.doc.sketch(id).unwrap()).unwrap(), before);
+            } else {
+                let result = result.unwrap();
+                assert_eq!(result["redundant"], true, "{result}");
+                assert_eq!(s.doc.sketch(id).unwrap().constraints.len(), count + 1);
+                assert!(s.doc.sketch(id).unwrap().constraints.iter().any(|c| c.id == result["constraint"].as_str().unwrap()));
+                let after = serde_json::to_value(s.doc.sketch(id).unwrap()).unwrap();
+                assert_eq!(after["points"], before["points"]);
+                assert_eq!(after["curves"], before["curves"]);
+                assert_eq!(after["links"], before["links"]);
+            }
+        }
+    }
+}
+
+#[test]
+fn constraints_only_between_projections_are_explained_when_refusal_is_requested() {
     let (mut s, id, edge, corner) = projected_top();
     let count = s.doc.sketch(id).unwrap().constraints.len();
     // The opposite corner: no line joins it to `corner`.
@@ -3056,7 +3151,7 @@ fn constraints_only_between_projections_are_explained_not_stored() {
         .unwrap()
         .id
         .clone();
-    let e = s.execute("sketch.constraint.coincident", &json!({"a":corner,"b":other})).unwrap_err().to_string();
+    let e = s.execute("sketch.constraint.coincident", &json!({"a":corner,"b":other,"if_redundant":"refuse"})).unwrap_err().to_string();
     assert!(e.contains("only between projections"), "{e}");
     let r = run(&mut s, "sketch.constraint.fix", json!({"entity":edge}));
     assert!(r["result"]["note"].as_str().is_some_and(|n| n.contains("always fixed")), "{r}");

@@ -1,7 +1,8 @@
 //! A sketch's projections (links to model geometry) are children of their sketch, beside its
 //! patterns: one row per link naming its source and the placement it reads, its status when it
 //! is not current, an eye that hides it, and a menu to update, freeze, remove or break it. The
-//! rows only read the stored document and run commands.
+//! rows require the Projection display and picking preference, read the stored document and
+//! run commands.
 
 use serde_json::json;
 use solidcraft_engine::Sel;
@@ -21,7 +22,7 @@ pub(crate) fn listed(link: &Link) -> bool {
 }
 
 pub(crate) fn has_links(app: &SolveApp, sketch: u64) -> bool {
-    app.session.doc.sketch(sketch).is_ok_and(|sk| sk.links.iter().any(listed))
+    app.preferences.projection_workflow_ui && app.session.doc.sketch(sketch).is_ok_and(|sk| sk.links.iter().any(listed))
 }
 
 /// What a link's row says: its source (its kind too when it is not a projection, which the
@@ -71,6 +72,9 @@ struct Entry {
 }
 
 fn entries(app: &SolveApp, sketch: u64) -> Vec<Entry> {
+    if !app.preferences.projection_workflow_ui {
+        return Vec::new();
+    }
     let Ok(sk) = app.session.doc.sketch(sketch) else { return Vec::new() };
     let active = app.session.active_sketch == Some(sketch);
     sk.links
@@ -152,10 +156,11 @@ mod tests {
 
     /// Part A (a holed plate) placed twice, A:2 at x = 100; a root sketch projecting A:2's top
     /// face and one of its edges. Returns (harness, sketch, face link, edge link, A:2).
-    fn harness() -> (Harness, u64, String, String, u64) {
+    fn harness(enhanced: bool) -> (Harness, u64, String, String, u64) {
         let mut h = Harness::new();
         h.app.home.open = false;
         h.app.ui.show_browser = true;
+        h.app.preferences.projection_workflow_ui = enhanced;
         let a1 = h.app.run("component.create", json!({"name":"A"})).unwrap()["occurrence"].as_u64().unwrap();
         h.app.run("solid.box", json!({"length":40,"width":40,"height":10,"body_name":"Plate"})).unwrap();
         h.app.run("solid.cylinder", json!({"radius":5,"height":10,"base":[20,20,0],"operation":"cut","targets":["Plate"]})).unwrap();
@@ -174,8 +179,79 @@ mod tests {
     }
 
     #[test]
+    fn projection_rows_and_folds_require_the_preference_in_browser_and_history() {
+        for left_history in [false, true] {
+            for with_pattern in [false, true] {
+                let (mut h, sketch, face, edge, _) = harness(false);
+                h.app.run("view.history_layout", json!({"dock":if left_history { "left" } else { "bottom" }})).unwrap();
+                let pattern = with_pattern.then(|| {
+                    h.app.edit_sketch(sketch);
+                    h.app.run("sketch.line", json!({"points":[[0,60],[10,60]],"ids":["source"],"connect":false,"infer":false})).unwrap();
+                    let made = h.app.run("sketch.pattern.rectangular", json!({"entities":["source"],"count":2,"spacing":20})).unwrap();
+                    h.app.finish_sketch();
+                    made["pattern"].as_str().unwrap().to_string()
+                });
+                let before = serde_json::to_value(h.app.session.doc.sketch(sketch).unwrap()).unwrap();
+                // Start with the default, enable, then disable again with both folds already open.
+                for enhanced in [false, true, false, true] {
+                    assert!(h.call("ui.prefs", json!({"projection_workflow_ui":enhanced}))["ok"].as_bool().unwrap());
+                    h.frames(6);
+                    assert!(crate::scenario::handle_at("row:Receiver").is_some(), "browser sketch remains visible");
+                    assert_eq!(
+                        crate::scenario::handle_at("fold:Receiver").is_some(),
+                        with_pattern || enhanced,
+                        "browser fold: left_history={left_history}, pattern={with_pattern}, preference={enhanced}"
+                    );
+                    if left_history {
+                        assert!(crate::scenario::rect_of("history:feature:Receiver").is_some(), "history sketch remains visible");
+                        assert_eq!(
+                            crate::scenario::handle_at("timeline-sketch-fold:Receiver").is_some(),
+                            with_pattern || enhanced,
+                            "history fold: pattern={with_pattern}, preference={enhanced}"
+                        );
+                    }
+                    for scope in if left_history { &["browser", "timeline"][..] } else { &["browser"][..] } {
+                        for link in [&face, &edge] {
+                            let handle = format!("{scope}:sketch-link:{sketch}:{link}");
+                            assert_eq!(crate::scenario::handle_at(&handle).is_some(), enhanced, "{handle}, preference={enhanced}");
+                        }
+                        if let Some(pattern) = &pattern {
+                            assert!(crate::scenario::handle_at(&format!("{scope}:sketch-pattern:{sketch}:{pattern}")).is_some());
+                        }
+                    }
+                    assert_eq!(serde_json::to_value(h.app.session.doc.sketch(sketch).unwrap()).unwrap(), before, "display changes no geometry");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn projection_display_preference_does_not_change_the_constraint_command_policy() {
+        for enhanced in [false, true] {
+            let (mut h, sketch, _, edge, _) = harness(enhanced);
+            h.app.edit_sketch(sketch);
+            let sk = h.app.session.doc.sketch(sketch).unwrap();
+            let curves = sk.link_curves(&edge);
+            assert_eq!(curves.len(), 1, "the projected edge is one horizontal line");
+            let line = sk.curves[curves[0]].id.clone();
+            let count = sk.constraints.len();
+            let result =
+                h.call("engine.execute", json!({"command":"sketch.constraint.horizontal_vertical","params":{"line":line,"mode":"horizontal"}}));
+            assert_eq!(result["ok"], true, "{result}");
+            assert_eq!(result["result"]["redundant"], true, "{result}");
+            assert_eq!(h.app.session.doc.sketch(sketch).unwrap().constraints.len(), count + 1);
+            let before = serde_json::to_value(h.app.session.doc.sketch(sketch).unwrap()).unwrap();
+            for params in [json!({"line":line,"mode":"horizontal","if_redundant":"refuse"}), json!({"line":line,"mode":"vertical"})] {
+                let result = h.call("engine.execute", json!({"command":"sketch.constraint.horizontal_vertical","params":params}));
+                assert_eq!(result["ok"], false, "{result}");
+                assert_eq!(serde_json::to_value(h.app.session.doc.sketch(sketch).unwrap()).unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
     fn projections_are_listed_under_their_sketch_with_their_placement() {
-        let (h, sketch, face, edge, _) = harness();
+        let (h, sketch, face, edge, _) = harness(true);
         let parent = crate::scenario::handle_at("row:Receiver").unwrap();
         for link in [&face, &edge] {
             let row = crate::scenario::handle_at(&format!("browser:sketch-link:{sketch}:{link}")).unwrap();
@@ -188,7 +264,7 @@ mod tests {
 
     #[test]
     fn the_eye_hides_a_projection_without_touching_the_sketch() {
-        let (mut h, sketch, face, _, _) = harness();
+        let (mut h, sketch, face, _, _) = harness(true);
         let profiles = h.app.session.model.state().sketch(sketch).unwrap().profiles.len();
         let text = label(&h.app, h.app.session.doc.sketch(sketch).unwrap().link(&face).unwrap());
         h.step(&json!({"click":{"handle":format!("eye:{text}")}})).unwrap();
@@ -202,7 +278,7 @@ mod tests {
 
     #[test]
     fn a_lost_source_is_marked_and_the_menu_manages_the_projection() {
-        let (mut h, sketch, face, edge, a2) = harness();
+        let (mut h, sketch, face, edge, a2) = harness(true);
         let target = Target::SketchLink { sketch, link: face.clone() };
         let ids: Vec<String> = crate::context_menu::items(&h.app, &target).into_iter().map(|i| i.id).collect();
         for id in ["sketch.update_references", "sketch.freeze_link", "sketch.link_visibility", "sketch.remove_link", "sketch.break_link"] {
@@ -227,7 +303,7 @@ mod tests {
     #[test]
     fn a_lost_projection_is_repaired_by_picking_its_new_source() {
         for another_copy in [false, true] {
-            let (mut h, sketch, face, _, a2) = harness();
+            let (mut h, sketch, face, _, a2) = harness(true);
             let component = h.app.session.doc.occurrences.iter().find(|o| o.id == a2).unwrap().component;
             let a1 = h.app.session.doc.occurrences.iter().find(|o| o.component == component && o.id != a2).unwrap().id;
             let sk = h.app.session.doc.sketch(sketch).unwrap();
