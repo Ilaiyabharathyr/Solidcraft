@@ -27,6 +27,7 @@ pub mod csv;
 pub mod display_quality;
 pub mod display_units;
 mod document;
+pub mod dogbone;
 pub mod drawing;
 pub mod drawing_view;
 pub mod end_cap;
