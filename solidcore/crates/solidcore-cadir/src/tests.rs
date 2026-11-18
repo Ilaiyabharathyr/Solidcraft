@@ -274,6 +274,148 @@ fn a_polyline_with_decreasing_parameters_keeps_its_parameters() {
     );
 }
 
+/// The cube's tolerances: how many edges and vertices hold more than the model's tolerance.
+fn widened(s: &Solid) -> (usize, usize) {
+    let tol = s.brep.tolerance;
+    (
+        s.brep.edges.iter().filter(|e| e.tolerance > tol).count(),
+        s.brep.vertices.iter().filter(|v| v.tolerance > tol).count(),
+    )
+}
+
+/// A polyline's chords stand within the chordal deflection its producer states of the curve
+/// they sample: the edge on it holds that allowance (and its two vertices with it), so the record
+/// does not take the chords for the curve; one past what an edge's tolerance holds refuses its
+/// region with why, and a polyline whose chords are the curve (deflection 0) changes nothing.
+#[test]
+fn a_polylines_chordal_deflection_is_its_edges_tolerance() {
+    use cadmpeg_ir::geometry::sampled::{PolylineCurve, PolylineSamples, PolylineVertex};
+    use cadmpeg_ir::geometry::{CurveGeometry, SolvedCurveGeometry};
+    let with = |deflection: f64| {
+        let mut ir = cube();
+        let edge = ir.model.edges[0].clone();
+        let at = |v: &cadmpeg_ir::ids::VertexId| {
+            let vertex = ir.model.vertices.iter().find(|x| x.id == *v).unwrap();
+            let point = ir
+                .model
+                .points
+                .iter()
+                .find(|p| p.id == vertex.point)
+                .unwrap();
+            point.position().get()
+        };
+        let [t0, t1] = edge.param_range().unwrap().get();
+        let samples = PolylineSamples::Parameterized {
+            vertices: vec![
+                PolylineVertex {
+                    parameter: t0,
+                    point: at(&edge.start),
+                },
+                PolylineVertex {
+                    parameter: t1,
+                    point: at(&edge.end),
+                },
+            ]
+            .try_into()
+            .unwrap(),
+        };
+        let curve = edge.carrier.curve().unwrap().clone();
+        let c = ir.model.curves.iter_mut().find(|c| c.id == curve).unwrap();
+        c.geometry = CurveGeometry::Solved(SolvedCurveGeometry::Polyline(
+            PolylineCurve::new(samples, deflection).unwrap(),
+        ));
+        ir.finalize();
+        ir
+    };
+    let s = one(&with(0.05));
+    assert!((volume(&s) - 1000.0).abs() < 1e-6, "{}", volume(&s));
+    assert_eq!(widened(&s), (1, 2));
+    assert!(s.brep.edges.iter().any(|e| e.tolerance >= 0.05));
+    assert!(
+        s.brep
+            .vertices
+            .iter()
+            .filter(|v| v.tolerance >= 0.05)
+            .count()
+            == 2
+    );
+    assert_eq!(widened(&one(&with(0.0))), (0, 0));
+    let bodies = read_bodies(&with(2.0), None);
+    assert!(bodies.read.is_empty());
+    assert!(
+        bodies.failures[0]
+            .message
+            .contains("more than an edge's tolerance holds"),
+        "{:?}",
+        bodies.failures
+    );
+}
+
+/// A procedural surface's solved cache fitted within a tolerance its construction states is not
+/// the exact surface: read as the face's surface, the face's edges (and their vertices) hold that
+/// tolerance; a cache whose fit no edge's tolerance holds refuses the region, naming the face;
+/// a cache stated with no fit is read as before.
+#[test]
+fn a_fitted_procedural_cache_is_held_to_its_fit_not_taken_as_exact() {
+    use cadmpeg_ir::geometry::ProceduralSurfaceDefinition as D;
+    use cadmpeg_ir::geometry::surface_payloads::ExtrusionSurfaceConstruction;
+    use cadmpeg_ir::geometry::{CacheContract, LegacyCache, ProceduralSurface};
+    let with = |fit: Option<f64>| {
+        let mut ir = cube();
+        let construction: cadmpeg_ir::ids::ProceduralSurfaceId = tid("procedural", 0);
+        let cache = match fit {
+            Some(t) => CacheContract::Legacy {
+                cache: Some(LegacyCache::try_new(t).unwrap()),
+            },
+            None => CacheContract::legacy(),
+        };
+        let directrix = ir.model.curves[0].id.clone();
+        let definition = D::Extrusion(
+            ExtrusionSurfaceConstruction::try_new(
+                directrix,
+                None,
+                Vector3::new(0.0, 0.0, 1.0),
+                None,
+                cache,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            definition.cache_fit_tolerance().map(|t| t.get()),
+            fit,
+            "the construction states the fit"
+        );
+        ir.model.procedural_surfaces.push(ProceduralSurface::new(
+            construction.clone(),
+            definition,
+            None,
+        ));
+        let surface = &mut ir.model.surfaces[0];
+        let SurfaceGeometry::Solved(plane) = surface.geometry.clone() else {
+            panic!("the cube's faces are on planes")
+        };
+        surface.geometry = SurfaceGeometry::Procedural {
+            construction,
+            cache: Some(plane),
+        };
+        ir.finalize();
+        ir
+    };
+    let s = one(&with(Some(0.05)));
+    assert!((volume(&s) - 1000.0).abs() < 1e-6, "{}", volume(&s));
+    // The face's four edges, and their four corners.
+    assert_eq!(widened(&s), (4, 4));
+    assert!(s.brep.edges.iter().filter(|e| e.tolerance >= 0.05).count() == 4);
+    assert_eq!(widened(&one(&with(None))), (0, 0));
+    let bodies = read_bodies(&with(Some(2.0)), None);
+    assert!(bodies.read.is_empty());
+    let why = &bodies.failures[0].message;
+    assert!(
+        why.contains("face") && why.contains("its solved cache"),
+        "{why}"
+    );
+}
+
 /// A placement that scales unevenly, by however little more than rounding, is refused; a
 /// rotation is taken.
 #[test]
@@ -865,5 +1007,58 @@ fn a_body_placed_by_a_scale_or_mirror_is_refused_and_a_rigid_one_moves_it() {
     assert_eq!(
         b.read[0].placement.map(|m| m[3]),
         Some([100.0, 0.0, 0.0, 1.0])
+    );
+}
+
+/// A solid refused for one face (its plane moved 5 mm off its edges) comes in as an open surface
+/// of its other faces, as the STEP reader brings in a solid it cannot close: the record says why
+/// it is open and which face was left out, and the face is only left out because the refusal
+/// names it.
+#[test]
+fn a_solid_refused_for_one_face_comes_in_as_an_open_surface_of_the_others() {
+    let mut ir = cube();
+    let face = ir.model.faces.first().unwrap().clone();
+    let surface = ir
+        .model
+        .surfaces
+        .iter_mut()
+        .find(|s| s.id == face.surface)
+        .unwrap();
+    let SurfaceGeometry::Solved(SolvedSurfaceGeometry::Plane(plane)) = &surface.geometry else {
+        panic!("{:?}", surface.geometry)
+    };
+    let o = plane.origin().get();
+    let (n, u) = (
+        plane.frame().axis().as_raw(),
+        plane.frame().reference().as_raw(),
+    );
+    let moved = cadmpeg_ir::geometry::analytic::PlaneSurface::try_new(
+        Point3::new(o.x + 5.0 * n.x, o.y + 5.0 * n.y, o.z + 5.0 * n.z),
+        Vector3::new(n.x, n.y, n.z),
+        Vector3::new(u.x, u.y, u.z),
+    )
+    .unwrap();
+    surface.geometry = SurfaceGeometry::Solved(SolvedSurfaceGeometry::Plane(moved));
+    let bodies = read_bodies(&ir, None);
+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
+    let s = &bodies.read[0].solid;
+    assert!(s.sheet, "an open surface");
+    assert_eq!(s.brep.faces.len(), 5);
+    assert!(
+        !s.face_origin.contains(&0),
+        "face 0 left out: {:?}",
+        s.face_origin
+    );
+    assert!(
+        s.notes.iter().any(|n| n.starts_with("not closed")),
+        "{:?}",
+        s.notes
+    );
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.starts_with("left out: ") && n.contains("face #0")),
+        "{:?}",
+        s.notes
     );
 }
