@@ -878,15 +878,173 @@ fn the_agents_own_questions_are_answered_by_the_mode_or_asked() {
             PermissionOption { id: "no".into(), name: "Reject".into(), kind: "reject_once".into() },
         ]
     };
-    on_permission(&mut app, 1, "mcp__solidcraft-app__batch".into(), Some("other"), opts());
+    on_permission(&mut app, 1, "mcp__solidcraft-app__batch".into(), Some("other"), opts(), None);
     assert!(matches!(app.agent_chat.items.last(), Some(Item::Notice { text, .. }) if text.contains("mcp__solidcraft-app__batch")));
-    on_permission(&mut app, 2, "Run ls".into(), None, opts());
+    on_permission(&mut app, 2, "Run ls".into(), None, opts(), None);
     assert!(matches!(app.agent_chat.items.last(), Some(Item::Permission { answer: None, .. })));
     let n = app.agent_chat.items.len() - 1;
     answer_permission(&mut app, n, Some("always"));
     assert!(agents::always_allowed(&app.preferences, "claude", "Run ls"));
-    on_permission(&mut app, 3, "Run ls".into(), None, opts());
+    on_permission(&mut app, 3, "Run ls".into(), None, opts(), None);
     assert!(matches!(app.agent_chat.items.last(), Some(Item::Notice { .. })), "remembered");
+}
+
+/// Claude Code's read tools are off until a message sends a file or folder by path: then the
+/// session is opened again with them on (the same conversation) and the message waits for it to be
+/// ready. Later messages don't reopen it; New chat turns them off again.
+#[test]
+fn the_first_message_sent_by_path_turns_the_read_tools_on() {
+    let d = attachable("reads-on");
+    let (mut app, script, ctx) = app_with_script();
+    with_coding_agent(&mut app);
+    script.reopens_for_reads.store(true, std::sync::atomic::Ordering::Relaxed);
+    send(&mut app, &ctx, "hello".into());
+    ended(&script, "");
+    poll(&mut app, &ctx);
+    assert!(!script.calls().iter().any(|c| c.starts_with("reads:")), "nothing sent by path yet: {:?}", script.calls());
+    attach_path(&mut app, &d.to_string_lossy()).unwrap();
+    send(&mut app, &ctx, "look in this folder".into());
+    assert_eq!(script.calls().iter().filter(|c| *c == "reads: true").count(), 1, "{:?}", script.calls());
+    assert_eq!(script.prompts().len(), 1, "the message waits for the session to open again");
+    assert_eq!(app.agent_chat.state(), State::Starting);
+    script.report(Event::Ready { agent: "Test".into(), images: true });
+    poll(&mut app, &ctx);
+    assert_eq!(script.prompts().len(), 2, "sent once it is ready");
+    assert!(text_of(&script.prompts()[1]).starts_with("look in this folder"), "{}", text_of(&script.prompts()[1]));
+    ended(&script, "");
+    poll(&mut app, &ctx);
+    attach_path(&mut app, &d.to_string_lossy()).unwrap();
+    send(&mut app, &ctx, "and again".into());
+    assert_eq!(script.prompts().len(), 3, "already on: sent at once");
+    assert_eq!(script.calls().iter().filter(|c| c.starts_with("reads: true")).count(), 1);
+    ended(&script, "");
+    poll(&mut app, &ctx);
+    new_chat(&mut app);
+    assert!(script.calls().iter().any(|c| c == "reads: false"), "New chat turns them off: {:?}", script.calls());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// New chat while the session is being opened again with Claude Code's read tools on replaces it
+/// too, with them off, so that opening's reply can't bring back the conversation (Review: the
+/// chat waits in Starting then, which New chat used to leave to the agent).
+#[test]
+fn new_chat_while_the_read_tools_come_on_starts_afresh() {
+    let d = attachable("reads-new-chat");
+    let (mut app, script, ctx) = app_with_script();
+    with_coding_agent(&mut app);
+    script.reopens_for_reads.store(true, std::sync::atomic::Ordering::Relaxed);
+    attach_path(&mut app, &d.to_string_lossy()).unwrap();
+    send(&mut app, &ctx, "look in this folder".into());
+    assert_eq!(app.agent_chat.state(), State::Starting, "the session is being opened again");
+    new_chat(&mut app);
+    let calls = script.calls();
+    assert!(calls.ends_with(&["reads: false".to_string(), "new_session".to_string()]), "{calls:?}");
+    assert!(app.agent_chat.pending.is_empty() && app.agent_chat.items.is_empty());
+    script.report(Event::Ready { agent: "Test".into(), images: true });
+    poll(&mut app, &ctx);
+    assert!(script.prompts().is_empty(), "the cleared message isn't sent");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A file whose line the message's cap cut off was never named to the agent, so its reads still
+/// ask (Review: every file sent by path was taken as named).
+#[test]
+fn a_path_cut_off_by_the_cap_is_not_read_without_asking() {
+    let d = attachable("cut-path");
+    let (mut app, script, ctx) = app_with_script();
+    with_coding_agent(&mut app);
+    attach_path(&mut app, &at(&d, "brief.md")).unwrap();
+    send(&mut app, &ctx, "x".repeat(MAX_PROMPT));
+    assert!(!text_of(&script.prompts()[0]).contains("brief.md"), "cut off by the cap");
+    assert!(!app.agent_chat.attached_by_path(&d.join("brief.md")));
+    ended(&script, "");
+    poll(&mut app, &ctx);
+    attach_path(&mut app, &at(&d, "brief.md")).unwrap();
+    send(&mut app, &ctx, "now this".into());
+    assert!(text_of(&script.prompts()[1]).contains("brief.md"));
+    assert!(app.agent_chat.attached_by_path(&d.join("brief.md")));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The first file or folder attached in a chat with Claude Code makes the chat say once that
+/// sending it turns Claude Code's read tools on; other agents' own tools are theirs, so nothing is
+/// said for them.
+#[test]
+fn attaching_by_path_warns_once_that_it_turns_claudes_read_tools_on() {
+    let d = attachable("reads-warn");
+    let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+    app.preferences.agents.push(agents::AgentConfig {
+        id: "codex-test".into(),
+        name: "Codex".into(),
+        command: "codex-acp".into(),
+        ..Default::default()
+    });
+    with_coding_agent(&mut app);
+    let warnings = |app: &SolveApp| {
+        app.agent_chat
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Notice { text, error: false } if text.contains("turns on Claude Code's read tools")))
+            .count()
+    };
+    app.agent_chat.agent_id = Some("codex-test".into());
+    attach_path(&mut app, &d.to_string_lossy()).unwrap();
+    assert_eq!(warnings(&app), 0, "another agent's tools are its own");
+    app.agent_chat.agent_id = Some("claude-test".into());
+    attach_path(&mut app, &at(&d, "brief.md")).unwrap();
+    assert_eq!(warnings(&app), 1, "a file goes by its path too");
+    attach_path(&mut app, &d.to_string_lossy()).unwrap();
+    assert_eq!(warnings(&app), 1, "said once");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Claude Code's own read tools ask before every read. A read inside a file or folder sent by
+/// path in this conversation is answered at once, and the chat says so; a read before anything
+/// was sent, of anything else, through a link in the folder that leads out of it, or after New
+/// chat waits for the user.
+#[test]
+fn reads_of_what_was_sent_by_path_are_allowed_and_others_wait() {
+    let d = attachable("reads");
+    let (photos, outside) = (d.join("photos"), d.join("outside"));
+    std::fs::create_dir_all(&photos).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(photos.join("a.jpg"), b"x").unwrap();
+    std::fs::write(outside.join("secret.txt"), b"x").unwrap();
+    let (mut app, _script, ctx) = app_with_script();
+    with_coding_agent(&mut app);
+    let opts = || {
+        vec![
+            PermissionOption { id: "allow".into(), name: "Allow".into(), kind: "allow_once".into() },
+            PermissionOption { id: "no".into(), name: "Reject".into(), kind: "reject_once".into() },
+        ]
+    };
+    let asked = |app: &SolveApp| matches!(app.agent_chat.items.last(), Some(Item::Permission { answer: None, .. }));
+    let photo = photos.join("a.jpg");
+    on_permission(&mut app, 1, "Read photos/a.jpg".into(), Some("read"), opts(), Some(&photo));
+    assert!(asked(&app), "nothing was sent by path yet");
+    attach_path(&mut app, &photos.to_string_lossy()).unwrap();
+    send(&mut app, &ctx, "look at these".into());
+    on_permission(&mut app, 2, "Read photos/a.jpg".into(), Some("read"), opts(), Some(&photo));
+    assert!(
+        matches!(app.agent_chat.items.last(), Some(Item::Notice { text, error: false }) if text.contains("Read photos/a.jpg") && text.contains("attached")),
+        "answered at once"
+    );
+    on_permission(&mut app, 3, "Find photos".into(), Some("search"), opts(), Some(&photos));
+    assert!(!asked(&app), "the folder itself");
+    on_permission(&mut app, 4, "Read secret.txt".into(), Some("read"), opts(), Some(&outside.join("secret.txt")));
+    assert!(asked(&app), "outside what was sent");
+    on_permission(&mut app, 5, "Read secret.txt".into(), Some("read"), opts(), Some(&photos.join("../outside/secret.txt")));
+    assert!(asked(&app), "stepping out of the folder");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(outside.join("secret.txt"), photos.join("link.txt")).unwrap();
+        on_permission(&mut app, 6, "Read link.txt".into(), Some("read"), opts(), Some(&photos.join("link.txt")));
+        assert!(asked(&app), "a link in the folder that leads out of it");
+    }
+    new_chat(&mut app);
+    on_permission(&mut app, 7, "Read photos/a.jpg".into(), Some("read"), opts(), Some(&photo));
+    assert!(asked(&app), "a new chat starts with nothing sent");
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// A title that only mentions SolidCraft is no tool of SolidCraft's: in every mode but Allow
@@ -906,17 +1064,17 @@ fn a_title_that_mentions_solidcraft_goes_through_the_users_mode() {
     for mode in [agents::Mode::Ask, agents::Mode::Edits] {
         app.preferences.agent_permissions.insert("codex".into(), mode);
         for (title, kind) in titles {
-            on_permission(&mut app, 1, title.into(), kind, opts());
+            on_permission(&mut app, 1, title.into(), kind, opts(), None);
             assert!(matches!(app.agent_chat.items.last(), Some(Item::Permission { answer: None, .. })), "{mode:?}: {title}");
             app.agent_chat.items.clear();
         }
         // The chat's own tool stays a single question, the gate's.
-        on_permission(&mut app, 2, "mcp__solidcraft-app__batch".into(), Some("other"), opts());
+        on_permission(&mut app, 2, "mcp__solidcraft-app__batch".into(), Some("other"), opts(), None);
         assert!(matches!(app.agent_chat.items.last(), Some(Item::Notice { .. })), "{mode:?}");
         app.agent_chat.items.clear();
     }
     app.preferences.agent_permissions.insert("codex".into(), agents::Mode::All);
-    on_permission(&mut app, 3, titles[0].0.into(), titles[0].1, opts());
+    on_permission(&mut app, 3, titles[0].0.into(), titles[0].1, opts(), None);
     assert!(matches!(app.agent_chat.items.last(), Some(Item::Notice { .. })), "Allow everything answers it");
 }
 
@@ -931,6 +1089,9 @@ struct Script {
     events: Arc<Mutex<Vec<Event>>>,
     /// Every prompt in full (its text and pictures).
     prompts: Arc<Mutex<Vec<Vec<PromptPart>>>>,
+    /// Turning the read tools on opens the session again (as Claude Code's adapter does), so the
+    /// panel waits for Ready.
+    reopens_for_reads: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Script {
@@ -969,6 +1130,10 @@ impl ChatBackend for Script {
     fn set_config_option(&mut self, id: &str, value: &str) {
         self.calls.lock().unwrap().push(format!("set_config_option: {id}={value}"));
     }
+    fn set_reads_files(&mut self, on: bool) -> bool {
+        self.calls.lock().unwrap().push(format!("reads: {on}"));
+        on && self.reopens_for_reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
     fn authenticate(&mut self, _: &str) {}
     fn shutdown(&mut self, _: bool) {}
 }
@@ -980,6 +1145,18 @@ fn app_with_script() -> (SolveApp, Script, egui::Context) {
     app.agent_chat.backend = Some(Box::new(script.clone()));
     app.agent_chat.state = Some(State::Ready);
     (app, script, crate::fonts::test_context())
+}
+
+/// The chat's agent is a coding agent (Claude Code over ACP), which reads files with tools of its
+/// own: every file and folder goes to it by its path.
+fn with_coding_agent(app: &mut SolveApp) {
+    app.preferences.agents.push(agents::AgentConfig {
+        id: "claude-test".into(),
+        name: "Claude Code".into(),
+        command: "/opt/homebrew/bin/claude-agent-acp".into(),
+        ..Default::default()
+    });
+    app.agent_chat.agent_id = Some("claude-test".into());
 }
 
 fn ended(script: &Script, reason: &str) {
@@ -1078,6 +1255,7 @@ fn a_late_sign_in_retry_or_permission_cannot_restart_a_departed_turn() {
         title: "mcp__solidcraft-app__batch".into(),
         kind: None,
         options: vec![PermissionOption { id: "allow".into(), name: "Allow".into(), kind: "allow_once".into() }],
+        reads: None,
     });
     ended(&script, "auth");
     script.report(Event::AuthRequired { methods: Vec::new() });
@@ -1770,7 +1948,7 @@ fn new_chat_clears_everything_and_keeps_the_agent_and_mode() {
     send(&mut app, &ctx, "queued".into());
     assert!(new_chat_needs_confirm(&app), "a running message and a queue ask first");
     new_chat(&mut app);
-    assert_eq!(script.calls(), ["prompt: first", "cancel", "new_session"]);
+    assert_eq!(script.calls(), ["prompt: first", "cancel", "reads: false", "new_session"], "New chat starts with the read tools off");
     assert!(app.agent_chat.items.is_empty() && app.agent_chat.pending.is_empty());
     assert_eq!(app.agent_chat.state(), State::Starting);
     assert_eq!(app.agent_chat.agent_id.as_deref(), Some("claude"));
@@ -3202,6 +3380,126 @@ fn at_most_eight_files_on_a_message() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// To a coding agent every file and folder goes by its path, whatever its kind and however many
+/// (up to MAX_ON_MESSAGE): nothing is read, decoded or imported, and the agent reads them whole
+/// with its own tools. A pasted picture has no path, so it goes with the message, at most eight.
+#[test]
+fn a_coding_agent_gets_every_file_and_folder_by_its_path() {
+    let d = attachable("by-path");
+    std::fs::write(d.join("block.stl"), b"solid x\nendsolid x\n").unwrap();
+    let (mut app, script, ctx) = app_with_script();
+    with_coding_agent(&mut app);
+    for name in ["target.png", "brief.md", "block.stl"] {
+        attach_path(&mut app, &at(&d, name)).unwrap();
+    }
+    attach_dropped(&mut app, [d.clone()].into_iter());
+    for _ in 0..attach::MAX_FILES {
+        attach_path(&mut app, &at(&d, "target.png")).unwrap();
+    }
+    assert!(app.agent_chat.loading.is_empty(), "nothing is read");
+    assert_eq!(app.agent_chat.attachments.len(), attach::MAX_FILES + 4, "nothing refused past eight");
+    assert!(app.agent_chat.attachments.iter().all(attach::Attachment::by_place), "all by path");
+    assert!(matches!(app.agent_chat.attachments[2].content, attach::Content::Reference { mime: "model/stl", .. }), "not imported");
+    assert!(attach_path(&mut app, &at(&d, "missing.png")).is_err(), "a missing file is still refused");
+    send(&mut app, &ctx, "these".into());
+    let sent = &script.prompts()[0];
+    let text = text_of(sent);
+    assert_eq!(pictures_in(sent), 0, "{text}");
+    assert!(text.contains("Attached file `target.png` (image/png, "), "{text}");
+    assert!(text.contains("Attached file `brief.md` (text/markdown, ") && !text.contains("wall 2 mm"), "its text is not in it: {text}");
+    assert!(text.contains("Attached file `block.stl` (model/stl, "), "{text}");
+    let folder = d.file_name().unwrap().to_string_lossy().to_string();
+    assert!(text.contains(&format!("Attached folder `{folder}/` (at ")), "{text}");
+    assert_eq!(text.matches("read it with your own tools").count(), attach::MAX_FILES + 4, "{text}");
+    for _ in 0..attach::MAX_FILES {
+        attach_rgba(&mut app, 2, 2, &[9; 16]).unwrap();
+    }
+    assert!(attach_rgba(&mut app, 2, 2, &[9; 16]).unwrap_err().contains("save the picture as a file"));
+    new_chat(&mut app);
+    for _ in 0..attach::MAX_ON_MESSAGE {
+        attach_path(&mut app, &at(&d, "brief.md")).unwrap();
+    }
+    assert!(attach_path(&mut app, &at(&d, "brief.md")).unwrap_err().contains("200"), "a bound on files in all");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A folder attached through the control channel goes to a coding agent by its path, nothing in it
+/// listed or read; without one (an endpoint can't open it), it is refused.
+#[test]
+fn an_attached_folder_tells_the_agent_where_it_is() {
+    let d = attachable("folder");
+    let (mut app, script, ctx) = app_with_script();
+    assert!(control(&mut app, &ctx, &json!({"attach": d.to_string_lossy()})).is_err(), "no coding agent: no folders");
+    with_coding_agent(&mut app);
+    control(&mut app, &ctx, &json!({"attach": d.to_string_lossy()})).unwrap();
+    assert!(app.agent_chat.loading.is_empty(), "nothing in it is read");
+    send(&mut app, &ctx, "look in here".into());
+    let text = text_of(&script.prompts()[0]);
+    assert!(text.contains(&format!("Attached folder `{}/` (at ", d.file_name().unwrap().to_string_lossy())), "{text}");
+    assert!(!text.contains("target.png"), "nothing in it is listed: {text}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// For a coding agent, where the host's dialogs choose files or folders but not both (Windows,
+/// Linux), the + menu has Choose files… (any type) and Choose folders…, each taking several at
+/// once; where one dialog mixes them (macOS), one Choose files or folders… takes both.
+#[test]
+fn the_plus_menu_chooses_several_files_and_folders() {
+    use solidcraft_ui_registry::handle_at;
+    let d = attachable("choose-many");
+    let (one, two) = (d.join("one"), d.join("two"));
+    std::fs::create_dir_all(&one).unwrap();
+    std::fs::create_dir_all(&two).unwrap();
+    let mut h = narrow_chat();
+    with_coding_agent(&mut h.app);
+    let chosen = vec![at(&d, "brief.md"), at(&d, "target.png")];
+    h.app.services.pick_files = Some(Box::new(move |_: &str, exts: &[&str]| {
+        assert!(exts.is_empty(), "a coding agent reads any type: {exts:?}");
+        let all = chosen.clone();
+        Box::pin(async move { all })
+    }));
+    let folders = vec![one.to_string_lossy().to_string(), two.to_string_lossy().to_string()];
+    h.app.services.pick_folders = Some(Box::new(move || {
+        let all = folders.clone();
+        Box::pin(async move { all })
+    }));
+    h.frames(2);
+    let plus = handle_at("agent_chat:add").expect("a + button");
+    let choose = |h: &mut crate::scenario::Harness, item: &str| {
+        h.call("ui.click", json!({"x": plus.x, "y": plus.y}));
+        h.frames(2);
+        let at = handle_at(item).unwrap_or_else(|| panic!("{item} in the + menu"));
+        h.call("ui.click", json!({"x": at.x, "y": at.y}));
+        h.frames(2);
+        settle_chat(h);
+    };
+    choose(&mut h, "agent_chat:add_file");
+    assert_eq!(status(&h.app)["attachments"], json!(["brief.md", "target.png"]), "both chosen files");
+    assert!(handle_at("agent_chat:add_any").is_none(), "no mixed item where the dialogs don't mix");
+    choose(&mut h, "agent_chat:add_folder");
+    assert_eq!(status(&h.app)["attachments"], json!(["brief.md", "target.png", "one/", "two/"]), "both chosen folders");
+    assert!(h.app.agent_chat.attachments.iter().all(attach::Attachment::by_place), "all by their path");
+    // Cancelled: nothing more.
+    h.app.services.pick_files = Some(Box::new(|_: &str, _: &[&str]| Box::pin(async { Vec::new() })));
+    choose(&mut h, "agent_chat:add_file");
+    assert_eq!(h.app.agent_chat.attachments.len(), 4);
+    // One dialog for both.
+    h.app.agent_chat.attachments.clear();
+    let mixed = vec![at(&d, "brief.md"), one.to_string_lossy().to_string()];
+    h.app.services.pick_files_or_folders = Some(Box::new(move || {
+        let all = mixed.clone();
+        Box::pin(async move { all })
+    }));
+    h.frames(2);
+    choose(&mut h, "agent_chat:add_any");
+    assert_eq!(status(&h.app)["attachments"], json!(["brief.md", "one/"]), "a file and a folder from one dialog");
+    h.call("ui.click", json!({"x": plus.x, "y": plus.y}));
+    h.frames(2);
+    assert!(handle_at("agent_chat:add_file").is_none() && handle_at("agent_chat:add_folder").is_none(), "one item instead of two");
+    assert!(handle_at("agent_chat:paste_picture").is_some());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// While the agent works, a message queues with its files: the queue shows them, Stop keeps
 /// them, and they go with the queue.
 #[test]
@@ -3485,6 +3783,33 @@ fn assert_inside_the_panel(chips: usize) {
     }
 }
 
+/// Many files on a message (to a coding agent, up to 200) scroll in a strip of chips about three
+/// rows high, so the text box stays in the panel; eight or fewer show whole, as before.
+#[test]
+fn many_files_scroll_in_a_strip_of_chips() {
+    use solidcraft_ui_registry::rect_of;
+    let d = attachable("many-chips");
+    let mut h = narrow_chat();
+    with_coding_agent(&mut h.app);
+    for _ in 0..attach::MAX_FILES {
+        attach_path(&mut h.app, &at(&d, "brief.md")).unwrap();
+    }
+    h.frames(3);
+    let last = rect_of(&format!("agent_chat:file:{}", attach::MAX_FILES - 1)).expect("the eighth chip");
+    let input = rect_of("agent_chat:input").expect("the text box");
+    assert!(last.bottom() <= input.top(), "eight chips show whole: the eighth {last:?}, text box {input:?}");
+    for _ in attach::MAX_FILES..40 {
+        attach_path(&mut h.app, &at(&d, "brief.md")).unwrap();
+    }
+    h.frames(3);
+    let first = rect_of("agent_chat:file:0").expect("the first chip");
+    let input = rect_of("agent_chat:input").expect("the text box");
+    let panel = rect_of("agent_chat:panel").expect("the panel");
+    assert!(input.top() - first.top() <= panel::CHIPS_MAX_HEIGHT + 24.0, "the chips stay in their strip: {first:?}, text box {input:?}");
+    assert!(panel.contains_rect(input), "the text box stays in the panel: {input:?} in {panel:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// Files for the next message show as chips above the text box (a picture's thumbnail, the name,
 /// a × that takes it off), inside the chat, and Send sends files with no text.
 #[test]
@@ -3544,9 +3869,10 @@ fn each_file_has_its_own_id_and_thumbnail() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// The + button: "Choose a file…" asks the app's file picker for the types that can be attached
-/// (not the design types Open shows) and attaches what it answers; "Paste a picture" attaches
-/// the clipboard's picture (here given as RGBA, as the system does).
+/// The + button: "Choose files…" asks the app's file picker for several files, the types that can
+/// be attached listed (not the design types Open shows), and attaches what it answers; "Paste a
+/// picture" attaches the clipboard's picture (here given as RGBA, as the system does). An endpoint
+/// can't open folders, so there is no item for them, even where the host's dialog could mix them.
 #[test]
 fn the_plus_button_attaches_a_chosen_file_or_a_pasted_picture() {
     use solidcraft_ui_registry::handle_at;
@@ -3555,17 +3881,19 @@ fn the_plus_button_attaches_a_chosen_file_or_a_pasted_picture() {
     let chosen = at(&d, "brief.md");
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
     let seen = asked.clone();
-    h.app.services.pick_file = Some(Box::new(move |_label: &str, exts: &[&str]| {
+    h.app.services.pick_files = Some(Box::new(move |_label: &str, exts: &[&str]| {
         *seen.borrow_mut() = exts.iter().map(|e| e.to_string()).collect();
         let p = chosen.clone();
-        Box::pin(async move { Some(p) })
+        Box::pin(async move { vec![p] })
     }));
+    h.app.services.pick_files_or_folders = Some(Box::new(|| Box::pin(async { Vec::new() })));
     h.frames(2);
     let plus = handle_at("agent_chat:add").expect("a + button");
     h.call("ui.click", json!({"x": plus.x, "y": plus.y}));
     h.frames(2);
-    let choose = handle_at("agent_chat:add_file").expect("Choose a file… in its menu");
+    let choose = handle_at("agent_chat:add_file").expect("Choose files… in its menu");
     assert!(handle_at("agent_chat:paste_picture").is_some(), "Paste a picture in its menu");
+    assert!(handle_at("agent_chat:add_folder").is_none() && handle_at("agent_chat:add_any").is_none(), "no folders");
     h.call("ui.click", json!({"x": choose.x, "y": choose.y}));
     h.frames(4);
     assert_eq!(status(&h.app)["attachments"], json!(["brief.md"]));
