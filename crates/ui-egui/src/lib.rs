@@ -24,6 +24,7 @@ pub mod browser_search;
 mod browser_search_tests;
 pub mod canvas;
 pub mod cli_link;
+mod close_model;
 #[cfg(test)]
 mod colour_tokens_tests;
 #[cfg(test)]
