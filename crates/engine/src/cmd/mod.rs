@@ -108,6 +108,7 @@ mod file_library;
 pub(crate) use file_library::uses_file as file_library_uses_file;
 mod frame;
 mod frame_end_cap;
+mod hole_callout;
 pub(crate) mod inspect;
 mod interference;
 pub(crate) mod joints;
@@ -494,6 +495,7 @@ pub fn command_specs() -> Vec<&'static CommandSpec> {
     v.extend(print_face::COMMANDS.iter());
     v.extend(metadata::COMMANDS.iter());
     v.extend(inspect::COMMANDS.iter());
+    v.extend(hole_callout::COMMANDS.iter());
     v.extend(compare::COMMANDS.iter());
     v.extend(compare_picture::COMMANDS.iter());
     v.extend(silhouette::COMMANDS.iter());
