@@ -72,6 +72,7 @@ fn settle(jobs: &[Job], outcomes: &[Outcome]) -> Settled {
                     kind: IssueKind::NeedsRepair,
                     item: Some(job.item),
                     part: job.part.clone(),
+                    paths: Vec::new(),
                     faces: 0,
                     times: job.times,
                     detail,

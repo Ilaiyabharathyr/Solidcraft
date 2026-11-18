@@ -70,10 +70,19 @@ pub fn records_import(records: &ImportRecords) -> Result<StepImport> {
     }
     check_tree(&records.tree, records.bodies.len(), 0, &mut 0)?;
     let mut bodies = Vec::with_capacity(records.bodies.len());
-    let mut report = ImportReport { parts: records.bodies.len(), ..ImportReport::default() };
+    // One root product: the first name of every issue's path is the import's own component.
+    let mut report = ImportReport { parts: records.bodies.len(), single_root: records.tree.len() == 1, ..ImportReport::default() };
     let mut warnings = records.warnings.clone();
     for w in &records.warnings {
-        report.issues.push(ImportIssue { kind: IssueKind::File, item: None, part: String::new(), faces: 0, times: 1, detail: w.clone() });
+        report.issues.push(ImportIssue {
+            kind: IssueKind::File,
+            item: None,
+            part: String::new(),
+            paths: Vec::new(),
+            faces: 0,
+            times: 1,
+            detail: w.clone(),
+        });
     }
     // A body SMLib refuses is left out, as a STEP import leaves out a solid it cannot make, and
     // the others still come in: `kept[k]` is where record body `k` is among the bodies made.
@@ -90,6 +99,7 @@ pub fn records_import(records: &ImportRecords) -> Result<StepImport> {
                     kind: IssueKind::NotImported,
                     item: Some(k as u64),
                     part: r.name.clone(),
+                    paths: paths_of(r),
                     faces: 0,
                     times: 1,
                     detail: detail.clone(),
@@ -112,6 +122,7 @@ pub fn records_import(records: &ImportRecords) -> Result<StepImport> {
                 kind: IssueKind::NotImported,
                 item: Some(k as u64),
                 part: r.name.clone(),
+                paths: paths_of(r),
                 faces: 0,
                 times: 1,
                 detail: detail.clone(),
@@ -191,6 +202,12 @@ pub fn records_import_shared(records: &ImportRecords) -> Result<Arc<StepImport>>
 /// import is (its cache key and its bodies' certificates are of this).
 pub fn records_text(records: &ImportRecords) -> Result<String> {
     serde_json::to_string(records).map_err(|e| KernelError::Invalid(format!("import records: {e}")))
+}
+
+/// Where a record body left out would have been, as [`ImportIssue::paths`] (none outside any
+/// product).
+fn paths_of(r: &RecordBody) -> Vec<Vec<String>> {
+    if r.path.is_empty() { Vec::new() } else { vec![r.path.clone()] }
 }
 
 /// The body SMLib makes of one record, checked first: a record from a file is hostile input.
