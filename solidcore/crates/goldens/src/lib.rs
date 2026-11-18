@@ -37,7 +37,10 @@ pub mod solidcraft;
 pub mod soundness;
 pub mod ssi;
 pub mod step;
+pub(crate) mod tolsub;
 pub mod util;
+#[cfg(test)]
+mod wr493_rows;
 
 pub use case::{Case, CaseContext, CaseSource};
 pub use compare::{compare, AbsFloor, CaseDiff, Mismatch, REL_TOL};

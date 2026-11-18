@@ -1,0 +1,1060 @@
+//! Class proofs for the golden rows moved by retiring the WR-493 flag. A sphere or torus
+//! found while reading a file now keeps the file's own NURB, and the file's UV trim curves
+//! stay on it.
+//!
+//! Recognising a face's NURB as a sphere or torus used to replace that NURB by one rebuilt
+//! from the fitted circles. The rebuilt NURB has another parametrisation, so the file's UV
+//! trims no longer mapped onto their edges. `check_and_fix_uv_trim_curves` then dropped
+//! them and the face measures were taken on trims rebuilt on the refit surface.
+//!
+//! - `found_spheres_and_tori_keep_the_file_nurb_and_trims` (structural identity): the
+//!   found surface is the file's NURB bit for bit, so the file's trims keep their meaning
+//!   on it. The parameter, UV, trim and written-file rows of these files now record the
+//!   file's own geometry.
+//! - `ss_plane_sph_area_is_the_area_its_edges_bound`: on the four `ss_plane_sph` parts the
+//!   face area equals the area its edge loop bounds on the sphere. Gauss-Bonnet gives that
+//!   area as a line integral, here converged to 1e-12. The old value was 2.8e-3 off.
+//! - `sphere_plane_area_is_closed_form`: the band, cap and disk of
+//!   `Fillet/sphere_plane.smb` in closed form; the area is closer to it than before.
+//! - `box_w_slot_sphere_corners_are_the_area_their_trims_bound`: each sphere corner of
+//!   `Fillet/box_w_slot.smb` now measures the area its own trims bound (Gauss-Bonnet and
+//!   Green in UV agree to 1e-11), to 2e-9; the old areas were 5.5e-9 to 2.9e-8 off.
+//! - `box_w_slot_volume_and_mass_are_those_their_trims_bound`: integrated tightly, each
+//!   corner's volume and moments are those its trims bound (Stokes and Green agree), so
+//!   the geometry is exact. The `corpus.parity` volume is 5.1e-12 off the trims-bound
+//!   reference (old 9.8e-11). The `blend.fillet_executive_p3` mass row is closer in area,
+//!   volume, cx, the inertia and Pzx. cy, Pyz and Pxy are EQUAL under RULING 3: 7.3e-10,
+//!   7.1e-10 and 7.1e-10 relative off, against 1.7e-10, 2.5e-10 and 2.5e-10 before (the
+//!   corners' quadrature of the first moment in y at the row's requested accuracy 1e-4),
+//!   all within the reference's certified bound, which the gaps between the file's faces
+//!   hold over 1e5 times wider (the y moment's enclosure floor, 2.0e-4).
+//! - `point_just_outside_the_sphere_pole_is_in_the_infinite_region`: the
+//!   `query.brep` `sphere_vertex3_off_region` point lies outside the sphere exactly.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)] // test helpers
+
+use solidcore::geom::attribute::{AttributeStore, ObjectKey};
+use solidcore::geom::object::ObjectRef;
+use solidcore::geom::tol::zone_tol3d;
+use solidcore::intersect::point_class::PointClassType;
+use solidcore::mass::integrator::properties::face_properties;
+use solidcore::math::Vec3;
+use solidcore::nurbs::b_spline_surface::BSplineSurface;
+use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
+use solidcore::query::brep::{BrepIdentity, BrepQuery};
+use solidcore::surface::surface::{Surface, SurfaceKind};
+use solidcore::topology::brep::p1 as bl;
+use solidcore::topology::brep::p10::TopologyEnv;
+use solidcore::topology::brep::p7::read_from_file;
+use solidcore::topology::brep_data::BrepData;
+use solidcore::topology::database_io::FileType;
+use solidcore::topology::face::p2::PPF_AREA;
+use solidcore::topology::part_file::{read_part_from_file, PartEnv};
+use solidcore::topology::topology::NotifyRecords;
+use solidcore::topology::{BrepId, FaceId};
+use solidcore::{Brep, EntityRef, Kernel};
+
+fn bytes(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../upstream/TestFiles/pt_TestFiles")
+        .join(name);
+    std::fs::read(path).unwrap()
+}
+
+/// Reads an upstream `.smb` test file (healing on, as `SmBrep::ReadFromFile`).
+fn read(k: &mut Kernel, name: &str) -> Brep {
+    let mut b = Brep::new_with_infinite_region().unwrap();
+    let mut records = NotifyRecords::new();
+    let mut attributes = AttributeStore::default();
+    let key = solidcore::topology::loopuse::notify_ref;
+    let mut env = TopologyEnv {
+        all_attributes: &[],
+        attributes: &mut attributes,
+        key_of: &key,
+        records: &mut records,
+        next_key: 1 << 50,
+    };
+    read_from_file(k, &mut b, bytes(name), FileType::Ascii, false, &mut env).unwrap();
+    b
+}
+
+/// A distinct identity per topology entity of each B-rep of a part file.
+fn part_key(brep: usize, e: EntityRef) -> ObjectRef {
+    let (type_code, kind, i) = match e {
+        EntityRef::Brep(x) => (16011, 0, x.index()),
+        EntityRef::Region(x) => (16012, 1, x.index()),
+        EntityRef::Shell(x) => (16013, 2, x.index()),
+        EntityRef::Faceuse(x) => (16022, 3, x.index()),
+        EntityRef::Face(x) => (16002, 4, x.index()),
+        EntityRef::Loopuse(x) => (16004, 5, x.index()),
+        EntityRef::Loop(x) => (16003, 6, x.index()),
+        EntityRef::Edgeuse(x) => (16005, 7, x.index()),
+        EntityRef::Edge(x) => (16016, 8, x.index()),
+        EntityRef::Vertexuse(x) => (16006, 9, x.index()),
+        EntityRef::Vertex(x) => (16021, 10, x.index()),
+    };
+    let brep = (brep as u64 + 1) << 36;
+    ObjectRef {
+        type_code,
+        key: ObjectKey(brep | ((kind + 1) << 32) | u64::from(i)),
+    }
+}
+
+/// Reads the B-reps of an upstream `.smp` part file.
+fn read_part(k: &mut Kernel, name: &str) -> Vec<Brep> {
+    let mut records = NotifyRecords::new();
+    let mut attributes = AttributeStore::default();
+    let mut env = PartEnv {
+        attributes: &mut attributes,
+        key_of: &part_key,
+        records: &mut records,
+        next_key: 1 << 62,
+    };
+    read_part_from_file(k, bytes(name), FileType::Ascii, &mut env)
+        .unwrap()
+        .breps
+}
+
+/// The face area as `corpus.parity` measures it (per-face integration at 1e-6).
+fn face_area(k: &Kernel, b: &mut Brep, f: FaceId) -> f64 {
+    let bbox = solidcore::query::face::p1::calculate_bounding_box(k, &*b, f, false).unwrap();
+    let s = bbox.size();
+    let d = s.x.max(s.y).max(s.z);
+    let p = face_properties(
+        k,
+        b,
+        f,
+        OrientType::Same,
+        1e-6,
+        bbox.mid(),
+        d * d / 100.0,
+        0.0,
+        PPF_AREA,
+    )
+    .unwrap();
+    p.area.abs()
+}
+
+/// The `SmBSplineSurface` part of a surface derived from it.
+fn b_spline_part(s: &Surface) -> Option<&BSplineSurface> {
+    match s.kind() {
+        SurfaceKind::BSpline(b) => Some(b),
+        SurfaceKind::Plane(p) => Some(p.base()),
+        SurfaceKind::Sphere(sp) => Some(sp.base().base()),
+        SurfaceKind::Torus(t) => Some(t.base().base()),
+        SurfaceKind::SurfOfRevolution(sr) => Some(sr.base()),
+        _ => None,
+    }
+}
+
+/// The NURB as bits: every control point `[x, y, z, w]` and both knot vectors.
+type Bits = (Vec<[u64; 4]>, Vec<u64>, Vec<u64>);
+
+fn bits(b: &BSplineSurface) -> Option<Bits> {
+    let n = b.gw_nurb()?;
+    let rows = n
+        .rows()
+        .flat_map(|r| {
+            r.iter()
+                .map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), p.w.to_bits()])
+        })
+        .collect();
+    let knots = |k: &[f64]| k.iter().map(|x| x.to_bits()).collect();
+    Some((rows, knots(n.u_knots()), knots(n.v_knots())))
+}
+
+/// A UV curve as bits: its natural interval and five points on it.
+fn curve_bits(k: &Kernel, c: &solidcore::curve::curve::Curve) -> Vec<u64> {
+    let iv = c.natural_interval();
+    let mut out = vec![iv.min().to_bits(), iv.max().to_bits()];
+    for f in [0.0, 0.17, 0.5, 0.83, 1.0] {
+        let p = c
+            .evaluate_point(k, iv.min() + (iv.max() - iv.min()) * f)
+            .unwrap();
+        out.extend([p.x.to_bits(), p.y.to_bits()]);
+    }
+    out
+}
+
+/// The face of a loop edge use.
+fn face_of(b: &Brep, eu: &solidcore::topology::Edgeuse) -> Option<FaceId> {
+    let solidcore::topology::EdgeuseOwner::Loopuse(Some(lu)) = eu.owner else {
+        return None;
+    };
+    let l = b.loopuse(lu).ok()?.loop_?;
+    Some(b.loop_(l).ok()?.face)
+}
+
+/// Every found sphere/torus face holds a NURB that is bitwise one of the file's surfaces,
+/// so its UV parameters are the file's. Returns the number of found faces and of the UV
+/// trims on them that are the file's own (same interval, same points bit for bit), so a
+/// file without any cannot pass vacuously.
+fn assert_found_faces_keep_file_nurbs(name: &str) -> (usize, usize) {
+    let mut k = Kernel::default();
+    let data = BrepData::read_from_file(&k, bytes(name), FileType::Ascii).unwrap();
+    let file: Vec<Bits> = data
+        .surfaces
+        .iter()
+        .filter_map(|s| b_spline_part(&s.object).and_then(bits))
+        .collect();
+    let file_trims: Vec<Vec<u64>> = data
+        .uv_curves
+        .iter()
+        .map(|c| curve_bits(&k, &c.object))
+        .collect();
+
+    let b = read(&mut k, name);
+    let mut found = Vec::new();
+    for (fid, f) in b.faces().iter() {
+        let Some(s) = f.surface.as_ref() else {
+            continue;
+        };
+        if !matches!(s.kind(), SurfaceKind::Sphere(_) | SurfaceKind::Torus(_)) {
+            continue;
+        }
+        found.push(fid);
+        let nurb = b_spline_part(s)
+            .and_then(bits)
+            .expect("found surface keeps a NURB");
+        assert!(
+            file.contains(&nurb),
+            "{name}: {fid:?}: found surface's NURB is not the file's"
+        );
+    }
+    let mut trims = 0;
+    for (_, eu) in b.edgeuses().iter() {
+        if !face_of(&b, eu).is_some_and(|f| found.contains(&f)) {
+            continue;
+        }
+        // (the healer still rebuilds a file trim that misses its edge, as on any surface)
+        if eu
+            .uv_trim_curve
+            .as_ref()
+            .is_some_and(|t| file_trims.contains(&curve_bits(&k, t)))
+        {
+            trims += 1;
+        }
+    }
+    (found.len(), trims)
+}
+
+#[test]
+fn found_spheres_and_tori_keep_the_file_nurb_and_trims() {
+    let files = [
+        "Fillet/box_w_slot.smb",
+        "Fillet/sphere_diff_3cylinders.smb",
+        "Fillet/sphere_plane.smb",
+        "Solids/nurb_fillet.smb",
+        "Solids/revolution_360.smb",
+        "Solids/revolution_mold.smb",
+        "Solids/sphere.smb",
+        "sphere.smb",
+        "surf_sphere150.smb",
+    ];
+    for name in files {
+        let (found, trims) = assert_found_faces_keep_file_nurbs(name);
+        assert!(
+            found > 0 && trims > 0,
+            "{name}: {found} spheres or tori found, {trims} trims"
+        );
+    }
+}
+
+/// Gauss-Legendre nodes and weights on [-1, 1] (Newton on the Legendre recurrence).
+fn gauss(n: usize) -> Vec<(f64, f64)> {
+    (1..=n)
+        .map(|i| {
+            let nf = n as f64;
+            let mut x = (std::f64::consts::PI * (i as f64 - 0.25) / (nf + 0.5)).cos();
+            let mut dp = 1.0;
+            for _ in 0..100 {
+                let (mut p0, mut p1) = (1.0, x);
+                for m in 2..=n {
+                    let mf = m as f64;
+                    (p0, p1) = (p1, ((2.0 * mf - 1.0) * x * p1 - (mf - 1.0) * p0) / mf);
+                }
+                dp = nf * (x * p1 - p0) / (x * x - 1.0);
+                let dx = p1 / dp;
+                x -= dx;
+                if dx.abs() < 1e-16 {
+                    break;
+                }
+            }
+            (x, 2.0 / ((1.0 - x * x) * dp * dp))
+        })
+        .collect()
+}
+
+/// The area on the sphere (`centre`, `radius`) of the side of the closed edge loop of `b`
+/// that holds the direction `inside` from the centre. By Gauss-Bonnet in spherical
+/// coordinates about that direction it is `r^2 * |sum of (1 - cos theta) d phi|` along the
+/// loop; each edge's knot span is integrated with `n` Gauss points.
+fn loop_area(k: &Kernel, b: &Brep, centre: Vec3, radius: f64, inside: Vec3, n: usize) -> f64 {
+    let e3 = inside * (1.0 / inside.length());
+    let seed = if e3.x.abs() < 0.9 {
+        Vec3::new(1.0, 0.0, 0.0)
+    } else {
+        Vec3::new(0.0, 1.0, 0.0)
+    };
+    let e1 = seed.cross(e3);
+    let e1 = e1 * (1.0 / e1.length());
+    let e2 = e3.cross(e1);
+    // the edges, each with its direction along the loop (a single closed chain)
+    let mut edges: Vec<_> = b.edges().iter().map(|(_, e)| e).collect();
+    let mut chain = vec![(edges.remove(0), true)];
+    while !edges.is_empty() {
+        let (last, fwd) = *chain.last().unwrap();
+        let iv = last.interval;
+        let c = last.curve.as_ref().unwrap();
+        let end = c
+            .evaluate_point(k, if fwd { iv.max() } else { iv.min() })
+            .unwrap();
+        let at = |e: &&solidcore::topology::Edge, t: f64| {
+            (e.curve.as_ref().unwrap().evaluate_point(k, t).unwrap() - end).length()
+        };
+        let i = edges
+            .iter()
+            .position(|e| at(e, e.interval.min()) < 1e-6 || at(e, e.interval.max()) < 1e-6)
+            .expect("closed chain");
+        let e = edges.remove(i);
+        let fwd = at(&e, e.interval.min()) < 1e-6;
+        chain.push((e, fwd));
+    }
+    let g = gauss(n);
+    let mut total = 0.0;
+    for (e, fwd) in chain {
+        let c = e.curve.as_ref().unwrap();
+        let (knots, _) = c.knots(k, Some(&e.interval)).unwrap();
+        let sign = if fwd { 1.0 } else { -1.0 };
+        for w in knots.windows(2) {
+            let (a, bb) = (w[0], w[1]);
+            for &(x, wt) in &g {
+                let t = a + (bb - a) * (x + 1.0) / 2.0;
+                let d = c.evaluate(k, t, 1, false, false).unwrap();
+                let q = d[0] - centre;
+                let (qx, qy, qz) = (q.dot(e1), q.dot(e2), q.dot(e3));
+                let (dx, dy) = (d[1].dot(e1), d[1].dot(e2));
+                let cos_t = qz / q.length();
+                let dphi = (qx * dy - qy * dx) / (qx * qx + qy * qy);
+                total += sign * wt * (bb - a) / 2.0 * (1.0 - cos_t) * dphi;
+            }
+        }
+    }
+    radius * radius * total.abs()
+}
+
+/// `corpus.parity` `ss_plane_sph1..4`: the area moved from 25.21534708166 (refit sphere,
+/// trims rebuilt) to 25.1445667451; the face's edge loop bounds 25.1445668449 on the sphere.
+#[test]
+fn ss_plane_sph_area_is_the_area_its_edges_bound() {
+    for name in [
+        "ss_plane_sph1.smp",
+        "ss_plane_sph2.smp",
+        "ss_plane_sph3.smp",
+        "ss_plane_sph4.smp",
+    ] {
+        let mut k = Kernel::default();
+        let mut breps = read_part(&mut k, name);
+        let b = &mut breps[0];
+        let faces = bl::faces(b, None).unwrap();
+        assert_eq!(faces.len(), 1, "{name}");
+        let f = faces[0];
+        let s = b.face(f).unwrap().surface.as_ref().unwrap();
+        let SurfaceKind::Sphere(sp) = s.kind() else {
+            panic!("{name}: sphere not found")
+        };
+        let (centre, radius) = (sp.base().position().origin(), sp.radius());
+        assert!(
+            (centre - Vec3::new(10.0, 2.0, 2.0)).length() < 1e-12 && (radius - 2.0).abs() < 1e-12
+        );
+        // a point well inside the face: the middle of its UV domain
+        let dom = b.face(f).unwrap().uv_domain;
+        let mid = s.evaluate_point(&k, dom.evaluate(0.5, 0.5)).unwrap();
+        let cert = loop_area(&k, b, centre, radius, mid - centre, 16);
+        let cert2 = loop_area(&k, b, centre, radius, mid - centre, 32);
+        assert!(
+            (cert - cert2).abs() <= 1e-12 * cert,
+            "{name}: quadrature not converged: {cert} {cert2}"
+        );
+        let area = face_area(&k, b, f);
+        assert!(
+            (area - cert).abs() <= 1e-6 * cert,
+            "{name}: area {area}, edges bound {cert}"
+        );
+        let old = 25.21534708166;
+        assert!((old - cert).abs() > 1e3 * (area - cert).abs(), "{name}");
+    }
+}
+
+/// `corpus.parity` `Fillet__sphere_plane.smb`: a sphere of radius 5 between z = +-h
+/// (h = 4.98097..., the file's pole vertices) less its cap beyond the plane x = -4, plus
+/// the disk of radius 3 in that plane. The area moved from 309.82222399413644 to
+/// 309.8222080702443; the circle edge lies 1.7e-5 off the sphere, so it can be no closer
+/// than that scale.
+#[test]
+fn sphere_plane_area_is_closed_form() {
+    use std::f64::consts::PI;
+    let h = 4.980_973_490_458_730_2;
+    let exact = 2.0 * PI * 5.0 * 2.0 * h - 2.0 * PI * 5.0 * 1.0 + PI * 9.0;
+    let mut k = Kernel::default();
+    let mut b = read(&mut k, "Fillet/sphere_plane.smb");
+    let faces = bl::faces(&b, None).unwrap();
+    let area: f64 = faces.iter().map(|&f| face_area(&k, &mut b, f)).sum();
+    let old = 309.822_223_994_136_44;
+    assert!(
+        (area - exact).abs() < (old - exact).abs(),
+        "area {area}, closed form {exact}"
+    );
+    assert!(
+        (area - exact).abs() <= 1e-5,
+        "area {area}, closed form {exact}"
+    );
+}
+
+/// `query.brep` `sphere_vertex3_off_region`: the vertex at the pole (0, 0, 5) of the sphere
+/// of radius 5 about the origin, moved by (1e-7, -1e-7, 1e-7), is at distance
+/// `sqrt(2e-14 + (5 + 1e-7)^2) > 5` from the centre: outside, in the infinite region (the
+/// row moved from region 1, the inside, to region 0).
+#[test]
+fn point_just_outside_the_sphere_pole_is_in_the_infinite_region() {
+    let mut k = Kernel::default();
+    let mut b = read(&mut k, "sphere.smb");
+    let pole = b
+        .vertices()
+        .iter()
+        .map(|(_, v)| v.point)
+        .find(|p| (*p - Vec3::new(0.0, 0.0, 5.0)).length() < 1e-12)
+        .expect("pole vertex");
+    let p = Vec3::new(pole.x + 1e-7, pole.y - 1e-7, pole.z + 1e-7);
+    assert!(p.length() > 5.0);
+    let query = BrepQuery::new(BrepIdentity::arena(BrepId::from_index(0)));
+    let tol = zone_tol3d(&k, 1e-6);
+    let pc = query.point_3d_classify(&k, &mut b, p, tol, false).unwrap();
+    assert_eq!(pc.point_class(), PointClassType::Region, "{pc:?}");
+    let Some(EntityRef::Region(r)) = pc.object() else {
+        panic!("{pc:?}")
+    };
+    assert_eq!(b.infinite_region(), Some(r));
+}
+
+/// The cuts of `[a, b]` where the UV curve `t` crosses one of the knot lines `uk` (in u)
+/// or `vk` (in v): the surface is a different polynomial patch on each side, so a Gauss
+/// rule only converges on pieces between them. Sign changes are found on 512 steps and
+/// bisected to the last bit.
+fn knot_cuts(
+    k: &Kernel,
+    t: &solidcore::curve::curve::Curve,
+    a: f64,
+    b: f64,
+    uk: &[f64],
+    vk: &[f64],
+) -> Vec<f64> {
+    let mut cuts = vec![a, b];
+    let m = 512_u32;
+    for (knots, in_u) in [(uk, true), (vk, false)] {
+        for &kn in knots {
+            let f = |x: f64| {
+                let p = t.evaluate_point(k, x).unwrap();
+                if in_u {
+                    p.x - kn
+                } else {
+                    p.y - kn
+                }
+            };
+            for i in 0..m {
+                let x0 = a + (b - a) * f64::from(i) / f64::from(m);
+                let x1 = a + (b - a) * f64::from(i + 1) / f64::from(m);
+                if f(x0) * f(x1) < 0.0 {
+                    let (mut lo, mut hi) = (x0, x1);
+                    for _ in 0..80 {
+                        let mid = 0.5 * (lo + hi);
+                        if f(lo) * f(mid) <= 0.0 {
+                            hi = mid;
+                        } else {
+                            lo = mid;
+                        }
+                    }
+                    cuts.push(0.5 * (lo + hi));
+                }
+            }
+        }
+    }
+    cuts.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    cuts.dedup();
+    cuts
+}
+
+/// The integrator's volume group integrands at `x` (relative to the origin) for the area
+/// vector `n`: the volume `z n_z`, then the static moments, the second moments, the
+/// products (yz, zx, xy) and the axial moments, each times `z n_z` (as the integrator's
+/// closure strips take them, `mass::integrator::properties::closure_integrands`).
+fn volume_integrands(x: Vec3, n: Vec3) -> [f64; 13] {
+    let vd = x.z * n.z;
+    [
+        vd,
+        x.x * vd,
+        x.y * vd,
+        x.z * vd / 2.0,
+        (x.x * x.x) * vd,
+        (x.y * x.y) * vd,
+        (x.z * x.z / 3.0) * vd,
+        (x.y * x.z) * vd / 2.0,
+        (x.z * x.x) * vd / 2.0,
+        (x.x * x.y) * vd,
+        (x.y * x.y + x.z * x.z / 3.0) * vd,
+        (x.x * x.x + x.z * x.z / 3.0) * vd,
+        (x.x * x.x + x.y * x.y) * vd,
+    ]
+}
+
+/// The integrals of a sphere face over its own trims (see [`sphere_face_trim_area`]).
+struct TrimIntegrals {
+    /// The area by Gauss-Bonnet: `r^2 * |sum of (1 - cos theta) d phi|` along the trims'
+    /// images about the direction of the face's middle.
+    gauss_bonnet: f64,
+    /// The area by Green in UV: `|sum of G(u, v) dv|`, `G(u, v)` the integral of
+    /// `|S_u x S_v|` from the domain's `u0` to `u` (itself split at the u knots).
+    green: f64,
+    /// The volume integral `integral of z n_z dA` (relative to the origin, `n` out of the
+    /// sphere) by line integrals alone: on the sphere `x . n = r + (c - origin) . n`, so
+    /// with `a = (-y z, x z, 0) / 3`, whose curl is `z e_z - x / 3`, it is
+    /// `(r A + (c - origin) . S) / 3 + sum of a . dx`. `A` is the Gauss-Bonnet area and
+    /// `S` the vector area `1/2 * sum of (x - c) x dx` (Stokes); both line sums run round
+    /// the loop the way that makes the Gauss-Bonnet sum positive (anticlockwise about the
+    /// face's middle seen from outside the sphere).
+    stokes_volume: f64,
+    /// The volume group of [`volume_integrands`] by Green in UV as `green`, with the
+    /// integrand's `S_u x S_v` in place of its length, taken out of the sphere (the sign of
+    /// [`Self::stokes_volume`]).
+    green_volume: [f64; 13],
+}
+
+/// The area of the sphere face `f` bounded by its own UV trims, two ways, with `n` Gauss
+/// points on every piece between trim knots and surface knot crossings:
+/// - Gauss-Bonnet along the trims' images, `r^2 * |sum of (1 - cos theta) d phi|` about the
+///   direction of the face's middle;
+/// - Green in UV, `|sum of G(u, v) dv|` with `G(u, v)` the integral of `|S_u x S_v|` from
+///   the domain's `u0` to `u` (itself split at the u knots).
+///
+/// Also the face's share of the volume group (see [`TrimIntegrals`]) about `origin`, on
+/// the sphere's outward side.
+fn sphere_face_trim_area(k: &Kernel, b: &Brep, f: FaceId, n: usize, origin: Vec3) -> TrimIntegrals {
+    use solidcore::math::Point2;
+    let face = b.face(f).unwrap();
+    let s = face.surface.as_ref().unwrap();
+    let SurfaceKind::Sphere(sp) = s.kind() else {
+        panic!("{f:?} is not a sphere")
+    };
+    let (centre, radius) = (sp.base().position().origin(), sp.radius());
+    let nurb = sp.base().base().gw_nurb().unwrap();
+    let (uk, vk) = (nurb.u_knots().to_vec(), nurb.v_knots().to_vec());
+    // the trims of the face, each over its edge's interval
+    let mut pieces = Vec::new();
+    for (_, eu) in b.edgeuses().iter() {
+        if face_of(b, eu) != Some(f) {
+            continue;
+        }
+        let Some(t) = eu.uv_trim_curve.as_ref() else {
+            continue;
+        };
+        pieces.push((t, b.edge(eu.edge.unwrap()).unwrap().interval));
+    }
+    assert!(pieces.len() >= 3, "{f:?}: {} trims", pieces.len());
+    let img = |t: &solidcore::curve::curve::Curve, x: f64| {
+        let uv = t.evaluate_point(k, x).unwrap();
+        s.evaluate_point(k, Point2::new(uv.x, uv.y)).unwrap()
+    };
+    // the pole of the spherical coordinates: the direction of the face's middle
+    let mid = s
+        .evaluate_point(k, face.uv_domain.evaluate(0.5, 0.5))
+        .unwrap();
+    let e3 = (mid - centre) * (1.0 / (mid - centre).length());
+    let seed = if e3.x.abs() < 0.9 {
+        Vec3::new(1.0, 0.0, 0.0)
+    } else {
+        Vec3::new(0.0, 1.0, 0.0)
+    };
+    let e1 = seed.cross(e3);
+    let e1 = e1 * (1.0 / e1.length());
+    let e2 = e3.cross(e1);
+    // one closed chain, each piece with its sense along it
+    let mut chain = vec![(pieces.remove(0), 1.0)];
+    while !pieces.is_empty() {
+        let ((lt, liv), sense) = *chain.last().unwrap();
+        let end = img(lt, if sense > 0.0 { liv.max() } else { liv.min() });
+        let gap = |(t, iv): &(
+            &solidcore::curve::curve::Curve,
+            solidcore::geom::extent1d::Extent1d,
+        ),
+                   at_min: bool| {
+            (img(t, if at_min { iv.min() } else { iv.max() }) - end).length()
+        };
+        let i = pieces
+            .iter()
+            .position(|p| gap(p, true) < 1e-4 || gap(p, false) < 1e-4)
+            .expect("closed chain");
+        let p = pieces.remove(i);
+        let sense = if gap(&p, true) < gap(&p, false) {
+            1.0
+        } else {
+            -1.0
+        };
+        chain.push((p, sense));
+    }
+    let g = gauss(n);
+    let u0 = face.uv_domain.min().x;
+    let (mut gb, mut green) = (0.0, 0.0);
+    let mut va = Vec3::new(0.0, 0.0, 0.0);
+    let mut al = 0.0;
+    let mut volume = [0.0; 13];
+    for ((t, iv), sense) in &chain {
+        let (knots, _) = t.knots(k, Some(iv)).unwrap();
+        for w in knots.windows(2) {
+            for c in knot_cuts(k, t, w[0], w[1], &uk, &vk).windows(2) {
+                let h = (c[1] - c[0]) / 2.0;
+                for &(x, wt) in &g {
+                    let d = t
+                        .evaluate(k, c[0] + h * (x + 1.0), 1, false, false)
+                        .unwrap();
+                    let (u, v) = (d[0].x, d[0].y);
+                    let (p, su, sv) = s
+                        .evaluate_1st_derivatives(k, Point2::new(u, v), false, false)
+                        .unwrap();
+                    let dp = su * d[1].x + sv * d[1].y;
+                    let q = p - centre;
+                    let (qx, qy, qz) = (q.dot(e1), q.dot(e2), q.dot(e3));
+                    let dphi = (qx * dp.dot(e2) - qy * dp.dot(e1)) / (qx * qx + qy * qy);
+                    gb += sense * wt * h * (1.0 - qz / q.length()) * dphi;
+                    va += q.cross(dp) * (0.5 * sense * wt * h);
+                    let o = p - origin;
+                    al += sense * wt * h * (-o.y * o.z * dp.x + o.x * o.z * dp.y) / 3.0;
+                    // G(u, v): u0 to u along v, split at the u knots between them
+                    let mut br = vec![u0, u];
+                    br.extend(uk.iter().filter(|&&kn| kn > u0.min(u) && kn < u0.max(u)));
+                    br.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                    let mut gu = 0.0;
+                    let mut gv = [0.0; 13];
+                    for s2 in br.windows(2) {
+                        let h2 = (s2[1] - s2[0]) / 2.0;
+                        for &(x2, wt2) in &g {
+                            let (p2, a1, a2) = s
+                                .evaluate_1st_derivatives(
+                                    k,
+                                    Point2::new(s2[0] + h2 * (x2 + 1.0), v),
+                                    false,
+                                    false,
+                                )
+                                .unwrap();
+                            gu += wt2 * h2 * a1.cross(a2).length();
+                            for (o, val) in gv
+                                .iter_mut()
+                                .zip(volume_integrands(p2 - origin, a1.cross(a2)))
+                            {
+                                *o += wt2 * h2 * val;
+                            }
+                        }
+                    }
+                    if u < u0 {
+                        gu = -gu;
+                        for o in &mut gv {
+                            *o = -*o;
+                        }
+                    }
+                    green += sense * wt * h * gu * d[1].y;
+                    for (o, val) in volume.iter_mut().zip(gv) {
+                        *o += sense * wt * h * val * d[1].y;
+                    }
+                }
+            }
+        }
+    }
+    let way = if gb < 0.0 { -1.0 } else { 1.0 };
+    let (area, vector_area, a_line) = (radius * radius * gb.abs(), va * way, al * way);
+    let stokes_volume = (radius * area + (centre - origin).dot(vector_area)) / 3.0 + a_line;
+    // Green's sum has the sign of the UV loop's way round and of S_u x S_v: take the
+    // outward one, that of the volume by Stokes
+    let out = if (volume[0] < 0.0) == (stokes_volume < 0.0) {
+        1.0
+    } else {
+        -1.0
+    };
+    TrimIntegrals {
+        gauss_bonnet: area,
+        green: green.abs(),
+        stokes_volume,
+        green_volume: volume.map(|x| x * out),
+    }
+}
+
+/// `corpus.parity` `Fillet__box_w_slot.smb` area (5.914389913639413 to 5.914390008545681)
+/// and the `blend.fillet_executive_p3` `source-file-box_w_slot-all-edges` area (the
+/// fillet is refused, so the body is the file as read). Only the eight sphere corner faces
+/// (radius 0.06) move: they now keep the file's NURB and trims. Each face's area bounded by
+/// its own trims, by Gauss-Bonnet and by Green in UV (two independent line integrals,
+/// converged at n = 24 against n = 32), is matched by the integrator to 2e-9 relative; the
+/// old per-face areas, taken on a refit sphere with rebuilt trims, were 5.5e-9 to 2.9e-8
+/// off. On the sum the new area is 2e-11 off the trims' area, the old one 9.5e-8.
+#[test]
+fn box_w_slot_sphere_corners_are_the_area_their_trims_bound() {
+    // the old per-face areas (refit sphere, rebuilt trims), faces 18..=25
+    let old = [
+        4.539_699_685_693_518e-3,
+        4.539_699_673_323_199e-3,
+        4.539_699_674_678_868e-3,
+        5.552_842_101_372_212e-3,
+        5.552_842_101_462_258e-3,
+        5.552_842_101_694_424e-3,
+        4.539_699_683_930_832e-3,
+        5.552_842_101_449_415e-3,
+    ];
+    let name = "Fillet/box_w_slot.smb";
+    let mut k = Kernel::default();
+    let b = read(&mut k, name);
+    // measured on a second read: making the missing trims of other faces may touch the body
+    let mut m = read(&mut k, name);
+    let faces = bl::faces(&b, None).unwrap();
+    let (mut total, mut reference, mut old_total) = (0.0, 0.0, 0.0);
+    let mut spheres = 0;
+    for &f in &faces {
+        let area = face_area(&k, &mut m, f);
+        total += area;
+        if !matches!(
+            b.face(f).unwrap().surface.as_ref().unwrap().kind(),
+            SurfaceKind::Sphere(_)
+        ) {
+            reference += area;
+            old_total += area;
+            continue;
+        }
+        let (t24, t32) = (
+            sphere_face_trim_area(&k, &b, f, 24, Vec3::ZERO),
+            sphere_face_trim_area(&k, &b, f, 32, Vec3::ZERO),
+        );
+        let (gb24, green24, gb32, green32) =
+            (t24.gauss_bonnet, t24.green, t32.gauss_bonnet, t32.green);
+        assert!((gb24 - gb32).abs() <= 1e-12 * gb32, "{f:?}: {gb24} {gb32}");
+        assert!(
+            (green24 - green32).abs() <= 1e-12 * green32,
+            "{f:?}: {green24} {green32}"
+        );
+        assert!(
+            (gb32 - green32).abs() <= 1e-11 * gb32,
+            "{f:?}: Gauss-Bonnet {gb32}, Green {green32}"
+        );
+        assert!(
+            (area - gb32).abs() <= 2e-9 * gb32,
+            "{f:?}: area {area}, trims bound {gb32}"
+        );
+        let was = old[spheres];
+        assert!(
+            (was - gb32).abs() > 100.0 * (area - gb32).abs(),
+            "{f:?}: old {was}, new {area}, trims bound {gb32}"
+        );
+        reference += gb32;
+        old_total += was;
+        spheres += 1;
+    }
+    assert_eq!(spheres, 8);
+    // the corpus row, replayed
+    assert!(
+        (total - 5.914_390_008_545_681).abs() <= 1e-15 * total,
+        "{total}"
+    );
+    assert!((total - reference).abs() <= 5e-11, "{total} {reference}");
+    let old_row = 5.914_389_913_639_413;
+    assert!((old_total - old_row).abs() <= 1e-9 * old_row, "{old_total}");
+    assert!(
+        (old_row - reference).abs() > 1e3 * (total - reference).abs(),
+        "old {old_row}, new {total}, trims bound {reference}"
+    );
+}
+
+/// The integrator's share of the sphere face `f` in the volume group and area, about
+/// `origin`, for the faceuse bounding the solid, and the same over the face's own trims
+/// (`n = 32`, after checking it against `n = 24` and the Stokes volume against Green's).
+/// Returns `(integrator, trims)`, each `[area, volume group (13)]`.
+fn sphere_face_shares(
+    k: &Kernel,
+    b: &Brep,
+    m: &mut Brep,
+    f: FaceId,
+    accuracy: f64,
+    origin: Vec3,
+    estimated: f64,
+) -> ([f64; 14], [f64; 14]) {
+    use solidcore::topology::face::p2::PPF_ALL;
+    let face = b.face(f).unwrap();
+    let up = face.faceuse.unwrap();
+    let mate = b.faceuse(up).unwrap().mate.unwrap();
+    let fu = if solidcore::topology::edgeuse::p1::faceuse_region(b, up).unwrap()
+        == b.infinite_region()
+    {
+        mate
+    } else {
+        up
+    };
+    let p = face_properties(
+        k,
+        m,
+        f,
+        b.faceuse(fu).unwrap().orientation,
+        accuracy,
+        origin,
+        estimated,
+        0.0,
+        PPF_ALL,
+    )
+    .unwrap();
+    let mut integ = [0.0; 14];
+    integ[0] = p.area.abs();
+    integ[1] = p.volume;
+    for (i, v) in p.moments[4..].iter().enumerate() {
+        integ[2 + 3 * i] = v.x;
+        integ[3 + 3 * i] = v.y;
+        integ[4 + 3 * i] = v.z;
+    }
+    let (t24, t32) = (
+        sphere_face_trim_area(k, b, f, 24, origin),
+        sphere_face_trim_area(k, b, f, 32, origin),
+    );
+    // The trims' integrals have converged, and the volume by Stokes is the volume by Green.
+    let scale = t32.gauss_bonnet.abs().max(1.0);
+    assert!((t32.gauss_bonnet - t24.gauss_bonnet).abs() <= 1e-14 * scale);
+    for (a, b) in t32.green_volume.iter().zip(t24.green_volume) {
+        assert!((a - b).abs() <= 1e-14 * scale, "{f:?}: n=32 {a} n=24 {b}");
+    }
+    assert!(
+        // the Stokes form cancels terms of order |c - origin| |S| ~ 1 (measured 8.8e-14)
+        (t32.stokes_volume - t32.green_volume[0]).abs() <= 2e-13 * scale,
+        "{f:?}: Stokes {} Green {}",
+        t32.stokes_volume,
+        t32.green_volume[0]
+    );
+    let mut trims = [0.0; 14];
+    trims[0] = t32.gauss_bonnet;
+    trims[1..].copy_from_slice(&t32.green_volume);
+    (integ, trims)
+}
+
+/// `Fillet/box_w_slot.smb`: the `corpus.parity` volume and the
+/// `blend.fillet_executive_p3` `source-file-box_w_slot-all-edges` mass properties (the
+/// fillet is refused, so the body is the file as read). Only the eight sphere corners move.
+/// The reference is each row with the corners' integrated shares replaced by their
+/// shares over their own trims ([`sphere_face_trim_area`]: line integrals on the file's own
+/// NURB and trims); the rest of each row (the other faces and the edge gap closures) is
+/// the integrator's on both sides.
+#[test]
+fn box_w_slot_volume_and_mass_are_those_their_trims_bound() {
+    use solidcore::mass::enclosure::{enclose_mass_properties, enclose_quantity, Quantity};
+    use solidcore::mass::integrator::properties::{
+        brep_mass_properties_default, brep_volume_default,
+    };
+    use solidcore::query::brep::{
+        calculate_bounding_box, calculate_tight_bounding_box, BoundingBoxOptions,
+    };
+    let name = "Fillet/box_w_slot.smb";
+    let mut k = Kernel::default();
+    let b = read(&mut k, name);
+    let spheres: Vec<FaceId> = bl::faces(&b, None)
+        .unwrap()
+        .into_iter()
+        .filter(|&f| {
+            matches!(
+                b.face(f).unwrap().surface.as_ref().unwrap().kind(),
+                SurfaceKind::Sphere(_)
+            )
+        })
+        .collect();
+    assert_eq!(spheres.len(), 8);
+    let size = |e: solidcore::geom::extent3d::Extent3d| {
+        let s = e.size();
+        let d = s.x.max(s.y).max(s.z);
+        d * d / 100.0
+    };
+
+    // corpus.parity: brep_volume at 1e-6 about the box's middle
+    let mut v = read(&mut k, name);
+    let bbox = calculate_bounding_box(&k, &mut v, BoundingBoxOptions::default()).unwrap();
+    let row = brep_volume_default(&k, &mut v, 1e-6).unwrap();
+    assert_eq!(row, 0.680_748_106_613_681_7);
+    let mut m = read(&mut k, name);
+    let mut delta = 0.0;
+    for &f in &spheres {
+        let (integ, trims) = sphere_face_shares(&k, &b, &mut m, f, 1e-6, bbox.mid(), size(bbox));
+        delta += integ[1] - trims[1];
+    }
+    let reference = row - delta;
+    let old_row = 0.680_748_106_510_291_7;
+    // CLOSER: the new row is 5.1e-12 off, the old row 9.8e-11 (the reference is good to
+    // 8 * 2e-13, the Stokes/Green agreement above).
+    assert!((row - reference).abs() * 10.0 < (old_row - reference).abs());
+    assert!((row - reference).abs() <= 1e-11 * reference.abs());
+
+    // The geometry is exact: integrated tightly, each corner's shares are those its trims
+    // bound, so what remains of a row's distance from its reference is the quadrature at
+    // the row's own accuracy.
+    let mut m = read(&mut k, name);
+    for &f in &spheres {
+        let (integ, trims) = sphere_face_shares(&k, &b, &mut m, f, 1e-12, Vec3::ZERO, size(bbox));
+        for (i, (a, r)) in integ.iter().zip(trims).enumerate() {
+            assert!(
+                (a - r).abs() <= 1e-14,
+                "{f:?} share {i}: integrated {a} trims {r}"
+            );
+        }
+    }
+
+    // fillet_executive_p3: brep_mass_properties at 1e-4, density 1, about the origin
+    let mut w = read(&mut k, name);
+    let tight = calculate_tight_bounding_box(&k, &mut w).unwrap();
+    let mid = tight.mid();
+    let mp = brep_mass_properties_default(&k, &mut w, 1e-4, 1.0, Vec3::ZERO).unwrap();
+    let flat = |area: f64, volume: f64, c: Vec3, i: Vec3, p: Vec3| {
+        [
+            area, volume, volume, c.x, c.y, c.z, i.x, i.y, i.z, p.x, p.y, p.z,
+        ]
+    };
+    let new_row = [
+        5.9143900085407815,
+        0.6807481065898701,
+        0.6807481065898701,
+        1.9999999999999853,
+        -0.2194908416672513,
+        0.19830878452084486,
+        0.31582474683781425,
+        2.796768143574872,
+        3.0415735197131566,
+        -0.029630896983776557,
+        0.26999665916540555,
+        -0.29883594975758043,
+    ];
+    let old_row = [
+        5.9143899129759,
+        0.6807481065534877,
+        0.6807481065534877,
+        1.999999999999982,
+        -0.21949084146911574,
+        0.19830878452084486,
+        0.3158247467306677,
+        2.796768143424426,
+        3.041573519459353,
+        -0.02963089695544498,
+        0.2699966591509754,
+        -0.2988359494718497,
+    ];
+    assert_eq!(
+        flat(
+            mp.properties.area,
+            mp.properties.volume,
+            mp.centroid,
+            mp.inertia,
+            mp.products
+        ),
+        new_row
+    );
+    // the row's precise properties about `mid`, the corners swapped for their trims' shares
+    let mut total = [0.0; 14];
+    total[0] = mp.properties.area;
+    total[1] = mp.properties.volume;
+    for (i, v) in mp.properties.moments[4..].iter().enumerate() {
+        total[2 + 3 * i] = v.x;
+        total[3 + 3 * i] = v.y;
+        total[4 + 3 * i] = v.z;
+    }
+    let mut m = read(&mut k, name);
+    for &f in &spheres {
+        let (integ, trims) = sphere_face_shares(&k, &b, &mut m, f, 1e-4, mid, size(tight));
+        for ((t, a), r) in total.iter_mut().zip(integ).zip(trims) {
+            *t -= a - r;
+        }
+    }
+    // `brep_mass_properties`' moments about the origin, from those about `mid`
+    let (volume, s) = (total[1], Vec3::new(total[2], total[3], total[4]));
+    let (m6, m7) = (
+        Vec3::new(total[8], total[9], total[10]),
+        Vec3::new(total[11], total[12], total[13]),
+    );
+    let d = mid;
+    let comp = |v: Vec3, i: usize| match i {
+        0 => v.x,
+        1 => v.y,
+        _ => v.z,
+    };
+    let shift = |a: usize, b: usize| {
+        comp(d, a) * comp(s, b) + comp(d, b) * comp(s, a) + comp(d, a) * comp(d, b) * volume
+    };
+    let inertia = m7
+        + Vec3::new(
+            shift(1, 1) + shift(2, 2),
+            shift(0, 0) + shift(2, 2),
+            shift(0, 0) + shift(1, 1),
+        );
+    let products = m6 + Vec3::new(shift(1, 2), shift(2, 0), shift(0, 1));
+    let reference = flat(
+        total[0],
+        volume,
+        mid + s * (1.0 / volume),
+        inertia,
+        products,
+    );
+    for i in 0..12 {
+        let (new_off, old_off) = (new_row[i] - reference[i], old_row[i] - reference[i]);
+        // every component is within 1e-9 relative of the trims-bound reference
+        assert!(
+            new_off.abs() <= 1e-9 * reference[i].abs(),
+            "mass[{i}]: new {} reference {}",
+            new_row[i],
+            reference[i]
+        );
+        match i {
+            // cz: no corner moves it
+            5 => assert_eq!(new_off, old_off),
+            // cy, Pyz, Pxy: EQUAL to the reference's certified bound (below)
+            4 | 9 | 11 => {}
+            // area, volume, cx, inertia and Pzx: CLOSER
+            _ => assert!(
+                new_off.abs() < old_off.abs(),
+                "mass[{i}]: new off {new_off:e} old off {old_off:e}"
+            ),
+        }
+    }
+
+    // cy, Pyz and Pxy are nearer the reference before (1.7e-10, 2.5e-10 and 2.5e-10
+    // relative) than now (7.3e-10, 7.1e-10 and 7.1e-10): the corners' quadrature at the
+    // requested 1e-4, about 1e-10 of the first moment in y. The reference is no nearer the
+    // body's true values than its certified bound, and that bound is set by the gaps
+    // between the file's faces: the certified enclosure of the body's y moment
+    // (`enclose_quantity`, the faces, the ruled strips across the edge gaps and the caps
+    // at the vertices) cannot be narrowed below its floor, 2.0e-4, as no cut narrows a
+    // strip's share. So every row within the certified bands is EQUAL under RULING 3: the
+    // bands hold the new row, the old row and the reference, each over 1e5 times
+    // wider than the rows' distance from the reference.
+    let mut g = read(&mut k, name);
+    let y = enclose_quantity(&k, &mut g, Quantity::Moment { x: 0, y: 1, z: 0 }, 3e-4).unwrap();
+    // (the y moment's error from cy's offset: the volume times cy's offset)
+    let moment_off = (new_row[4] - reference[4]).abs() * reference[1];
+    assert!(
+        y.floor > 1e5 * moment_off,
+        "the y moment's floor {:e}, the corners' quadrature {moment_off:e}",
+        y.floor
+    );
+    let e = enclose_mass_properties(&k, &mut g, 1e-3).unwrap();
+    for (i, band) in [(4, e.centroid[1]), (9, e.products[0]), (11, e.products[2])] {
+        for (what, v) in [
+            ("new", new_row[i]),
+            ("old", old_row[i]),
+            ("reference", reference[i]),
+        ] {
+            assert!(band.contains(v), "mass[{i}]: {what} {v} off {band:?}");
+        }
+        let off = (new_row[i] - reference[i]).abs();
+        assert!(
+            band.width() > 1e5 * off,
+            "mass[{i}]: band {band:?} against the offset {off:e}"
+        );
+    }
+}
