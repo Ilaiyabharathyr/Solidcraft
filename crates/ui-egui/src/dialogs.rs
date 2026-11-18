@@ -3402,6 +3402,7 @@ fn stored_input_reference_key(d: &Dialog, index: usize) -> Option<&'static str> 
             | "construct.plane.two_edges"
             | "construct.plane.three_points"
             | "construct.plane.perpendicular"
+            | "construct.plane.square_to_line"
             | "construct.point.along_path",
         keys,
         ..
@@ -7569,6 +7570,9 @@ fn construct_picks(id: &str) -> Option<(&'static str, &'static str, &'static [(&
         ),
         "construct.plane.perpendicular" => {
             ("construct.plane.perpendicular", "PERPENDICULAR PLANE", &[("Plane", PLANE, "plane"), ("Line", LINE, "line")])
+        }
+        "construct.plane.square_to_line" => {
+            ("construct.plane.square_to_line", "cmd.construct.plane.square_to_line", &[("Line", LINE | CURVES, "line"), ("Point", POINT, "point")])
         }
         _ => return None,
     })
