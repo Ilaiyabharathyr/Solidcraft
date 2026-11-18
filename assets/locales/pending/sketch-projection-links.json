@@ -10,6 +10,8 @@
     "cmd.sketch_repair_link": "Repair Link",
     "cmd.sketch_resume_link": "Resume Link",
     "cmd.sketch_update_references": "Update References",
+    "prefs.sketch.projection_workflow_ui": "Projection display and picking",
+    "prefs.sketch.projection_workflow_ui_note": "Distinguish projected points, group link actions, and project another sketch's geometry while adding constraints or dimensions. Off keeps the previous display and picking.",
     "sketch.hint.constraint.fix": "Fix: pick the sketch entities to fix in place",
     "sketch.projected_curve": "Projected the curve into the sketch",
     "sketch.projected_edge": "Projected the edge into the sketch",
@@ -27,6 +29,8 @@
     "cmd.sketch_repair_link": "リンクを修復",
     "cmd.sketch_resume_link": "リンクを再開",
     "cmd.sketch_update_references": "参照を更新",
+    "prefs.sketch.projection_workflow_ui": "投影の表示と選択",
+    "prefs.sketch.projection_workflow_ui_note": "投影の色とまとめられたリンク操作を使用し、拘束や寸法の追加時に別のスケッチの形状を投影します。オフの場合は従来の表示と選択を維持します。",
     "sketch.hint.constraint.fix": "固定: 固定するスケッチ要素を選択",
     "sketch.projected_curve": "曲線をスケッチに投影しました",
     "sketch.projected_edge": "エッジをスケッチに投影しました",
@@ -61,6 +65,8 @@
     "cmd.sketch_repair_link": "修复链接",
     "cmd.sketch_resume_link": "恢复链接",
     "cmd.sketch_update_references": "更新参照",
+    "prefs.sketch.projection_workflow_ui": "投影显示和拾取",
+    "prefs.sketch.projection_workflow_ui_note": "使用投影颜色和分组链接操作，并在添加约束或尺寸时投影其他草图的几何图形。关闭后保留原有的显示和拾取方式。",
     "sketch.hint.constraint.fix": "固定：选择要固定的草图元素",
     "sketch.projected_curve": "已将曲线投影到草图中",
     "sketch.projected_edge": "已将边投影到草图中",
@@ -78,6 +84,8 @@
     "cmd.sketch_repair_link": "إصلاح الرابط",
     "cmd.sketch_resume_link": "استئناف الرابط",
     "cmd.sketch_update_references": "تحديث المراجع",
+    "prefs.sketch.projection_workflow_ui": "عرض الإسقاط واختياره",
+    "prefs.sketch.projection_workflow_ui_note": "استخدم ألوان الإسقاط وإجراءات الروابط المجمعة، وأسقط هندسة رسم آخر عند إضافة القيود أو الأبعاد. يحافظ إيقاف الخيار على العرض والاختيار السابقين.",
     "sketch.hint.constraint.fix": "تثبيت: اختر عناصر الرسم المراد تثبيتها",
     "sketch.projected_curve": "تم إسقاط المنحنى على الرسم",
     "sketch.projected_edge": "تم إسقاط الحافة على الرسم",
@@ -95,6 +103,8 @@
     "cmd.sketch_repair_link": "תיקון קישור",
     "cmd.sketch_resume_link": "חידוש קישור",
     "cmd.sketch_update_references": "עדכון ייחוסים",
+    "prefs.sketch.projection_workflow_ui": "תצוגה ובחירה של היטלים",
+    "prefs.sketch.projection_workflow_ui_note": "שימוש בצבעי היטלים ובפעולות קישורים מקובצות, והטלת גאומטריה מסקיצה אחרת בעת הוספת אילוצים או מידות. כיבוי שומר על התצוגה והבחירה הקודמות.",
     "sketch.hint.constraint.fix": "קיבוע: בחרו את רכיבי הסקיצה לקיבוע",
     "sketch.projected_curve": "העקומה הוטלה לסקיצה",
     "sketch.projected_edge": "הקצה הוטל לסקיצה",
@@ -112,10 +122,20 @@
     "cmd.sketch_repair_link": "Sửa liên kết",
     "cmd.sketch_resume_link": "Tiếp tục liên kết",
     "cmd.sketch_update_references": "Cập nhật tham chiếu",
+    "prefs.sketch.projection_workflow_ui": "Hiển thị và chọn hình chiếu",
+    "prefs.sketch.projection_workflow_ui_note": "Dùng màu hình chiếu và các thao tác liên kết theo nhóm, đồng thời chiếu hình học từ bản phác thảo khác khi thêm ràng buộc hoặc kích thước. Tắt để giữ cách hiển thị và chọn trước đây.",
     "sketch.hint.constraint.fix": "Cố định: chọn các thực thể phác thảo cần cố định",
     "sketch.projected_curve": "Đã chiếu đường cong vào phác thảo",
     "sketch.projected_edge": "Đã chiếu cạnh vào phác thảo",
     "sketch.projected_vertex": "Đã chiếu đỉnh vào phác thảo",
     "sketch.projection_repaired": "Đã sửa phép chiếu"
+  },
+  "de": {
+    "prefs.sketch.projection_workflow_ui": "Projektionsanzeige und Auswahl",
+    "prefs.sketch.projection_workflow_ui_note": "Projektionsfarben und gruppierte Verknüpfungsaktionen verwenden und beim Hinzufügen von Bedingungen oder Maßen Geometrie aus einer anderen Skizze projizieren. Aus behält die bisherige Anzeige und Auswahl bei."
+  },
+  "ko": {
+    "prefs.sketch.projection_workflow_ui": "투영 표시 및 선택",
+    "prefs.sketch.projection_workflow_ui_note": "투영 색상과 그룹화된 링크 작업을 사용하고 구속 조건이나 치수를 추가할 때 다른 스케치의 형상을 투영합니다. 끄면 이전 표시 및 선택 방식을 유지합니다."
   }
 }

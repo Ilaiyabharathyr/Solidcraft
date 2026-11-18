@@ -344,29 +344,40 @@ fn a_repaired_auto_projected_border_follows_its_new_source() {
 
 #[test]
 fn stale_then_lost_keeps_the_updated_geometry_and_repair_reconnects() {
-    let (mut s, a1, a2, sketch) = holed_parts();
-    let face = top_face_of_second(&mut s, a2);
-    run(&mut s, "sketch.finish", json!({}));
-    run(&mut s, "occurrence.move", json!({"occurrence":a2,"translate":[0,6,0]}));
-    assert_eq!(run(&mut s, "sketch.references", json!({}))["references"][0]["status"], "stale");
-    let r = run(&mut s, "sketch.update_references", json!({}));
-    assert_eq!(r["links"][0]["status"], "changed", "{r}");
-    run(&mut s, "selection.delete", json!({"items":[{"type":"occurrence","path":[a2]}]}));
-    let r = run(&mut s, "sketch.update_references", json!({}));
-    assert_eq!(r["ok"], false);
-    assert!((hole_centre(&s, sketch, &face) - Vec2::new(120.0, 26.0)).len() < 1e-6, "last good geometry");
-    let ids: Vec<String> =
-        s.doc.sketch(sketch).unwrap().link_curves(&face).iter().map(|c| s.doc.sketch(sketch).unwrap().curves[*c].id.clone()).collect();
-    // Repaired onto A:1's top face: same shape, same ids.
-    run(&mut s, "sketch.edit", json!({"sketch":sketch}));
-    let r = run(&mut s, "sketch.repair_link", json!({"link":face,"ref":{"face":[5,5,10],"body":"Plate","path":[a1]}}));
-    assert_eq!(r["rebuilt"], false, "{r}");
-    let sk = s.doc.sketch(sketch).unwrap();
-    assert!(!sk.link(&face).unwrap().lost);
-    assert_eq!(sk.link(&face).unwrap().placement.as_ref().unwrap().source, vec![a1]);
-    let now: Vec<String> = sk.link_curves(&face).iter().map(|c| sk.curves[*c].id.clone()).collect();
-    assert_eq!(now, ids);
-    assert!((hole_centre(&s, sketch, &face) - Vec2::new(20.0, 20.0)).len() < 1e-6);
+    for another_copy in [false, true] {
+        let (mut s, a1, a2, sketch) = holed_parts();
+        let face = top_face_of_second(&mut s, a2);
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "occurrence.move", json!({"occurrence":a2,"translate":[0,6,0]}));
+        assert_eq!(run(&mut s, "sketch.references", json!({}))["references"][0]["status"], "stale");
+        let r = run(&mut s, "sketch.update_references", json!({}));
+        assert_eq!(r["links"][0]["status"], "changed", "{r}");
+        run(&mut s, "selection.delete", json!({"items":[{"type":"occurrence","path":[a2]}]}));
+        let r = run(&mut s, "sketch.update_references", json!({}));
+        assert_eq!(r["ok"], false);
+        assert!((hole_centre(&s, sketch, &face) - Vec2::new(120.0, 26.0)).len() < 1e-6, "last good geometry");
+        let ids: Vec<String> =
+            s.doc.sketch(sketch).unwrap().link_curves(&face).iter().map(|c| s.doc.sketch(sketch).unwrap().curves[*c].id.clone()).collect();
+        // Repair onto either the only remaining placement or one of several placements.
+        if another_copy {
+            let a3 = run(&mut s, "occurrence.copy", json!({"occurrence":a1}))["occurrence"].as_u64().unwrap();
+            run(&mut s, "occurrence.move", json!({"occurrence":a3,"translate":[0,100,0]}));
+        }
+        // Repaired onto A:1's top face: same shape, same ids.
+        run(&mut s, "sketch.edit", json!({"sketch":sketch}));
+        let r = run(&mut s, "sketch.repair_link", json!({"link":face,"ref":{"face":[5,5,10],"body":"Plate","path":[a1]}}));
+        assert_eq!(r["rebuilt"], false, "{r}");
+        let sk = s.doc.sketch(sketch).unwrap();
+        assert!(!sk.link(&face).unwrap().lost);
+        if another_copy {
+            assert_eq!(sk.link(&face).unwrap().placement.as_ref().unwrap().source, vec![a1]);
+        } else {
+            assert!(sk.link(&face).unwrap().placement.is_none(), "a single placement keeps ordinary pending-move following after repair");
+        }
+        let now: Vec<String> = sk.link_curves(&face).iter().map(|c| sk.curves[*c].id.clone()).collect();
+        assert_eq!(now, ids);
+        assert!((hole_centre(&s, sketch, &face) - Vec2::new(20.0, 20.0)).len() < 1e-6);
+    }
 }
 
 #[test]

@@ -408,7 +408,11 @@ pub fn on_click(app: &mut SolveApp, proj: &Proj, pos: Pos2, shift: bool) {
                     .map(|r| r.to_string())
             };
             let own = active_entity(app, &hits).map(|(id, _)| id);
-            if let Some(id) = own.or(axis).or_else(model).or_else(|| if projects { project_pick(app, &hits).map(|(id, _)| id) } else { None }) {
+            if let Some(id) = own
+                .or(axis)
+                .or_else(model)
+                .or_else(|| if projects && app.preferences.projection_workflow_ui { project_pick(app, &hits).map(|(id, _)| id) } else { None })
+            {
                 tool.picks.push(id);
             }
             if tool.picks.len() >= n {
@@ -498,7 +502,7 @@ pub fn on_click(app: &mut SolveApp, proj: &Proj, pos: Pos2, shift: bool) {
             let typed = crate::dim_view::live();
             // A model edge or vertex (or another sketch's curve) joins as its projection, but a
             // click that only places the text of a dimension being typed projects nothing.
-            let joins = typed.is_none_or(|typed| !typed) && tool.picks.len() < 2;
+            let joins = app.preferences.projection_workflow_ui && typed.is_none_or(|typed| !typed) && tool.picks.len() < 2;
             let hit = hit.or_else(|| {
                 let (id, curve) = if joins { project_pick(app, &hits)? } else { return None };
                 let sketch = app.session.active_sketch.and_then(|sid| app.session.doc.sketch(sid).ok());

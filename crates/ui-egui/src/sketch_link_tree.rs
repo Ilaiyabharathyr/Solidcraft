@@ -226,25 +226,44 @@ mod tests {
 
     #[test]
     fn a_lost_projection_is_repaired_by_picking_its_new_source() {
-        let (mut h, sketch, face, _, a2) = harness();
-        h.app.run("selection.delete", json!({"items":[{"type":"occurrence","path":[a2]}]})).unwrap();
-        h.app.edit_sketch(sketch);
-        h.frames(3);
-        let target = Target::SketchLink { sketch, link: face.clone() };
-        let repair = crate::context_menu::items(&h.app, &target).into_iter().find(|i| i.id == "ui.repairLink").expect("a lost link offers Repair");
-        assert!(repair.enabled);
-        crate::context_menu::run_item(&mut h.app, &repair, egui::Pos2::ZERO);
-        assert_eq!(h.app.tool.as_ref().map(|t| t.cmd), Some("sketch.repair_link"));
-        // A:1's top face, the same shape as the one that went.
-        h.settle();
-        h.app.cam.target = solidcore_record::Vec3::new(20.0, 20.0, 10.0);
-        h.app.cam.distance = 200.0;
-        let at = h.call("ui.at", json!({"world":[5,5,10]}))["result"].clone();
-        h.step(&json!({ "click": at })).unwrap();
-        h.frames(3);
-        let sk = h.app.session.doc.sketch(sketch).unwrap();
-        assert_eq!(status(&h.app, sketch, sk.link(&face).unwrap()), None, "{:?}", h.app.status);
-        assert!(sk.link(&face).unwrap().placement.as_ref().is_some_and(|p| !p.source.contains(&a2)), "it follows A:1 now");
-        assert!(h.app.tool.is_none(), "the tool ends once repaired");
+        for another_copy in [false, true] {
+            let (mut h, sketch, face, _, a2) = harness();
+            let component = h.app.session.doc.occurrences.iter().find(|o| o.id == a2).unwrap().component;
+            let a1 = h.app.session.doc.occurrences.iter().find(|o| o.component == component && o.id != a2).unwrap().id;
+            let sk = h.app.session.doc.sketch(sketch).unwrap();
+            let ids: Vec<String> = sk.link_curves(&face).iter().map(|c| sk.curves[*c].id.clone()).collect();
+            h.app.run("selection.delete", json!({"items":[{"type":"occurrence","path":[a2]}]})).unwrap();
+            if another_copy {
+                let a3 = h.app.run("occurrence.copy", json!({"occurrence":a1})).unwrap()["occurrence"].as_u64().unwrap();
+                h.app.run("occurrence.move", json!({"occurrence":a3,"translate":[0,100,0]})).unwrap();
+            }
+            h.app.edit_sketch(sketch);
+            h.frames(3);
+            let target = Target::SketchLink { sketch, link: face.clone() };
+            let repair =
+                crate::context_menu::items(&h.app, &target).into_iter().find(|i| i.id == "ui.repairLink").expect("a lost link offers Repair");
+            assert!(repair.enabled);
+            crate::context_menu::run_item(&mut h.app, &repair, egui::Pos2::ZERO);
+            assert_eq!(h.app.tool.as_ref().map(|t| t.cmd), Some("sketch.repair_link"));
+            // A:1's top face, the same shape as the one that went.
+            h.settle();
+            h.app.cam.target = solidcore_record::Vec3::new(20.0, 20.0, 10.0);
+            h.app.cam.distance = 200.0;
+            let at = h.call("ui.at", json!({"world":[5,5,10]}))["result"].clone();
+            h.step(&json!({ "click": at })).unwrap();
+            h.frames(3);
+            let sk = h.app.session.doc.sketch(sketch).unwrap();
+            assert_eq!(status(&h.app, sketch, sk.link(&face).unwrap()), None, "{:?}", h.app.status);
+            if another_copy {
+                assert_eq!(sk.link(&face).unwrap().placement.as_ref().unwrap().source, vec![a1], "it follows the picked A:1");
+                assert!(label(&h.app, sk.link(&face).unwrap()).ends_with("(A:1)"));
+            } else {
+                assert!(sk.link(&face).unwrap().placement.is_none(), "a single remaining placement uses an ordinary link");
+                assert_eq!(label(&h.app, sk.link(&face).unwrap()), "Face of Plate", "the ordinary source has no occurrence suffix");
+            }
+            let now: Vec<String> = sk.link_curves(&face).iter().map(|c| sk.curves[*c].id.clone()).collect();
+            assert_eq!(now, ids, "repair keeps the projected curve identities");
+            assert!(h.app.tool.is_none(), "the tool ends once repaired");
+        }
     }
 }

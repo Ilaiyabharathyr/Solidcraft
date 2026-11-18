@@ -290,8 +290,11 @@ they bound no profile but stay linked and keep following their source.
 
 **Constraining to the model.** Projected geometry is fixed where its source puts it, so
 constrain and dimension the sketch's own geometry to it. The constraint tools and Dimension
-take a model edge or vertex, or another sketch's curve, directly: the click projects it into the
-sketch first (the status line says so) and uses the projection. A constraint only between
+take a model edge or vertex directly. Turn on **Projection display and picking** in
+Preferences > Sketch to also pick another sketch's curve directly: the click projects it into
+the sketch first (the status line says so) and uses the projection. This option also gives
+projected points their projection or lost colors and groups Break Link with the projection's
+actions. It is off by default, preserving the previous colors, menu and picking. A constraint only between
 projections is refused (it could change nothing), a dimension on projected geometry alone can
 only be driven, and Fix says projected geometry is fixed already. When a source changes shape
 (a fillet or chamfer added before the sketch), the projection is made again and its curves and
@@ -318,8 +321,10 @@ once: the projection keeps the place it had relative to the sketch's component w
 made, so joint motion carries the two parts together. A sketch of a component placed more than
 once is read from the placement its `path` names, as body geometry is.
 
-Projections follow captured positions: a move kept pending (`occurrence.move` with
-`capture: false`) is not followed until it is captured. Each projection is listed under its
+Body geometry from a part placed only once keeps following uncaptured moves while its
+projection is refreshed, as before. Projections from repeated placements follow captured
+positions: a move kept pending (`occurrence.move` with `capture: false`) is not followed until
+it is captured. Each projection is listed under its
 sketch in the browser, with the placement it reads and its state (lost, frozen, pending). Its
 eye hides it without changing the sketch (it still bounds profiles), and its menu offers:
 

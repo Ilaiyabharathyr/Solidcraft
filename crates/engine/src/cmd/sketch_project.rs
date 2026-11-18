@@ -298,8 +298,9 @@ pub(super) fn author_path(s: &Session, doc: &Document, id: u64, sk: &Sketch) -> 
 
 /// What a reference picked for sketch `id` reads: the source, and for geometry of another
 /// component the exact placement it is read from (its `path`, or the instance its world body
-/// name names: "Body1 (A:2)"), with picked points moved into that body's own frame. Geometry
-/// of the sketch's own component at its own placement is an ordinary link. Another placement
+/// name names: "Body1 (A:2)"), with picked points moved into that body's own frame. A part
+/// placed only once keeps the ordinary link path, including uncaptured source moves. Geometry
+/// of the sketch's own component at its own placement is also an ordinary link. Another placement
 /// of the sketch's own component, or a part inside one, is refused: the sketch would shape
 /// every copy of the part from one copy's position.
 pub(super) fn pick(s: &Session, doc: &Document, id: u64, sk: &Sketch, v: &Value, cmd: &str) -> Result<(LinkSource, Option<LinkPlacement>)> {
@@ -331,6 +332,11 @@ pub(super) fn pick(s: &Session, doc: &Document, id: u64, sk: &Sketch, v: &Value,
                 };
             }
             refuse_inside(&found.path, &author)?;
+            // Preserve main's refresh of a singly placed part, including pending moves.
+            // The root has no occurrence to move and retains its explicit root identity.
+            if found.component != 0 && doc.placements().iter().filter(|(component, ..)| *component == found.component).take(2).count() == 1 {
+                return Ok((src, None));
+            }
             // The pick is in the sketch's frame (as `frames` put it there): into the body's own.
             let placed = s.placed_document();
             let sketch_frame = if receiver == s.active_component { s.active_component_frame() } else { placed.component_transform(receiver) };
@@ -356,6 +362,9 @@ pub(super) fn pick(s: &Session, doc: &Document, id: u64, sk: &Sketch, v: &Value,
                 };
             }
             refuse_inside(&found.path, &author)?;
+            if found.component != 0 && doc.placements().iter().filter(|(component, ..)| *component == found.component).take(2).count() == 1 {
+                return Ok((src, None));
+            }
             Ok((src, Some(LinkPlacement { source: found.path, author, seen: None })))
         }
         LinkSource::SketchCurve { sketch, .. } | LinkSource::SketchPoint { sketch, .. } => {

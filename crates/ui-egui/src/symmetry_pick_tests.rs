@@ -218,20 +218,31 @@ fn coincident_onto_a_model_edge_projects_the_edge_first() {
 
 #[test]
 fn another_sketchs_curve_is_projected_not_named_in_this_sketch() {
-    let mut h = Harness::new();
-    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
-    h.app.run("sketch.circle.center", json!({"center":[0,0],"radius":10})).unwrap();
-    h.app.finish_sketch();
-    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
-    h.app.run("sketch.line", json!({"points":[[20,20],[30,25]]})).unwrap();
-    h.app.cam.distance = 120.0;
-    h.settle();
-    h.app.start("sketch.constraint.tangent");
-    let line = h.call("ui.at", json!({"sketch":[25,22.5]}))["result"].clone();
-    h.step(&json!({ "click": line })).unwrap();
-    let circle = h.call("ui.at", json!({"sketch":[-10,0]}))["result"].clone();
-    h.step(&json!({ "click": circle })).unwrap();
-    let sk = h.app.session.doc.sketch(h.app.session.active_sketch.unwrap()).unwrap();
-    assert_eq!(sk.links.len(), 1, "{:?}", h.app.status);
-    assert!(sk.constraints.iter().any(|c| matches!(c.kind, solidcraft_engine::sketch::ConstraintKind::Tangent { .. })), "{:?}", h.app.status);
+    for enhanced in [false, true] {
+        let mut h = Harness::new();
+        h.app.preferences.projection_workflow_ui = enhanced;
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        h.app.run("sketch.circle.center", json!({"center":[0,0],"radius":10})).unwrap();
+        h.app.finish_sketch();
+        h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+        // Both sketches contain c1: a foreign ID must never select the receiver's circle.
+        h.app.run("sketch.circle.center", json!({"center":[35,-20],"radius":3})).unwrap();
+        h.app.run("sketch.line", json!({"points":[[20,20],[30,25]]})).unwrap();
+        h.app.cam.distance = 120.0;
+        h.settle();
+        h.app.start("sketch.constraint.tangent");
+        let line = h.call("ui.at", json!({"sketch":[25,22.5]}))["result"].clone();
+        h.step(&json!({ "click": line })).unwrap();
+        let before = h.app.session.doc.to_json();
+        let circle = h.call("ui.at", json!({"sketch":[-10,0]}))["result"].clone();
+        h.step(&json!({ "click": circle })).unwrap();
+        let sk = h.app.session.doc.sketch(h.app.session.active_sketch.unwrap()).unwrap();
+        if !enhanced {
+            assert_eq!(h.app.session.doc.to_json(), before, "a foreign curve is neither projected nor mistaken for c1");
+            assert_eq!(h.app.tool.as_ref().unwrap().picks.len(), 1);
+            continue;
+        }
+        assert_eq!(sk.links.len(), 1, "{:?}", h.app.status);
+        assert!(sk.constraints.iter().any(|c| matches!(c.kind, solidcraft_engine::sketch::ConstraintKind::Tangent { .. })), "{:?}", h.app.status);
+    }
 }

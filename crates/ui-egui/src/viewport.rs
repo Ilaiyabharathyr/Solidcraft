@@ -8822,9 +8822,11 @@ fn overlays(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
         let link = p.link.as_deref().and_then(|l| sk.link(l));
         let c = if conflict.point(i) {
             t.sketch_conflict
-        } else if let Some(link) = link {
+        } else if app.preferences.projection_workflow_ui
+            && let Some(link) = link
+        {
             if link.lost { t.sketch_lost } else { t.sketch_projected }
-        } else if locked.get(i).copied().unwrap_or(false) {
+        } else if p.link.is_none() && locked.get(i).copied().unwrap_or(false) {
             t.sketch_locked
         } else if det {
             t.sketch_point

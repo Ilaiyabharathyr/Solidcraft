@@ -134,6 +134,57 @@ fn pasted_sketch_reference_uses_a_sources_pending_placement() {
 }
 
 #[test]
+fn a_singly_placed_bodys_projections_keep_following_pending_moves() {
+    for reference in [json!({"edge":[25,0,10]}), json!({"face":[25,5,10]}), json!({"vertex":[20,0,10]}), json!({})] {
+        for explicit_path in [false, true] {
+            let mut s = Session::default();
+            let part = run(&mut s, "component.create", json!({"name":"SourcePart","grounded":false}));
+            let occurrence = part["occurrence"].as_u64().unwrap();
+            run(&mut s, "solid.box", json!({"length":10,"width":10,"height":10,"body_name":"SourceBody"}));
+            run(&mut s, "occurrence.move", json!({"occurrence":occurrence,"translate":[20,0,0]}));
+            run(&mut s, "component.activate", json!({"component":0}));
+            let sketch = run(&mut s, "sketch.create", json!({"plane":"XY","name":"Receiver"}))["sketch"].as_u64().unwrap();
+            let mut picked = reference.clone();
+            picked["body"] = json!("SourceBody");
+            if explicit_path {
+                picked["path"] = json!([occurrence]);
+            }
+            let result = run(&mut s, "sketch.project", json!({"refs":[picked]}));
+            let link = result["links"][0]["link"].as_str().unwrap().to_string();
+            assert!(s.doc.sketch(sketch).unwrap().link(&link).unwrap().placement.is_none(), "{picked}");
+            run(&mut s, "sketch.finish", json!({}));
+            let points = |s: &Session| {
+                let mut current = s.doc.sketch(sketch).unwrap().clone();
+                let warnings = super::refresh(s, &s.doc, sketch, &mut current);
+                assert!(warnings.is_empty(), "{picked}: {warnings:?}");
+                assert!(!current.link(&link).unwrap().lost, "{picked}");
+                current.link_points(&link).into_iter().map(|point| (current.points[point].id.clone(), current.points[point].pos)).collect::<Vec<_>>()
+            };
+            let before = points(&s);
+            assert!(!before.is_empty(), "{picked}");
+            run(&mut s, "occurrence.move", json!({"occurrence":occurrence,"translate":[0,7,0],"capture":false}));
+            assert!(!s.pending_moves.is_empty());
+            let pending = points(&s);
+            assert_eq!(before.len(), pending.len());
+            for ((old_id, old), (new_id, new)) in before.iter().zip(&pending) {
+                assert_eq!(old_id, new_id, "pending motion preserves point identity: {picked}");
+                assert!((new.x - old.x).abs() < 1e-6 && (new.y - old.y - 7.0).abs() < 1e-6, "{picked}: {old:?} -> {new:?}");
+            }
+            run(&mut s, "component.capture_position", json!({}));
+            let opened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+            for current in [&s, &opened] {
+                let captured = points(current);
+                assert_eq!(pending.len(), captured.len());
+                for ((old_id, old), (new_id, new)) in pending.iter().zip(captured) {
+                    assert_eq!(old_id, &new_id);
+                    assert!(old.dist(new) < 1e-6, "capture and reopen retain the pending position: {picked}: {old:?} -> {new:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn manual_projection_captures_the_requested_coincident_body_producer() {
     let mut s = Session::default();
     run(&mut s, "solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Control","name":"ControlFeature"}));
