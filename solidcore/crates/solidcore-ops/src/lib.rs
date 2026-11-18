@@ -67,6 +67,7 @@ pub mod order;
 pub mod path_export;
 pub mod pcurve;
 pub mod pick;
+pub mod plate_contact;
 pub mod prism;
 pub mod provenance;
 pub mod record_check;
