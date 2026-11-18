@@ -400,7 +400,7 @@ fn section_corners(region: &Region2) -> Result<[Point2; 4], Refusal> {
                     extend(p)?;
                 }
             }
-            _ => return Err(Refusal::Profile),
+            Seg2::Conic { .. } => return Err(Refusal::Profile),
         }
     }
     if lo.x > hi.x || lo.y > hi.y {
