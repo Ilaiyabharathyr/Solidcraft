@@ -1168,6 +1168,146 @@ impl HeightFrom {
     }
 }
 
+/// Refusals of an edge flange's profile sketch (#3516), one wording each so a test can name them.
+pub const PROFILE_OFF_PLANE: &str = "the flange's profile sketch must lie on the flange's plane (parallel to its faces)";
+pub const PROFILE_NOT_ACROSS: &str =
+    "the flange's profile must run straight across the bend from its bottom line on the edge: square sides there and nothing cut out of the bend";
+
+impl SheetBody {
+    /// Where a profile sketch for flange `i` goes (#3516), in world coordinates: the corner of its
+    /// outer face's outline where the bend starts (on the outer virtual sharp, so on the edge for
+    /// a flange in the default position), the direction along the bend and the direction out
+    /// along the flange, then the bend's length and the flange's height from that sharp.
+    pub fn profile_frame(&self, i: usize) -> Option<(Vec3, Vec3, Vec3, f64, f64)> {
+        let f = self.flanges.get(i)?;
+        let (d, n) = (f.d.normalized()?, f.n.normalized()?);
+        let sharp = (f.radius + self.t) * (f.angle.abs() / 2.0).tan();
+        let corner = f.p + n * (self.allowance(f) - sharp);
+        // The outer face is the one away from the way it bends: the bottom of a flange turned up.
+        let z = if f.angle >= 0.0 { 0.0 } else { self.t };
+        let w = self.world(Some(i));
+        let o = apply_point(&w, Vec3::new(corner.x, corner.y, z));
+        Some((o, apply_vector(&w, v3(d)), apply_vector(&w, v3(n)), f.len, f.leg + sharp))
+    }
+
+    /// An edge flange whose outline is a closed profile drawn on the flange's plane (#3516). The
+    /// bend runs along the edge as far as the profile does where it crosses the bend; the flange
+    /// is as high as the profile reaches; past the bend its panel is the profile laid flat, with
+    /// the profile's holes as cut-outs. Being flat-pattern geometry, every edge and hole of it is
+    /// square to the sheet whatever the bend angle. The profile's sides must run straight across
+    /// the bend (a bend has one width along it) and nothing of it may lie below the edge, in the
+    /// base. `e.height` and `e.span` are not used: the profile gives them.
+    pub fn add_profile_flange(
+        &mut self,
+        e: EdgeFlange,
+        plane: &Plane,
+        profile: &Region2,
+        radius: f64,
+        position: &str,
+        flip: bool,
+        relief: ReliefOverride,
+    ) -> Result<(Vec<usize>, Vec<String>)> {
+        // The whole-edge flange in a copy of the sheet: the profile is read in its panel's frame,
+        // which neither the flange's height nor its stretch of the edge changes.
+        let least = e.from.before_leg(e.angle, radius, self.t);
+        let mut probe = self.clone();
+        let n0 = probe.flanges.len();
+        probe.add_flanges_each(&[EdgeFlange { height: least + 1.0, span: WHOLE_EDGE, flip: None, ..e }], radius, position, flip, relief)?;
+        let f = probe.flanges.get(n0).cloned().ok_or_else(|| DocError::Invalid("the flange was not made".into()))?;
+        if apply_vector(&probe.world(Some(n0)), Vec3::Z).cross(plane.normal()).len() > 1e-6 {
+            return Err(DocError::Invalid(PROFILE_OFF_PLANE.into()));
+        }
+        let flat = probe.region_to_flat(Some(n0), plane, profile)?;
+        let (Some(d), Some(n)) = (f.d.normalized(), f.n.normalized()) else {
+            return Err(DocError::Invalid("the flange's edge has no length".into()));
+        };
+        // `s` runs out of the bend from where the panel starts (the bend zone's far edge), `u`
+        // along the edge from the bend's start.
+        let leg0 = f.p + n * probe.allowance(&f);
+        let s = |q: Vec2| (q - leg0).dot(n);
+        let u = |q: Vec2| (q - f.p).dot(d);
+        let outline = flat.outer.polyline(1e-3);
+        let (mut s_lo, mut s_hi, mut u_lo, mut u_hi) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+        for &q in outline.iter() {
+            (s_lo, s_hi, u_lo, u_hi) = (s_lo.min(s(q)), s_hi.max(s(q)), u_lo.min(u(q)), u_hi.max(u(q)));
+        }
+        if !(s_hi > LINEAR_TOL) {
+            return Err(DocError::Invalid("the flange's profile must reach past the bend".into()));
+        }
+        if !(s_lo < -LINEAR_TOL) {
+            return Err(DocError::Invalid("the flange's profile must start on the edge: its bottom line runs along the bend".into()));
+        }
+        if s_lo < -least - 1e-3 {
+            return Err(DocError::Invalid(format!(
+                "the flange's profile runs {:.3} mm below the edge, into the base: its bottom line belongs on the edge",
+                -least - s_lo
+            )));
+        }
+        // Across the bend, from the profile's bottom line to where the panel starts, it must be
+        // one rectangle as wide as the bend.
+        let at = |sv: f64, uv: f64| leg0 + n * sv + d * uv;
+        let (ua, ub) = (u_lo - 1.0, u_hi + 1.0);
+        let strip = rect(at(s_lo, ua), at(s_lo, ub), at(0.0, ub), at(0.0, ua));
+        let mut work = FlatWork::new();
+        let across = material_boolean(std::slice::from_ref(&flat), &[strip], kernel::BoolOp::Intersect, &mut work)?;
+        let [band] = across.as_slice() else {
+            return Err(DocError::Invalid(PROFILE_NOT_ACROSS.into()));
+        };
+        let (mut a, mut b) = (f64::INFINITY, f64::NEG_INFINITY);
+        for &q in band.outer.polyline(1e-3).iter() {
+            (a, b) = (a.min(u(q)), b.max(u(q)));
+        }
+        let full = (b - a) * -s_lo;
+        if !band.holes.is_empty() || (band.outer.signed_area().abs() - full).abs() > 1e-6 * full.max(1.0) + 1e-4 {
+            return Err(DocError::Invalid(PROFILE_NOT_ACROSS.into()));
+        }
+        if a < -1e-3 || b > f.len + 1e-3 {
+            return Err(DocError::Invalid("the flange's profile runs past the end of its edge".into()));
+        }
+        let len = f.len.max(f64::MIN_POSITIVE);
+        let snap = |x: f64| {
+            if x.abs() < 1e-9 {
+                0.0
+            } else if (x - 1.0).abs() < 1e-9 {
+                1.0
+            } else {
+                x
+            }
+        };
+        let span = (snap((a / len).clamp(0.0, 1.0)), snap((b / len).clamp(0.0, 1.0)));
+        // Past the bend: the profile laid flat is the panel.
+        let past = rect(at(0.0, ua), at(0.0, ub), at(s_hi + 1.0, ub), at(s_hi + 1.0, ua));
+        let pieces = material_boolean(std::slice::from_ref(&flat), &[past], kernel::BoolOp::Intersect, &mut work)?;
+        let [panel] = pieces.as_slice() else {
+            return Err(DocError::Invalid("not supported yet: a flange profile that splits into separate pieces past the bend".into()));
+        };
+        let i = self.flanges.len();
+        let (made, mut notes) =
+            self.add_flanges_each(&[EdgeFlange { height: s_hi + least, span, flip: None, ..e }], radius, position, flip, relief)?;
+        // The flange made is the one read: its bend starts where the profile crosses it.
+        let g = self.flanges.get(i).ok_or_else(|| DocError::Invalid("the flange was not made".into()))?;
+        if (g.p - (f.p + d * a)).len() > 1e-6 || (g.len - (b - a)).abs() > 1e-6 {
+            return Err(DocError::Invalid(format!(
+                "not supported yet: this edge's flange from a profile (its bend is {:.3} mm long from {:.3} mm, the profile's {:.3} mm from {:.3} mm)",
+                g.len,
+                (g.p - f.p).dot(d),
+                b - a,
+                a
+            )));
+        }
+        self.set_panel_region(Some(i), Region2 { outer: panel.outer.clone(), holes: Vec::new() })?;
+        for h in &panel.holes {
+            self.holes.push(Region2 { outer: h.ccw(), holes: Vec::new() });
+        }
+        // The flange stands on its own stretch of the edge, with no segments beside it to butt
+        // against (a split edge's are all flanges): an end with base running on past it gets the
+        // rule's bend relief, as a whole edge's end at an inside corner does. An end at a corner
+        // of the base has none beside it and is left as it is.
+        notes.extend(self.relieve_bend_ends(i, (false, false), false));
+        Ok((made, notes))
+    }
+}
+
 /// The most lines a path flange's path may have (each one flange and its bend).
 pub const MAX_PATH_LINES: usize = 64;
 
@@ -11599,5 +11739,52 @@ mod tests {
             lp.segs.iter().any(|s| matches!(s, Seg2::Line { a, b } if a.dist(anchor) <= 1e-6 && b.dist(tip) <= 1e-6)),
             "the slit runs from the anchor to the tip"
         );
+    }
+
+    #[test]
+    fn a_profile_flange_short_of_its_edge_gets_the_bend_relief_where_the_base_runs_on() {
+        // A 41.5 x 34.5 plate (rule: R 1, T 2, K 0.5, bend relief 2 wide and 1 deep) and a 90°
+        // flange 53 high from a profile on part of its bottom edge. Inside, the base is cut back
+        // (R + T)·tan 45° = 3 to the bend line at y = 3, under the flange only. Where the base
+        // runs on past an end of the flange a slot 2 wide is cut beside it, from 1 before the
+        // bend line (y = 4) out through the edge; an end at the plate's corner
+        // gets none. A split edge's segments never get one at their junctions (they butt), so the
+        // profile flange, though made as one segment, must.
+        let w = 41.5;
+        let plane = Plane { origin: Vec3::ZERO, x: Vec3::X, y: Vec3::Z };
+        for (x0, x1) in [(0.0, 35.0), (5.0, 35.0)] {
+            let what = format!("profile x {x0}…{x1}");
+            let mut s = base_flange(
+                "Body1",
+                "AL2",
+                &alu(),
+                Plane::XY,
+                rect(Vec2::new(0.0, 0.0), Vec2::new(w, 0.0), Vec2::new(w, 34.5), Vec2::new(0.0, 34.5)),
+            );
+            let pick = Vec3::new(20.0, 0.0, s.t);
+            let profile = rect(Vec2::new(x0, 0.0), Vec2::new(x1, 0.0), Vec2::new(x1, 53.0), Vec2::new(x0, 53.0));
+            let (_, notes) = s
+                .add_profile_flange(
+                    EdgeFlange::at(pick, 53.0, std::f64::consts::FRAC_PI_2, HeightFrom::Outer),
+                    &plane,
+                    &profile,
+                    1.0,
+                    "inside",
+                    false,
+                    ReliefOverride::default(),
+                )
+                .unwrap();
+            assert!(notes.is_empty(), "{what}: {notes:?}");
+            let line = s.base.outer.ccw().polyline(1e-3).iter().map(|p| p.y).filter(|y| *y > 1e-9).fold(f64::MAX, f64::min);
+            assert!((line - 3.0).abs() < 1e-9, "{what}: bend line at {line}");
+            let mut want = vec![(x1, 3.0), (x1, 4.0), (x1 + 2.0, 4.0), (x1 + 2.0, 0.0), (w, 0.0), (w, 34.5), (0.0, 34.5)];
+            if x0 > 0.0 {
+                want.extend([(0.0, 0.0), (x0 - 2.0, 0.0), (x0 - 2.0, 4.0), (x0, 4.0), (x0, 3.0)]);
+            } else {
+                want.push((0.0, 3.0));
+            }
+            base_is(&s, &want, &what);
+            holds_the_flat_material(&s, &what);
+        }
     }
 }

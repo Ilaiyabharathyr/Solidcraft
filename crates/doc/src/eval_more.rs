@@ -775,7 +775,7 @@ pub(super) fn sheet_eval(
             st.sheets.push(sh);
             Ok(())
         }
-        FeatureKind::SheetFlange { edges, height, angle, radius, position, flip, body, corner_relief_shape, corner_relief, height_from } => {
+        FeatureKind::SheetFlange { edges, height, angle, radius, position, flip, body, corner_relief_shape, corner_relief, height_from, profile } => {
             let i = sheet_for(st, body, edges.first().map(|e| e.point.0))?;
             let (h, a) = (val(vals, height, Kind::Length)?, val(vals, angle, Kind::Angle)?);
             // Each edge's own height and angle, else the feature's.
@@ -814,12 +814,59 @@ pub(super) fn sheet_eval(
                     .ok_or_else(|| DocError::Invalid(format!("unknown flange height datum `{name}` (outer, inner or tangent)")))?,
                 None => sheet::HeightFrom::Outer,
             };
+            // The profile sketch's one closed profile, where it lies now (#3516).
+            let outline = match profile {
+                Some(sk) => {
+                    if edges.len() != 1 || edges.iter().any(|e| !e.segments.is_empty()) {
+                        return Err(DocError::Invalid("a flange from a profile sketch takes one edge, without segments".into()));
+                    }
+                    let ss = st.sketch(sk.0).ok_or_else(|| DocError::Unknown(format!("sketch {sk}")))?;
+                    // The outline is the largest profile; a circle drawn inside it is also a
+                    // profile of its own (the disc filling the hole), which is no second outline.
+                    let regions = select_profiles(ss, &ProfileSel::All)?;
+                    let area = |lp: &Loop2| lp.signed_area().abs();
+                    let main = regions
+                        .iter()
+                        .max_by(|a, b| area(&a.outer).total_cmp(&area(&b.outer)))
+                        .ok_or_else(|| DocError::Invalid("the flange's profile sketch has no closed profile".into()))?;
+                    let others = regions.iter().filter(|r| !std::ptr::eq(*r, main)).count();
+                    let fills = regions
+                        .iter()
+                        .filter(|r| !std::ptr::eq(*r, main))
+                        .filter(|r| main.holes.iter().any(|h| (area(h) - area(&r.outer)).abs() < 1e-6 * area(h).max(1.0)))
+                        .count();
+                    if fills != others {
+                        return Err(DocError::Invalid(format!(
+                            "the flange's profile sketch must hold one closed profile (holes inside it are fine), not {}",
+                            others + 1 - fills
+                        )));
+                    }
+                    Some((ss.plane, main.clone()))
+                }
+                None => None,
+            };
             let sh = st.sheets.get_mut(i).ok_or_else(|| DocError::Invalid("sheet".into()))?;
             if sh.flat {
                 return Err(DocError::Invalid("refold the sheet before adding flanges".into()));
             }
             let points: Vec<Vec3> = edges.iter().map(|e| e.point.0).collect();
             let picks = sheet_picks(sh, f, &points, warning);
+            if let Some((plane, region)) = &outline {
+                let pick = picks.first().copied().unwrap_or_default();
+                let (height, angle) = own.first().copied().unwrap_or((h, a));
+                let n0 = sh.flanges.len();
+                let (_, notes) =
+                    sh.add_profile_flange(sheet::EdgeFlange::at(pick, height, angle, from), plane, region, rr, position, *flip, relief)?;
+                if !notes.is_empty() {
+                    let notes = notes.join("; ");
+                    *warning = Some(match warning.take() {
+                        Some(w) => format!("{w}; {notes}"),
+                        None => notes,
+                    });
+                }
+                tag_flanges(sh, n0, f.id);
+                return rebuild_sheet(st, i);
+            }
             let mut each = Vec::with_capacity(edges.len());
             for (k, (e, pick)) in edges.iter().zip(picks).enumerate() {
                 let (height, angle) = own.get(k).copied().unwrap_or((h, a));
