@@ -11,7 +11,7 @@
 
 use serde_json::{Map, Value};
 use solidcore_record::Vec3;
-use solidcraft_doc::{Mat, apply_point, apply_vector, is_identity, map_point_expr, map_vector_expr, mat_inverse};
+use solidcraft_doc::{Mat, apply_point, apply_vector, is_identity, map_dir_expr, map_point_expr, map_vector_expr, mat_inverse};
 use solidcraft_geom::prelude::*;
 
 use crate::Session;
@@ -27,6 +27,9 @@ enum K {
     Make,
     /// A direction: turned with the command's frame.
     Dir,
+    /// A primitive's axis: a direction as `Dir`, or X, Y, Z or `[x, y, z]` / `{x, y, z}` with
+    /// unitless expressions (#18822), turned with the command's frame and kept as expressions.
+    PrimitiveAxis,
     /// A displacement with length expressions: turned without the frame's translation.
     Delta,
     /// A point the command's bodies move about: into the frame of those bodies (the command's
@@ -69,7 +72,7 @@ fn table(id: &str) -> &'static [(&'static str, K)] {
         // picked edge and face axes too.
         SURFACE_REVOLVE_EDIT => &[("axis", Axis)],
         "solid.box" | "solid.sphere" => &[("corner", Make), ("center", Make)],
-        "solid.cylinder" | "solid.coil" | "solid.torus" | "solid.cone" => &[("base", Make), ("center", Make), ("axis", Dir)],
+        "solid.cylinder" | "solid.coil" | "solid.torus" | "solid.cone" => &[("base", Make), ("center", Make), ("axis", PrimitiveAxis)],
         "solid.fillet" | "solid.chamfer" => &[("edges", Picks), ("body", Body)],
         "solid.hole" => &[("position", Pick), ("direction", Dir), ("body", Body)],
         "solid.scale" => &[("origin", Make), ("bodies", Body)],
@@ -949,6 +952,13 @@ fn map_local_with_input(
                 Picks => m.picks(v, body.as_deref()),
                 Make => m.make(v),
                 Dir => m.dir(v),
+                // An axis named X, Y or Z, or holding expressions (#18822), in any of the forms
+                // the command reads, turns with the frame; expressions stay expressions.
+                PrimitiveAxis => m.dir(v).or_else(|| {
+                    let frame = m.first.unwrap_or(m.f.active);
+                    let d = crate::cmd::axis_expr_form(v).ok()?;
+                    m.map_expr(&frame, &serde_json::json!(d.map(|e| e.to_string())), map_dir_expr)
+                }),
                 Delta => m.dir(v).or_else(|| {
                     let frame = m.first.unwrap_or(m.f.active);
                     m.map_expr(&frame, v, map_vector_expr)
@@ -1029,9 +1039,8 @@ fn primitive_placement(kind: &solidcraft_doc::FeatureKind, cmd: &str) -> Vec<(&'
     match (kind, cmd) {
         (Feature::Box { corner, centred, .. }, "solid.box") => vec![(if *centred { "center" } else { "corner" }, point(corner))],
         (Feature::Sphere { center, .. }, "solid.sphere") | (Feature::Torus { center, .. }, "solid.torus") => vec![("center", point(center))],
-        (Feature::Cylinder { base, axis, .. }, "solid.cylinder") | (Feature::Coil { base, axis, .. }, "solid.coil") => {
-            vec![("base", point(base)), ("axis", pt(axis.0))]
-        }
+        (Feature::Cylinder { base, axis, .. }, "solid.cylinder") => vec![("base", point(base)), ("axis", point(axis))],
+        (Feature::Coil { base, axis, .. }, "solid.coil") => vec![("base", point(base)), ("axis", pt(axis.0))],
         _ => Vec::new(),
     }
 }
