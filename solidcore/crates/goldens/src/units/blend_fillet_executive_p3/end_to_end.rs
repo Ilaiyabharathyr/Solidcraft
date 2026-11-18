@@ -2940,3 +2940,9 @@ mod g5_blend_corner_certificates {
         }
     }
 }
+
+/// WR-613 (#18640): the rows a face-sided corner patch can move, each checked against
+/// main's figures.
+#[cfg(test)]
+#[path = "wr613_certificates.rs"]
+mod wr613_certificates;
