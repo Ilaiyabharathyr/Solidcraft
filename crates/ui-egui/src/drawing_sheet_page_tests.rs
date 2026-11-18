@@ -227,6 +227,41 @@ fn pan_moves_the_sheet_and_leaves_the_design_camera() {
     assert_eq!((h.app.session.doc.to_json(), h.app.session.undo.len()), (doc, undo));
 }
 
+#[test]
+fn navigation_tools_do_not_drag_drawing_views() {
+    let (mut h, front) = plate_sheet();
+    let (cam, doc, undo) = (h.app.cam, h.app.session.doc.to_json(), h.app.session.undo.len());
+    for tool in ["pan", "zoom"] {
+        for edge in [true, false] {
+            h.call("ui.view", json!({"view": "fit"}));
+            h.frames(4);
+            let view = h.app.run("drawing.view.inspect", json!({"view": front})).unwrap();
+            let bounds = &view["boundary_mm"];
+            let point = Vec2::new(
+                if edge { number(&bounds["min"][0]) } else { (number(&bounds["min"][0]) + number(&bounds["max"][0])) / 2.0 },
+                (number(&bounds["min"][1]) + number(&bounds["max"][1])) / 2.0,
+            );
+            let at = OnScreen::of(&h.app.drawing_workspace.page.cam, h.app.viewport.rect.unwrap());
+            let from = at.screen(point);
+            let before = crate::scenario::rect_of("sheet:paper").unwrap();
+            h.app.run("view.tool", json!({"tool": tool})).unwrap();
+            h.call("ui.drag", json!({"x0": from.x, "y0": from.y, "x1": from.x + 120.0, "y1": from.y + 40.0, "steps": 8}));
+            h.frames(2);
+            let after = crate::scenario::rect_of("sheet:paper").unwrap();
+            if tool == "pan" {
+                let moved = after.min - before.min;
+                assert!((moved.x - 120.0).abs() < 2.0 && (moved.y - 40.0).abs() < 2.0, "{tool}, edge={edge}: {moved:?}");
+                assert!((after.width() - before.width()).abs() < 1e-3);
+            } else {
+                assert!((after.width() - before.width()).abs() > 1.0, "{tool}, edge={edge}: the sheet did not zoom");
+            }
+            assert_eq!(h.app.run("drawing.view.inspect", json!({"view": front})).unwrap(), view);
+            assert_eq!((h.app.session.doc.to_json(), h.app.session.undo.len()), (doc.clone(), undo));
+            assert_eq!(h.app.cam, cam);
+        }
+    }
+}
+
 /// Each sheet colour is drawn in its tokens, standing off the backdrop, and is screen only: the
 /// design, its undo steps and the exported SVG are the same bytes under every one.
 #[test]

@@ -45,7 +45,8 @@ fn origin(app: &SolveApp, response: &egui::Response, at: OnScreen, objects: &[Sh
 }
 
 pub(super) fn owns_drag(app: &SolveApp, response: &egui::Response, at: OnScreen, objects: &[SheetObject]) -> bool {
-    !drawing_workspace::placing_view(app)
+    app.viewport.nav.is_none()
+        && !drawing_workspace::placing_view(app)
         && !drawing_workspace::placing_note(app)
         && !drawing_workspace::placing_dimension(app)
         && (app.drawing_workspace.page.view_tools.drag.is_some()
@@ -74,7 +75,7 @@ impl Canvas<'_> {
     pub(super) fn show(self, app: &mut SolveApp, ui: &mut egui::Ui, placing: bool) {
         let mut state = std::mem::take(&mut app.drawing_workspace.page.view_tools);
         state.selected = state.selected.filter(|id| self.drawing.view(*id).is_some_and(|view| view.sheet == self.sheet));
-        if placing {
+        if placing || app.viewport.nav.is_some() {
             state.drag = None;
         } else if self.response.drag_started_by(PointerButton::Primary)
             && let Some((view, pointer)) = origin(app, self.response, self.at, self.objects)
